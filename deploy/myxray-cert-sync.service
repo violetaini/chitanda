@@ -1,0 +1,6 @@
+[Unit]
+Description=Synchronize renewed TLS certificate for MyXray
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/myxray-sync-cert
