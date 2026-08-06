@@ -126,3 +126,26 @@ V2 提供与 TCP 载体并列的原生 UDP 路径，不经过 TCP，不发生 TC
 V1 默认路线是：**真实 TLS 1.3 + HTTP/2 外层，私有会话层和动态画像内置，热连接提供 0-RTT；Raw TCP/Noise 作为备用。**
 
 V2 理想路线是：**通过预置的一次性 TLS 票据和签名预密钥实现首次连接 `OPEN + DATA` 0-RTT、最多一次执行和使用后的前向保密；通过真实 HTTP/3 + QUIC DATAGRAM/CONNECT-UDP 提供无 TCP 队头阻塞的原生 UDP，并支持无感回退 H2。**
+
+## 9. 当前实现状态（2026-08-06）
+
+### 已实现并实测
+
+- TLS 1.3 + HTTP/2 私有载体，服务端对普通 TLS 1.2/HTTP/1.1 请求提供网站回落。
+- 私有请求使用 HMAC、时间窗口、随机 nonce 和持久化 replay 日志；nonce 在 `fsync` 成功前不会连接上游，服务重启后仍拒绝同一 nonce。
+- SOCKS5 TCP 代理、热 HTTP/2 连接复用、TCP 半关闭、目标地址校验和私有请求头剥离。
+- 客户端单流 HTTP/2 接收窗口固定为 16 MiB，服务端接收窗口为 64 MiB/连接、16 MiB/流；该参数由 vendored `x/net/http2` 构建脚本固定并有设置帧测试。
+- 建流遭遇陈旧 HTTP/2 连接时进行一次有界重试，重试发生在任何应用字节发送前。
+
+### 已测但不应当宣称为保证
+
+- 168 到 170 的单个 SOCKS 会话：1 GiB 下载实测最高约 983 Mbps，64 MiB 上传实测最高约 805 Mbps；结果受该两点之间的路径和 origin 实现影响。
+- 500 个并发短流全部成功，单条客户端到服务端 TCP/TLS 连接保持复用。
+- 热连接小请求 P95 约 0.206 秒；重启恢复修复后没有观察到建流失败，但会有一次约 0.5 秒级的恢复抖动。
+- 这些数据不能推出对 GFW、傲盾或任何分类器的不可识别性。
+
+### 尚未实现
+
+- 首次连接 TLS Early Data/一次性预密钥 0-RTT、跨节点强一致消费和由此产生的前向保密验收。
+- 私有 `OPEN/DATA/WINDOW_UPDATE/DATAGRAM` 帧层；当前仍是一条 SOCKS TCP 流对应一条 HTTP/2 请求流。
+- 原生 UDP、QUIC/HTTP/3 DATAGRAM、NAT rebinding、UDP 回退、Raw TCP/Noise、动态流量画像和自动重密钥。

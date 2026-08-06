@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -22,13 +23,67 @@ func TestSignatureVerification(t *testing.T) {
 func TestReplayCache(t *testing.T) {
 	cache := NewReplayCache()
 	now := time.Unix(1_700_000_000, 0)
-	if !cache.Accept("nonce", now) {
+	if accepted, err := cache.Accept("nonce", now); err != nil || !accepted {
 		t.Fatal("first nonce rejected")
 	}
-	if cache.Accept("nonce", now) {
+	if accepted, err := cache.Accept("nonce", now); err != nil || accepted {
 		t.Fatal("replayed nonce accepted")
 	}
-	if !cache.Accept("nonce", now.Add(4*MaxClockSkew)) {
+	if accepted, err := cache.Accept("nonce", now.Add(4*MaxClockSkew)); err != nil || !accepted {
 		t.Fatal("expired nonce was not removed")
+	}
+}
+
+func TestReplayCacheSurvivesRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "replay.log")
+	now := time.Unix(1_700_000_000, 0)
+	cache, err := OpenReplayCache(path, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if accepted, err := cache.Accept("persistent-nonce", now); err != nil || !accepted {
+		t.Fatalf("first nonce: accepted=%v err=%v", accepted, err)
+	}
+	if err := cache.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := OpenReplayCache(path, now.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if accepted, err := reopened.Accept("persistent-nonce", now.Add(time.Second)); err != nil || accepted {
+		t.Fatalf("replayed nonce after restart: accepted=%v err=%v", accepted, err)
+	}
+}
+
+func TestReplayCacheCompactionPreservesActiveNonces(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "replay.log")
+	now := time.Unix(1_700_000_000, 0)
+	cache, err := OpenReplayCache(path, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if accepted, err := cache.Accept("before-compaction", now); err != nil || !accepted {
+		t.Fatalf("first nonce: accepted=%v err=%v", accepted, err)
+	}
+	cache.writesSince = replayCompactAfter
+	if accepted, err := cache.Accept("after-compaction", now.Add(time.Second)); err != nil || !accepted {
+		t.Fatalf("second nonce: accepted=%v err=%v", accepted, err)
+	}
+	if err := cache.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := OpenReplayCache(path, now.Add(2*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	for _, nonce := range []string{"before-compaction", "after-compaction"} {
+		if accepted, err := reopened.Accept(nonce, now.Add(2*time.Second)); err != nil || accepted {
+			t.Fatalf("nonce %q after compaction: accepted=%v err=%v", nonce, accepted, err)
+		}
 	}
 }

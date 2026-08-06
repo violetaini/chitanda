@@ -11,6 +11,21 @@ import (
 
 var ErrForbidden = errors.New("target is not a public unicast address")
 
+var specialUseNetworks = mustNetworks(
+	"0.0.0.0/8",
+	"100.64.0.0/10",
+	"192.0.0.0/24",
+	"192.0.2.0/24",
+	"192.88.99.0/24",
+	"198.18.0.0/15",
+	"198.51.100.0/24",
+	"203.0.113.0/24",
+	"240.0.0.0/4",
+	"100::/64",
+	"2001:2::/48",
+	"2001:db8::/32",
+)
+
 func DialContext(ctx context.Context, address string) (net.Conn, error) {
 	host, portText, err := net.SplitHostPort(address)
 	if err != nil {
@@ -44,11 +59,32 @@ func DialContext(ctx context.Context, address string) (net.Conn, error) {
 }
 
 func allowed(ip net.IP) bool {
-	return ip != nil &&
-		!ip.IsUnspecified() &&
-		!ip.IsLoopback() &&
-		!ip.IsPrivate() &&
-		!ip.IsLinkLocalUnicast() &&
-		!ip.IsLinkLocalMulticast() &&
-		!ip.IsMulticast()
+	if ip == nil ||
+		!ip.IsGlobalUnicast() ||
+		ip.IsPrivate() ||
+		ip.IsUnspecified() ||
+		ip.IsLoopback() ||
+		ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() ||
+		ip.IsMulticast() {
+		return false
+	}
+	for _, network := range specialUseNetworks {
+		if network.Contains(ip) {
+			return false
+		}
+	}
+	return true
+}
+
+func mustNetworks(values ...string) []*net.IPNet {
+	networks := make([]*net.IPNet, 0, len(values))
+	for _, value := range values {
+		_, network, err := net.ParseCIDR(value)
+		if err != nil {
+			panic(err)
+		}
+		networks = append(networks, network)
+	}
+	return networks
 }

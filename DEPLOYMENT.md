@@ -32,3 +32,25 @@ The deployment test was run with TUN disabled. Before enabling TUN again, route 
 - Five simultaneous SOCKS requests all returned HTTP 200 over one client-to-server TCP connection.
 
 This is the V1 prototype. Native UDP, QUIC/HTTP/3, V2 one-time prekeys and first-connection 0-RTT are not implemented yet. These results prove deployment and multiplexing, not resistance to GFW classification.
+
+## Isolated performance environment (2026-08-06)
+
+- Service test node: `170.9.59.149:11322` (`myxray-test-replay-170`)
+- Client test node: `168.138.209.1:22080` (`myxray-test-client-168`)
+- Test origin ports on the service node: `18080`, `18081`, and temporary half-close origin `18083`
+- The 154.12.176.212 host was not used for this deployment and has no MyXray test files or service.
+- The client node has `chrony` enabled because it initially had no time synchronisation service.
+
+Measured between the two test nodes, whose raw RTT was about 100 ms and iperf3 throughput about 1.3–1.5 Gbps:
+
+| Test | Result |
+| --- | --- |
+| Single-session 1 GiB download | 122.87 MB/s, about 983 Mbps, one TCP/TLS/H2 connection |
+| Single-session 64 MiB upload | 48–91 MB/s across three runs, HTTP 204 |
+| Hot-connection 30-request P95 | 0.206 s after durable replay logging |
+| Concurrent short streams | 500/500 successful at concurrency 50, one physical connection |
+| TCP half-close | 1 MiB and SHA-256 matched exactly |
+| Replay inside process | First request 200, exact replay 404 |
+| Replay after server restart | Exact replay remained 404 |
+
+The 16 MiB HTTP/2 stream window is intentionally a build-time vendored change. It removes the default 4 MiB long-haul throughput ceiling while leaving TLS and HTTP/2 framing in mature libraries. It is still a visible HTTP/2 setting to a completed active HTTPS probe, so it is a performance/fingerprint tradeoff, not an anti-classification guarantee. See `TEST_REPORT.md` for the full evidence and remaining gaps.

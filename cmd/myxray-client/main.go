@@ -20,6 +20,8 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/net/http2"
+
 	"myxray/internal/auth"
 )
 
@@ -66,6 +68,12 @@ func main() {
 			return dialer.DialContext(ctx, network, *serverAddress)
 		},
 	}
+	h2Transport, err := http2.ConfigureTransports(transport)
+	if err != nil {
+		log.Fatalf("configure HTTP/2 transport: %v", err)
+	}
+	h2Transport.ReadIdleTimeout = 45 * time.Second
+	h2Transport.PingTimeout = 15 * time.Second
 	c := &client{
 		psk:        psk,
 		path:       path,
@@ -141,6 +149,21 @@ func (c *client) handleSOCKS(conn net.Conn) {
 }
 
 func (c *client) openStream(target string) (*http.Response, *io.PipeWriter, error) {
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		if attempt > 0 {
+			time.Sleep(100 * time.Millisecond)
+		}
+		response, writer, err := c.openStreamOnce(target)
+		if err == nil {
+			return response, writer, nil
+		}
+		lastErr = err
+	}
+	return nil, nil, lastErr
+}
+
+func (c *client) openStreamOnce(target string) (*http.Response, *io.PipeWriter, error) {
 	reader, writer := io.Pipe()
 	request, err := http.NewRequest(http.MethodPost, c.requestURL, reader)
 	if err != nil {

@@ -17,6 +17,8 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/net/http2"
+
 	"myxray/internal/auth"
 	"myxray/internal/target"
 )
@@ -26,6 +28,9 @@ const (
 	headerTimestamp = "X-Session-Time"
 	headerNonce     = "X-Session-Nonce"
 	headerSignature = "X-Session-Auth"
+
+	h2ConnectionReceiveWindow = 64 << 20
+	h2StreamReceiveWindow     = 16 << 20
 )
 
 type server struct {
@@ -43,6 +48,7 @@ func main() {
 	pskFile := flag.String("psk-file", "", "hex or base64url PSK file")
 	privatePath := flag.String("path", "", "private HTTP path")
 	pathFile := flag.String("path-file", "", "file containing the private HTTP path")
+	replayFile := flag.String("replay-file", "/var/lib/myxray/replay.log", "durable replay cache file")
 	fallbackURL := flag.String("fallback", "https://127.0.0.1:443", "normal HTTPS fallback")
 	fallbackServerName := flag.String("fallback-server-name", "probe.chitanda.org", "fallback TLS server name")
 	flag.Parse()
@@ -59,17 +65,26 @@ func main() {
 	if err != nil {
 		log.Fatalf("configure fallback: %v", err)
 	}
+	replays, err := auth.OpenReplayCache(*replayFile, time.Now())
+	if err != nil {
+		log.Fatalf("open replay cache: %v", err)
+	}
+	defer replays.Close()
 
-	app := &server{path: path, psk: psk, replays: auth.NewReplayCache(), fallback: fallback}
+	app := &server{path: path, psk: psk, replays: replays, fallback: fallback}
 	public := &http.Server{
 		Addr:              *listen,
 		Handler:           app,
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       3 * time.Minute,
-		TLSConfig: &tls.Config{
-			MinVersion: tls.VersionTLS13,
-			NextProtos: []string{"h2", "http/1.1"},
-		},
+		TLSConfig:         newTLSConfig(),
+	}
+	if err := http2.ConfigureServer(public, &http2.Server{
+		MaxUploadBufferPerConnection: h2ConnectionReceiveWindow,
+		MaxUploadBufferPerStream:     h2StreamReceiveWindow,
+		IdleTimeout:                  3 * time.Minute,
+	}); err != nil {
+		log.Fatalf("configure HTTP/2 server: %v", err)
 	}
 	admin := &http.Server{Addr: *adminListen, Handler: healthHandler(), ReadHeaderTimeout: 2 * time.Second}
 
@@ -96,16 +111,23 @@ func main() {
 
 func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != s.path || r.Method != http.MethodPost || r.ProtoMajor != 2 {
-		s.fallback.ServeHTTP(w, r)
+		s.serveFallback(w, r)
 		return
 	}
 	targetAddress := r.Header.Get(headerTarget)
 	timestamp := r.Header.Get(headerTimestamp)
 	nonce := r.Header.Get(headerNonce)
 	signature := r.Header.Get(headerSignature)
-	if !auth.Verify(s.psk, r.Method, r.URL.Path, targetAddress, timestamp, nonce, signature, time.Now()) ||
-		!s.replays.Accept(nonce, time.Now()) {
-		s.fallback.ServeHTTP(w, r)
+	if !auth.Verify(s.psk, r.Method, r.URL.Path, targetAddress, timestamp, nonce, signature, time.Now()) {
+		s.serveFallback(w, r)
+		return
+	}
+	accepted, err := s.replays.Accept(nonce, time.Now())
+	if err != nil {
+		log.Printf("replay cache unavailable")
+	}
+	if !accepted || err != nil {
+		s.serveFallback(w, r)
 		return
 	}
 
@@ -133,6 +155,14 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_, _ = io.Copy(flushWriter{w: w}, upstream)
 }
 
+func (s *server) serveFallback(w http.ResponseWriter, r *http.Request) {
+	r.Header.Del(headerTarget)
+	r.Header.Del(headerTimestamp)
+	r.Header.Del(headerNonce)
+	r.Header.Del(headerSignature)
+	s.fallback.ServeHTTP(w, r)
+}
+
 type flushWriter struct {
 	w http.ResponseWriter
 }
@@ -156,6 +186,13 @@ func newFallback(rawURL, serverName string) (http.Handler, error) {
 		http.NotFound(w, nil)
 	}
 	return proxy, nil
+}
+
+func newTLSConfig() *tls.Config {
+	return &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		NextProtos: []string{"h2", "http/1.1"},
+	}
 }
 
 func healthHandler() http.Handler {

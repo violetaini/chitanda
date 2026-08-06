@@ -16,10 +16,12 @@ This is not the final wire protocol. V2 one-time prekeys, HTTP/3, QUIC DATAGRAM,
 ## Build
 
 ```sh
-go test ./...
-go build -o bin/myxray-server ./cmd/myxray-server
-GOOS=windows GOARCH=amd64 go build -o bin/myxray-client.exe ./cmd/myxray-client
+go test -mod=vendor ./...
+go build -mod=vendor -o bin/myxray-server ./cmd/myxray-server
+GOOS=windows GOARCH=amd64 go build -mod=vendor -o bin/myxray-client.exe ./cmd/myxray-client
 ```
+
+The client uses a vendored HTTP/2 transport with a fixed 16 MiB receive window to avoid a bandwidth-delay-product ceiling on long-haul links. When updating dependencies, run `scripts/prepare-vendor.sh`; a plain `go mod vendor` restores the upstream 4 MiB default and invalidates the throughput test.
 
 ## Client
 
