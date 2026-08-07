@@ -127,7 +127,7 @@ V1 默认路线是：**真实 TLS 1.3 + HTTP/2 外层，私有会话层和动态
 
 V2 理想路线是：**通过预置的一次性 TLS 票据和签名预密钥实现首次连接 `OPEN + DATA` 0-RTT、最多一次执行和使用后的前向保密；通过真实 HTTP/3 + QUIC DATAGRAM/CONNECT-UDP 提供无 TCP 队头阻塞的原生 UDP，并支持无感回退 H2。**
 
-## 9. 当前实现状态（2026-08-06）
+## 9. 当前实现状态（2026-08-07）
 
 ### 已实现并实测
 
@@ -136,16 +136,26 @@ V2 理想路线是：**通过预置的一次性 TLS 票据和签名预密钥实�
 - SOCKS5 TCP 代理、热 HTTP/2 连接复用、TCP 半关闭、目标地址校验和私有请求头剥离。
 - 客户端单流 HTTP/2 接收窗口固定为 16 MiB，服务端接收窗口为 64 MiB/连接、16 MiB/流；该参数由 vendored `x/net/http2` 构建脚本固定并有设置帧测试。
 - 建流遭遇陈旧 HTTP/2 连接时进行一次有界重试，重试发生在任何应用字节发送前。
+- V2 使用真实 HTTP/3 + QUIC；私有帧层已实现 `OPEN`、`OPEN_ACK`、`DATA`、`HALF_CLOSE`、`RESET` 和 `WINDOW_UPDATE` 编解码，TCP 半关闭已接入实际转发。
+- V2 客户端持久化 TLS 1.3 session ticket，首个应用请求可将请求头、`OPEN` 和首批 `DATA` 作为 0-RTT Early Data 发送；陈旧票据会清除并回退完整握手。
+- V2 服务端使用持久化 TLS ticket key 和请求 replay 日志，服务端与客户端均重启后实测 `used_0rtt=true`、`early_accepted=true`。
+- SOCKS5 UDP ASSOCIATE 已通过 extended CONNECT + HTTP Datagram + QUIC DATAGRAM 原生承载；每个数据报有私有版本、序号、目标地址和 2,048 包滑动重放窗口，不经过 TCP。
+- UDP 目标同样拒绝本机、内网、链路本地、组播、广播及其他特殊地址；单个 association 最多缓存 64 个公网目标。
 
 ### 已测但不应当宣称为保证
 
 - 168 到 170 的单个 SOCKS 会话：1 GiB 下载实测最高约 983 Mbps，当前 16 MiB 窗口版本的 64 MiB 上传实测最高约 726 Mbps；结果受该两点之间的路径和 origin 实现影响。
 - 500 个并发短流全部成功，单条客户端到服务端 TCP/TLS 连接保持复用。
 - 热连接小请求 P95 约 0.206 秒；重启恢复修复后没有观察到建流失败，但会有一次约 0.5 秒级的恢复抖动。
+- 同一约 100 ms RTT 路径的单 TCP 流 iperf3：直连下载约 1.68 Gbps，V1/H2 约 723 Mbps，V2/H3 约 392 Mbps；V2 当前没有达到“速率最优”，主要瓶颈是该 ARM64 双核虚拟机上的用户态 QUIC/UDP 路径。
+- V2 原生 UDP 使用 1,000 字节载荷：热连接 50 Mbps 输入时实收 49.2 Mbps、丢包 0.5%、抖动 0.158 ms；100 Mbps 输入时实收约 89.9 Mbps、丢包 9.1%；150 Mbps 输入时峰值约 92.9 Mbps、丢包 37%。当前建议工作档约 50 Mbps，而不是把 93 Mbps 饱和值当作可用速率。
+- 反向热连接 50 Mbps 实收 50.0 Mbps、丢包 0.011%；100 Mbps 实收 98.8 Mbps、丢包 1.2%。冷启动首秒可能因 QUIC 拥塞窗口尚未增长而出现额外丢包。
 - 这些数据不能推出对 GFW、傲盾或任何分类器的不可识别性。
 
 ### 尚未实现
 
-- 首次连接 TLS Early Data/一次性预密钥 0-RTT、跨节点强一致消费和由此产生的前向保密验收。
-- 私有 `OPEN/DATA/WINDOW_UPDATE/DATAGRAM` 帧层；当前仍是一条 SOCKS TCP 流对应一条 HTTP/2 请求流。
-- 原生 UDP、QUIC/HTTP/3 DATAGRAM、NAT rebinding、UDP 回退、Raw TCP/Noise、动态流量画像和自动重密钥。
+- 从未联系服务端且未预置票据的“第一次网络连接”无法直接使用 TLS 0-RTT；安装包预置一次性票据/预密钥、跨节点强一致消费和早期数据前向保密仍未实现。
+- 当前早期数据只有 TLS 1.3 PSK 保护；事后泄露 ticket key 时不能宣称历史 0-RTT 数据具备前向保密。0-RTT 也只能保证服务端防重复执行，不能保证网络中的恰好一次交付。
+- QUIC DATAGRAM 只能在握手确认后使用，当前 UDP association 不是 0-RTT；UDP-over-H2 自动回退、NAT rebinding/连接迁移验收、按应用 FEC 均未实现。
+- `WINDOW_UPDATE` 帧类型已定义但流控仍由 QUIC 原生机制承担；应用优先级、自动重密钥、Raw TCP/Noise 和动态流量画像尚未实现。
+- 尚未采集足够的 GFW/傲盾真实流量样本做盲测，不能声称当前 HTTP/3/QUIC 画像无法识别或稳定抗封锁；QUIC 可能被直接限速或封锁，V1/H2 仍是必要回退。

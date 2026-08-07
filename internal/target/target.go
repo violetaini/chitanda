@@ -27,17 +27,7 @@ var specialUseNetworks = mustNetworks(
 )
 
 func DialContext(ctx context.Context, address string) (net.Conn, error) {
-	host, portText, err := net.SplitHostPort(address)
-	if err != nil {
-		return nil, fmt.Errorf("invalid target: %w", err)
-	}
-	port, err := strconv.Atoi(portText)
-	if err != nil || port < 1 || port > 65535 {
-		return nil, errors.New("invalid target port")
-	}
-
-	resolver := net.Resolver{}
-	addresses, err := resolver.LookupIPAddr(ctx, host)
+	_, portText, addresses, err := resolve(ctx, address)
 	if err != nil {
 		return nil, err
 	}
@@ -56,6 +46,37 @@ func DialContext(ctx context.Context, address string) (net.Conn, error) {
 		return nil, err
 	}
 	return nil, ErrForbidden
+}
+
+func ResolveUDPAddr(ctx context.Context, address string) (*net.UDPAddr, error) {
+	_, portText, addresses, err := resolve(ctx, address)
+	if err != nil {
+		return nil, err
+	}
+	port, _ := strconv.Atoi(portText)
+	for _, candidate := range addresses {
+		if allowed(candidate.IP) {
+			return &net.UDPAddr{IP: candidate.IP, Port: port, Zone: candidate.Zone}, nil
+		}
+	}
+	return nil, ErrForbidden
+}
+
+func resolve(ctx context.Context, address string) (string, string, []net.IPAddr, error) {
+	host, portText, err := net.SplitHostPort(address)
+	if err != nil {
+		return "", "", nil, fmt.Errorf("invalid target: %w", err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil || port < 1 || port > 65535 {
+		return "", "", nil, errors.New("invalid target port")
+	}
+	resolver := net.Resolver{}
+	addresses, err := resolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return "", "", nil, err
+	}
+	return host, portText, addresses, nil
 }
 
 func allowed(ip net.IP) bool {

@@ -1,6 +1,6 @@
 # Deployment status
 
-## Active endpoint
+## V1 endpoint
 
 - Server: `23.145.248.44:11322`
 - TLS name: `probe.chitanda.org`
@@ -40,6 +40,15 @@ This is the V1 prototype. Native UDP, QUIC/HTTP/3, V2 one-time prekeys and first
 - Test origin ports on the service node: `18080`, `18081`, and temporary half-close origin `18083`
 - The 154.12.176.212 host was not used for this deployment and has no MyXray test files or service.
 - The client node has `chrony` enabled because it initially had no time synchronisation service.
+
+### Active V2 test services (verified 2026-08-07)
+
+- Server: `170.9.59.149:11322` over both TCP/H2 and UDP/H3; V2 service `myxray-test-v2-170`.
+- Client: `168.138.209.1`, V2 SOCKS5 TCP/UDP listener `127.0.0.1:22081`; service `myxray-test-v2-client-168`.
+- TLS name: `status.chitanda.org`; server ticket key and client session cache persist across service restarts.
+- The first application request after restarting both services used accepted TLS 1.3 0-RTT and returned HTTP 200.
+- Native UDP was verified through SOCKS UDP ASSOCIATE. Warm 50 Mbps testing received 49.2 Mbps with 0.5% loss; forward saturation was about 93 Mbps with unacceptable loss above the stable range.
+- Temporary benchmark bridges were stopped after testing. The production Nginx/Xray listeners and the former `154.12.176.212` host were not modified.
 
 Measured between the two test nodes, whose raw RTT was about 100 ms and iperf3 throughput about 1.3–1.5 Gbps:
 

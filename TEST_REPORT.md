@@ -1,6 +1,6 @@
-# MyXray V1 test report
+# MyXray V1/V2 test report
 
-Date: 2026-08-06 (Asia/Shanghai)
+Date: 2026-08-07 (Asia/Shanghai)
 
 ## Scope
 
@@ -42,10 +42,47 @@ The replay cache now appends `expiry + nonce`, calls `fsync`, then permits the a
 
 This is a single-node durable cache. It is not yet a multi-node strongly consistent consume record, so it does not satisfy the V2 multi-node 0-RTT requirement.
 
-## Not implemented or not proven
+## V2 HTTP/3 and 0-RTT
 
-- First-connection TLS Early Data with one-time prekeys, crash-safe at-most-once execution and forward secrecy for early data.
-- A private application frame layer with independent stream windows, priority, rekeying and DATAGRAM frames. V1 still maps one SOCKS TCP flow to one HTTP/2 request stream.
-- Native UDP over QUIC/HTTP/3, NAT rebinding, loss/jitter comparison and H2 fallback for UDP.
-- Raw TCP/Noise carrier, dynamic traffic-shape rotation, classifier separation against GFW or 傲盾, and any claim of undetectability.
-- The 16 MiB HTTP/2 setting is encrypted on the wire but visible to a probe that completes TLS and inspects HTTP/2 SETTINGS. Its classification tradeoff needs a separate corpus-based measurement.
+V2 was deployed on the same two nodes using TCP and UDP port `11322` on the server and SOCKS5 TCP/UDP port `22081` on the client. It uses HTTP/3 request streams for TCP and extended CONNECT plus HTTP Datagrams for UDP. V1/H2 remained active as a separate fallback during testing.
+
+- The private frame layer round-tripped `OPEN`, `OPEN_ACK`, `DATA`, `HALF_CLOSE`, and reset semantics; one HTTP/3 request stream carries one proxied TCP flow while one QUIC connection multiplexes request streams.
+- The persistent TLS session cache, persistent server ticket key, and stale-ticket recovery passed unit and live restart tests.
+- After restarting both server and client, the first application request returned HTTP 200 in 0.354 s and logged `used_0rtt=true` and `early_accepted=true`.
+- This result requires a previously provisioned TLS ticket. It is not a never-contacted first-ever TLS connection, and early data does not yet have the planned one-time-prekey forward secrecy.
+
+Single TCP stream measurements on the roughly 100 ms path:
+
+| Path | Download | Upload |
+| --- | ---: | ---: |
+| Direct iperf3 | about 1.68 Gbps | about 1.32 Gbps |
+| V1 TLS/H2 | about 723 Mbps | about 1.01 Gbps |
+| V2 HTTP/3 | about 392 Mbps | about 388 Mbps |
+
+Increasing V2 QUIC flow-control windows to 32 MiB/stream and 64 MiB/connection did not materially change the roughly 400 Mbps result. The current V2 single-stream implementation is therefore functional but not throughput-optimal on these two-vCPU ARM64 nodes.
+
+## V2 native UDP
+
+The first apparent 1 Mbps ceiling was invalid: the temporary benchmark bridge allowed the SOCKS TCP control connection to become unreachable and garbage-collected after about five seconds, terminating its UDP association. Holding the control connection for the association lifetime removed that artifact.
+
+Valid forward tests used 1,000-byte iperf3 payloads over SOCKS UDP ASSOCIATE and a private HTTP Datagram envelope. QUIC datagrams remain unreliable by design.
+
+| Offered rate | Received rate | Loss | Jitter |
+| ---: | ---: | ---: | ---: |
+| 20 Mbps | 19.8 Mbps | 0% | 0.069 ms |
+| 50 Mbps, warm | 49.2 Mbps | 0.5% | 0.158 ms |
+| 75 Mbps | 73.3 Mbps | 1.3% | 0.108 ms |
+| 100 Mbps | 89.9 Mbps | 9.1% | 0.085 ms |
+| 150 Mbps | 92.9 Mbps | 37% | 0.096 ms |
+
+Warm reverse tests reached 50.0 Mbps with 0.011% loss and 98.8 Mbps with 1.2% loss. A fresh reverse association lost more traffic during the first congestion-window ramp. The defensible current conclusion is about 93 Mbps forward saturation, with roughly 50 Mbps as the stable low-loss operating point on this specific path and hardware.
+
+The Datagram receive queue and private replay window are both 2,048 entries. Raising the replay window reduced false-replay risk under reordering but did not remove the CPU/packet-rate saturation point.
+
+## Remaining gaps
+
+- Never-contacted first-ever 0-RTT with provisioned one-time prekeys, crash-safe multi-node at-most-once consumption, and forward secrecy for early data.
+- UDP-over-H2 fallback, verified NAT rebinding/connection migration, application-selectable FEC, and 0-RTT UDP. HTTP Datagrams are sent only after the handshake.
+- Application priority and rekeying; `WINDOW_UPDATE` is reserved while QUIC currently provides active flow control.
+- Raw TCP/Noise carrier, dynamic traffic-shape rotation, and blind classifier separation against GFW or 傲盾.
+- Any claim of undetectability. HTTP/2 settings and HTTP/3/QUIC behavior remain observable to active endpoints, and QUIC can be blocked independently of payload classification.

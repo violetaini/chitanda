@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -17,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/quic-go/quic-go/http3"
 	"golang.org/x/net/http2"
 
 	"myxray/internal/auth"
@@ -49,6 +51,8 @@ func main() {
 	privatePath := flag.String("path", "", "private HTTP path")
 	pathFile := flag.String("path-file", "", "file containing the private HTTP path")
 	replayFile := flag.String("replay-file", "/var/lib/myxray/replay.log", "durable replay cache file")
+	quicListen := flag.String("quic-listen", "", "optional HTTP/3 UDP listen address")
+	ticketKeyFile := flag.String("ticket-key-file", "", "32-byte hex or base64url HTTP/3 ticket key")
 	fallbackURL := flag.String("fallback", "https://127.0.0.1:443", "normal HTTPS fallback")
 	fallbackServerName := flag.String("fallback-server-name", "probe.chitanda.org", "fallback TLS server name")
 	flag.Parse()
@@ -87,12 +91,30 @@ func main() {
 		log.Fatalf("configure HTTP/2 server: %v", err)
 	}
 	admin := &http.Server{Addr: *adminListen, Handler: healthHandler(), ReadHeaderTimeout: 2 * time.Second}
+	var h3Server *http3.Server
+	if *quicListen != "" {
+		if *ticketKeyFile == "" {
+			log.Fatal("ticket-key-file is required when quic-listen is enabled")
+		}
+		h3Server, err = newHTTP3Server(*quicListen, app, *ticketKeyFile, *certFile, *keyFile)
+		if err != nil {
+			log.Fatalf("configure HTTP/3 server: %v", err)
+		}
+	}
 
 	go func() {
 		if err := admin.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("admin server: %v", err)
 		}
 	}()
+	if h3Server != nil {
+		go func() {
+			log.Printf("public HTTP/3 listener started on %s", *quicListen)
+			if err := h3Server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Fatalf("HTTP/3 server: %v", err)
+			}
+		}()
+	}
 	go func() {
 		log.Printf("public TLS listener started on %s", *listen)
 		if err := public.ListenAndServeTLS(*certFile, *keyFile); err != nil && err != http.ErrServerClosed {
@@ -107,9 +129,16 @@ func main() {
 	defer cancel()
 	_ = public.Shutdown(ctx)
 	_ = admin.Shutdown(ctx)
+	if h3Server != nil {
+		_ = h3Server.Shutdown(ctx)
+	}
 }
 
 func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.ProtoMajor == 3 {
+		s.serveHTTP3(w, r)
+		return
+	}
 	if r.URL.Path != s.path || r.Method != http.MethodPost || r.ProtoMajor != 2 {
 		s.serveFallback(w, r)
 		return
@@ -118,15 +147,7 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	timestamp := r.Header.Get(headerTimestamp)
 	nonce := r.Header.Get(headerNonce)
 	signature := r.Header.Get(headerSignature)
-	if !auth.Verify(s.psk, r.Method, r.URL.Path, targetAddress, timestamp, nonce, signature, time.Now()) {
-		s.serveFallback(w, r)
-		return
-	}
-	accepted, err := s.replays.Accept(nonce, time.Now())
-	if err != nil {
-		log.Printf("replay cache unavailable")
-	}
-	if !accepted || err != nil {
+	if !s.authorize(r, targetAddress, timestamp, nonce, signature) {
 		s.serveFallback(w, r)
 		return
 	}
@@ -153,6 +174,18 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 	_, _ = io.Copy(flushWriter{w: w}, upstream)
+}
+
+func (s *server) authorize(r *http.Request, targetAddress, timestamp, nonce, signature string) bool {
+	now := time.Now()
+	if !auth.Verify(s.psk, r.Method, r.URL.Path, targetAddress, timestamp, nonce, signature, now) {
+		return false
+	}
+	accepted, err := s.replays.Accept(nonce, now)
+	if err != nil {
+		log.Printf("replay cache unavailable")
+	}
+	return accepted && err == nil
 }
 
 func (s *server) serveFallback(w http.ResponseWriter, r *http.Request) {

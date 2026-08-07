@@ -1,17 +1,18 @@
 # MyXray protocol prototype
 
-This repository contains the first deployable prototype of the protocol described in `PLAN.md`.
+This repository contains the V1 and V2 deployable prototypes described in `PLAN.md`.
 
 ## Current scope
 
-- Real TLS 1.3 with HTTP/2 transport.
-- One HTTP/2 stream per proxied TCP connection.
+- V1 real TLS 1.3 + HTTP/2 transport and V2 real HTTP/3 + QUIC transport.
+- A private V2 frame layer with `OPEN`, `OPEN_ACK`, `DATA`, `HALF_CLOSE`, `RESET`, and `WINDOW_UPDATE` frame types.
 - HMAC authentication with timestamp and replay cache.
-- SOCKS5 client with a prewarmed HTTP/2 connection.
+- Persistent TLS 1.3 session tickets and optimistic first application data over 0-RTT after ticket provisioning.
+- SOCKS5 TCP plus native UDP ASSOCIATE over extended CONNECT and HTTP Datagrams.
 - Normal HTTPS fallback for unauthenticated requests.
 - Public-target validation to prevent access to loopback and private networks.
 
-This is not the final wire protocol. V2 one-time prekeys, HTTP/3, QUIC DATAGRAM, traffic-shape rotation and native UDP are not implemented yet.
+This is not the final wire protocol. Never-contacted first-ever 0-RTT, one-time prekeys, early-data forward secrecy, UDP-over-H2 fallback, automatic path migration, traffic-shape rotation, and classifier-resistance validation are not implemented yet.
 
 ## Build
 
@@ -19,9 +20,10 @@ This is not the final wire protocol. V2 one-time prekeys, HTTP/3, QUIC DATAGRAM,
 go test -mod=vendor ./...
 go build -mod=vendor -o bin/myxray-server ./cmd/myxray-server
 GOOS=windows GOARCH=amd64 go build -mod=vendor -o bin/myxray-client.exe ./cmd/myxray-client
+GOOS=linux GOARCH=arm64 go build -mod=vendor -o bin/myxray-v2-client ./cmd/myxray-v2-client
 ```
 
-The client uses a vendored HTTP/2 transport with a fixed 16 MiB receive window to avoid a bandwidth-delay-product ceiling on long-haul links. When updating dependencies, run `scripts/prepare-vendor.sh`; a plain `go mod vendor` restores the upstream 4 MiB default and invalidates the throughput test.
+V1 uses a vendored HTTP/2 transport with a fixed 16 MiB receive window. V2 uses quic-go with a 2,048-entry Datagram receive queue and a 2,048-packet private replay window. When updating dependencies, run `scripts/prepare-vendor.sh`; a plain `go mod vendor` removes the tested queue and HTTP/2 window patches.
 
 ## Client
 
