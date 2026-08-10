@@ -22,6 +22,7 @@ import (
 	"golang.org/x/net/http2"
 
 	"myxray/internal/auth"
+	"myxray/internal/quicconfig"
 	"myxray/internal/target"
 )
 
@@ -52,10 +53,14 @@ func main() {
 	pathFile := flag.String("path-file", "", "file containing the private HTTP path")
 	replayFile := flag.String("replay-file", "/var/lib/myxray/replay.log", "durable replay cache file")
 	quicListen := flag.String("quic-listen", "", "optional HTTP/3 UDP listen address")
+	quicInitialPacketSize := flag.Uint("quic-initial-packet-size", quicconfig.DefaultInitialPacketSize, "QUIC initial packet size (1200-1452)")
 	ticketKeyFile := flag.String("ticket-key-file", "", "32-byte hex or base64url HTTP/3 ticket key")
 	fallbackURL := flag.String("fallback", "https://127.0.0.1:443", "normal HTTPS fallback")
 	fallbackServerName := flag.String("fallback-server-name", "probe.chitanda.org", "fallback TLS server name")
 	flag.Parse()
+	if *quicInitialPacketSize < quicconfig.MinInitialPacketSize || *quicInitialPacketSize > quicconfig.MaxInitialPacketSize {
+		log.Fatal("quic-initial-packet-size must be between 1200 and 1452")
+	}
 
 	path, err := loadPath(*privatePath, *pathFile)
 	if err != nil || *certFile == "" || *keyFile == "" || *pskFile == "" {
@@ -96,7 +101,7 @@ func main() {
 		if *ticketKeyFile == "" {
 			log.Fatal("ticket-key-file is required when quic-listen is enabled")
 		}
-		h3Server, err = newHTTP3Server(*quicListen, app, *ticketKeyFile, *certFile, *keyFile)
+		h3Server, err = newHTTP3Server(*quicListen, app, *ticketKeyFile, *certFile, *keyFile, uint16(*quicInitialPacketSize))
 		if err != nil {
 			log.Fatalf("configure HTTP/3 server: %v", err)
 		}

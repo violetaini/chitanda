@@ -1,6 +1,7 @@
 package frame
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -115,18 +116,31 @@ const (
 	datagramVersion    = 1
 	datagramHeaderSize = 11
 	maxDatagramAddress = 512
-	MaxDatagramPayload = 1200
+	// 1350 leaves headroom for the private frame, HTTP Datagram, QUIC, UDP and
+	// IPv4 headers on a 1500-byte path while reducing per-packet CPU overhead.
+	MaxDatagramPayload = 1350
+	MaxDatagramSize    = datagramHeaderSize + maxDatagramAddress + MaxDatagramPayload
 	ReplayWindowSize   = 2048
 )
 
 func EncodeDatagram(sequence uint64, address string, payload []byte) ([]byte, error) {
+	return EncodeDatagramInto(make([]byte, datagramHeaderSize+len(address)+len(payload)), sequence, address, payload)
+}
+
+// EncodeDatagramInto writes a datagram into dst. The caller may reuse dst after
+// SendDatagram returns because quic-go copies the payload before returning.
+func EncodeDatagramInto(dst []byte, sequence uint64, address string, payload []byte) ([]byte, error) {
 	if len(address) == 0 || len(address) > maxDatagramAddress {
 		return nil, errors.New("invalid datagram address")
 	}
 	if len(payload) > MaxDatagramPayload {
 		return nil, fmt.Errorf("datagram payload too large: %d", len(payload))
 	}
-	result := make([]byte, datagramHeaderSize+len(address)+len(payload))
+	length := datagramHeaderSize + len(address) + len(payload)
+	if cap(dst) < length {
+		return nil, fmt.Errorf("datagram buffer too small: %d", cap(dst))
+	}
+	result := dst[:length]
 	result[0] = datagramVersion
 	binary.BigEndian.PutUint64(result[1:9], sequence)
 	binary.BigEndian.PutUint16(result[9:11], uint16(len(address)))
@@ -136,6 +150,18 @@ func EncodeDatagram(sequence uint64, address string, payload []byte) ([]byte, er
 }
 
 func DecodeDatagram(packet []byte) (uint64, string, []byte, error) {
+	var cache DatagramCache
+	return cache.Decode(packet)
+}
+
+// DatagramCache avoids allocating a new address string for every packet in a
+// flow whose destination is unchanged.
+type DatagramCache struct {
+	key     []byte
+	address string
+}
+
+func (c *DatagramCache) Decode(packet []byte) (uint64, string, []byte, error) {
 	if len(packet) < datagramHeaderSize || packet[0] != datagramVersion {
 		return 0, "", nil, errors.New("invalid datagram header")
 	}
@@ -147,7 +173,12 @@ func DecodeDatagram(packet []byte) (uint64, string, []byte, error) {
 	if len(payload) > MaxDatagramPayload {
 		return 0, "", nil, errors.New("datagram payload too large")
 	}
-	return binary.BigEndian.Uint64(packet[1:9]), string(packet[datagramHeaderSize : datagramHeaderSize+addressLength]), payload, nil
+	addressBytes := packet[datagramHeaderSize : datagramHeaderSize+addressLength]
+	if c.address == "" || !bytes.Equal(c.key, addressBytes) {
+		c.key = append(c.key[:0], addressBytes...)
+		c.address = string(addressBytes)
+	}
+	return binary.BigEndian.Uint64(packet[1:9]), c.address, payload, nil
 }
 
 type ReplayWindow struct {

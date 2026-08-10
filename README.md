@@ -23,7 +23,7 @@ GOOS=windows GOARCH=amd64 go build -mod=vendor -o bin/myxray-client.exe ./cmd/my
 GOOS=linux GOARCH=arm64 go build -mod=vendor -o bin/myxray-v2-client ./cmd/myxray-v2-client
 ```
 
-V1 uses a vendored HTTP/2 transport with a fixed 16 MiB receive window. V2 uses quic-go with a 2,048-entry Datagram receive queue and a 2,048-packet private replay window. When updating dependencies, run `scripts/prepare-vendor.sh`; a plain `go mod vendor` removes the tested queue and HTTP/2 window patches.
+V1 uses a vendored HTTP/2 transport with a fixed 16 MiB receive window. V2 uses quic-go with a 2,048-entry Datagram receive queue and a 2,048-packet private replay window. The deployed high-throughput profile uses a 1,452-byte QUIC initial packet size and a 1,350-byte private UDP payload cap for the measured IPv4/1500-byte path. On a smaller-MTU path, start both V2 endpoints with `-quic-initial-packet-size 1280`; oversized UDP datagrams are dropped without terminating the association. When updating dependencies, run `scripts/prepare-vendor.sh`; a plain `go mod vendor` removes the tested queue, HTTP/2 window, and QUIC datagram-copy patches.
 
 ## Client
 

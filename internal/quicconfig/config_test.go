@@ -3,8 +3,8 @@ package quicconfig
 import "testing"
 
 func TestPerformanceAndEarlyDataSettings(t *testing.T) {
-	client := Client()
-	server := Server()
+	client := Client(DefaultInitialPacketSize)
+	server := Server(DefaultInitialPacketSize)
 	for name, config := range map[string]struct {
 		stream uint64
 		conn   uint64
@@ -24,5 +24,8 @@ func TestPerformanceAndEarlyDataSettings(t *testing.T) {
 	}
 	if !client.EnableDatagrams || !server.EnableDatagrams {
 		t.Fatal("QUIC datagrams are disabled")
+	}
+	if client.InitialPacketSize != DefaultInitialPacketSize || server.InitialPacketSize != DefaultInitialPacketSize {
+		t.Fatal("QUIC initial packet size is not applied")
 	}
 }

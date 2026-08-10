@@ -262,7 +262,7 @@ func (c *rawConn) sendDatagram(streamID quic.StreamID, b []byte) error {
 			},
 		})
 	}
-	return c.conn.SendDatagram(data)
+	return c.conn.SendDatagramNoCopy(data)
 }
 
 func (c *rawConn) receiveDatagrams() error {

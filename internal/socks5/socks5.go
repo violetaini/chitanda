@@ -2,6 +2,7 @@ package socks5
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -74,15 +75,34 @@ func WriteReply(conn net.Conn, status byte, bound net.Addr) error {
 }
 
 func ParseUDPPacket(packet []byte) (string, []byte, error) {
-	if len(packet) < 4 || packet[0] != 0 || packet[1] != 0 || packet[2] != 0 {
-		return "", nil, errors.New("invalid or fragmented SOCKS UDP packet")
+	var cache UDPCache
+	return cache.Parse(packet)
+}
+
+// UDPCache avoids rebuilding the target string when consecutive packets use
+// the same SOCKS UDP destination, which is common for real-time flows.
+type UDPCache struct {
+	key     []byte
+	address string
+}
+
+func (c *UDPCache) Parse(packet []byte) (string, []byte, error) {
+	payloadOffset, err := udpPayloadOffset(packet)
+	if err != nil {
+		return "", nil, err
 	}
-	reader := &sliceReader{value: packet[4:]}
+	key := packet[3:payloadOffset]
+	if c.address != "" && bytes.Equal(c.key, key) {
+		return c.address, packet[payloadOffset:], nil
+	}
+	reader := &sliceReader{value: packet[4:payloadOffset]}
 	address, err := readAddress(reader, packet[3])
 	if err != nil {
 		return "", nil, err
 	}
-	return address, reader.value, nil
+	c.key = append(c.key[:0], key...)
+	c.address = address
+	return address, packet[payloadOffset:], nil
 }
 
 func BuildUDPPacket(address string, payload []byte) ([]byte, error) {
@@ -94,6 +114,50 @@ func BuildUDPPacket(address string, payload []byte) ([]byte, error) {
 	packet = append(packet, encoded...)
 	packet = append(packet, payload...)
 	return packet, nil
+}
+
+func BuildUDPPacketInto(dst []byte, address string, payload []byte) ([]byte, error) {
+	if cap(dst) < 3 {
+		return nil, errors.New("UDP output buffer too small")
+	}
+	dst = dst[:3]
+	encoded, err := encodeAddressInto(dst[3:3], address)
+	if err != nil {
+		return nil, err
+	}
+	length := len(dst) + len(encoded) + len(payload)
+	if cap(dst) < length {
+		return nil, errors.New("UDP output buffer too small")
+	}
+	dst = dst[:length]
+	copy(dst[3:], encoded)
+	copy(dst[3+len(encoded):], payload)
+	return dst, nil
+}
+
+func udpPayloadOffset(packet []byte) (int, error) {
+	if len(packet) < 4 || packet[0] != 0 || packet[1] != 0 || packet[2] != 0 {
+		return 0, errors.New("invalid or fragmented SOCKS UDP packet")
+	}
+	switch packet[3] {
+	case 0x01:
+		if len(packet) < 10 {
+			return 0, io.ErrUnexpectedEOF
+		}
+		return 10, nil
+	case 0x03:
+		if len(packet) < 5 || len(packet) < 7+int(packet[4]) {
+			return 0, io.ErrUnexpectedEOF
+		}
+		return 7 + int(packet[4]), nil
+	case 0x04:
+		if len(packet) < 22 {
+			return 0, io.ErrUnexpectedEOF
+		}
+		return 22, nil
+	default:
+		return 0, errors.New("unsupported SOCKS address type")
+	}
 }
 
 func readAddress(reader io.Reader, addressType byte) (string, error) {
@@ -132,6 +196,10 @@ func readAddress(reader io.Reader, addressType byte) (string, error) {
 }
 
 func encodeAddress(address string) ([]byte, error) {
+	return encodeAddressInto(make([]byte, 0, 1+net.IPv6len+2+len(address)), address)
+}
+
+func encodeAddressInto(dst []byte, address string) ([]byte, error) {
 	host, portText, err := net.SplitHostPort(address)
 	if err != nil {
 		return nil, err
@@ -140,18 +208,21 @@ func encodeAddress(address string) ([]byte, error) {
 	if err != nil || port < 0 || port > 65535 {
 		return nil, errors.New("invalid port")
 	}
-	var encoded []byte
+	encoded := dst
 	if ip := net.ParseIP(host); ip != nil {
 		if ipv4 := ip.To4(); ipv4 != nil {
-			encoded = append([]byte{0x01}, ipv4...)
+			encoded = append(encoded, 0x01)
+			encoded = append(encoded, ipv4...)
 		} else {
-			encoded = append([]byte{0x04}, ip.To16()...)
+			encoded = append(encoded, 0x04)
+			encoded = append(encoded, ip.To16()...)
 		}
 	} else {
 		if len(host) == 0 || len(host) > 255 {
 			return nil, fmt.Errorf("invalid host length: %d", len(host))
 		}
-		encoded = append([]byte{0x03, byte(len(host))}, []byte(host)...)
+		encoded = append(encoded, 0x03, byte(len(host)))
+		encoded = append(encoded, host...)
 	}
 	return binary.BigEndian.AppendUint16(encoded, uint16(port)), nil
 }

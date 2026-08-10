@@ -74,7 +74,11 @@ func main() {
 	pathFile := flag.String("path-file", "", "file containing the private HTTP path")
 	sessionCacheFile := flag.String("session-cache-file", "", "persistent TLS session cache file")
 	provisionOnly := flag.Bool("provision-only", false, "obtain a resumable HTTP/3 ticket and exit")
+	quicInitialPacketSize := flag.Uint("quic-initial-packet-size", quicconfig.DefaultInitialPacketSize, "QUIC initial packet size (1200-1452)")
 	flag.Parse()
+	if *quicInitialPacketSize < quicconfig.MinInitialPacketSize || *quicInitialPacketSize > quicconfig.MaxInitialPacketSize {
+		log.Fatal("quic-initial-packet-size must be between 1200 and 1452")
+	}
 
 	path, err := loadPath(*privatePath, *pathFile)
 	if *pskFile == "" || *sessionCacheFile == "" || err != nil {
@@ -98,7 +102,7 @@ func main() {
 		path:         path,
 		psk:          psk,
 		tlsConfig:    &tls.Config{MinVersion: tls.VersionTLS13, ServerName: *serverName, ClientSessionCache: cache, NextProtos: []string{http3.NextProtoH3}},
-		quicConfig:   quicconfig.Client(),
+		quicConfig:   quicconfig.Client(uint16(*quicInitialPacketSize)),
 		transport:    &http3.Transport{EnableDatagrams: true, DisableCompression: true},
 		sessionCache: cache,
 	}
@@ -451,6 +455,8 @@ func (c *proxyClient) handleUDP(control net.Conn) {
 	go func() {
 		defer close(receiveDone)
 		var replay frame.ReplayWindow
+		var decoder frame.DatagramCache
+		socksPacketBuffer := make([]byte, 64<<10)
 		for {
 			packet, err := stream.ReceiveDatagram(ctx)
 			if err != nil {
@@ -459,11 +465,11 @@ func (c *proxyClient) handleUDP(control net.Conn) {
 				}
 				return
 			}
-			sequence, address, payload, err := frame.DecodeDatagram(packet)
+			sequence, address, payload, err := decoder.Decode(packet)
 			if err != nil || !replay.Accept(sequence) {
 				continue
 			}
-			socksPacket, err := socks5.BuildUDPPacket(address, payload)
+			socksPacket, err := socks5.BuildUDPPacketInto(socksPacketBuffer, address, payload)
 			if err != nil {
 				continue
 			}
@@ -477,6 +483,9 @@ func (c *proxyClient) handleUDP(control net.Conn) {
 	}()
 
 	buffer := make([]byte, 64<<10)
+	var addressCache socks5.UDPCache
+	datagramBuffer := make([]byte, frame.MaxDatagramSize)
+	oversizeLogged := false
 	var sequence atomic.Uint64
 	for {
 		n, clientAddress, err := udpConn.ReadFromUDP(buffer)
@@ -492,15 +501,23 @@ func (c *proxyClient) handleUDP(control net.Conn) {
 		if !acceptedPeer {
 			continue
 		}
-		address, payload, err := socks5.ParseUDPPacket(buffer[:n])
+		address, payload, err := addressCache.Parse(buffer[:n])
 		if err != nil {
 			continue
 		}
-		packet, err := frame.EncodeDatagram(sequence.Add(1), address, payload)
+		packet, err := frame.EncodeDatagramInto(datagramBuffer, sequence.Add(1), address, payload)
 		if err != nil {
 			continue
 		}
 		if err := stream.SendDatagram(packet); err != nil {
+			var tooLarge *quic.DatagramTooLargeError
+			if errors.As(err, &tooLarge) {
+				if !oversizeLogged {
+					log.Printf("V2 UDP datagram dropped: path datagram limit=%d", tooLarge.MaxDatagramPayloadSize)
+					oversizeLogged = true
+				}
+				continue
+			}
 			log.Printf("V2 UDP send stopped: %v", err)
 			break
 		}

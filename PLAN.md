@@ -159,3 +159,10 @@ V2 理想路线是：**通过预置的一次性 TLS 票据和签名预密钥实�
 - QUIC DATAGRAM 只能在握手确认后使用，当前 UDP association 不是 0-RTT；UDP-over-H2 自动回退、NAT rebinding/连接迁移验收、按应用 FEC 均未实现。
 - `WINDOW_UPDATE` 帧类型已定义但流控仍由 QUIC 原生机制承担；应用优先级、自动重密钥、Raw TCP/Noise 和动态流量画像尚未实现。
 - 尚未采集足够的 GFW/傲盾真实流量样本做盲测，不能声称当前 HTTP/3/QUIC 画像无法识别或稳定抗封锁；QUIC 可能被直接限速或封锁，V1/H2 仍是必要回退。
+
+### 2026-08-10 速度优化状态
+
+- 已完成 TCP/UDP 热路径的缓冲区复用、重复目标地址缓存，以及 vendored QUIC HTTP Datagram 的一处发送复制和一处接收复制消除；完整项目测试和 `go vet` 通过。
+- 已验证高吞吐配置：`-quic-initial-packet-size 1452` 配合 1,350 字节 UDP 负载；低 MTU 可用 `1280`，过大数据报只丢包，不中断 association。
+- 已实测并否决 ACK 批量、Linux 收包批量和 GSO 缓冲区激进增大；它们造成 TCP 单流回退，不能作为速度优化发布。
+- 当前可量化目标是 TCP 单流约 400 Mbps、UDP 在本路径约 120-130 Mbps 饱和；共享型双核实例的 steal、路径丢包和 QUIC 拥塞窗口仍是主要限制。多物理 QUIC 流条带化是后续提升单流上限的独立协议设计，不应伪装成简单参数调优。

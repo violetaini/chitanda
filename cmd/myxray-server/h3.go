@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	quic "github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 
 	"myxray/internal/auth"
@@ -27,7 +28,7 @@ const (
 	udpAuthName = "udp-association"
 )
 
-func newHTTP3Server(address string, handler http.Handler, ticketKeyFile, certFile, keyFile string) (*http3.Server, error) {
+func newHTTP3Server(address string, handler http.Handler, ticketKeyFile, certFile, keyFile string, initialPacketSize uint16) (*http3.Server, error) {
 	ticketKey, err := auth.LoadPSK(ticketKeyFile)
 	if err != nil {
 		return nil, err
@@ -43,7 +44,7 @@ func newHTTP3Server(address string, handler http.Handler, ticketKeyFile, certFil
 	return &http3.Server{
 		Addr:            address,
 		TLSConfig:       tlsConfig,
-		QUICConfig:      quicconfig.Server(),
+		QUICConfig:      quicconfig.Server(initialPacketSize),
 		Handler:         handler,
 		EnableDatagrams: true,
 		MaxHeaderBytes:  16 << 10,
@@ -222,6 +223,7 @@ type udpRelay struct {
 	sendMu    sync.Mutex
 	targets   map[string]*udpTarget
 	replay    frame.ReplayWindow
+	decoder   frame.DatagramCache
 	sequence  atomic.Uint64
 	waitGroup sync.WaitGroup
 }
@@ -231,7 +233,7 @@ func newUDPRelay(ctx context.Context, stream datagramStream) *udpRelay {
 }
 
 func (r *udpRelay) Forward(packet []byte) error {
-	sequence, address, payload, err := frame.DecodeDatagram(packet)
+	sequence, address, payload, err := r.decoder.Decode(packet)
 	if err != nil || !r.replay.Accept(sequence) {
 		return errors.New("invalid or replayed datagram")
 	}
@@ -271,6 +273,8 @@ func (r *udpRelay) Forward(packet []byte) error {
 func (r *udpRelay) receive(targetConn *udpTarget) {
 	defer r.waitGroup.Done()
 	buffer := make([]byte, 64<<10)
+	datagramBuffer := make([]byte, frame.MaxDatagramSize)
+	oversizeLogged := false
 	for {
 		n, err := targetConn.conn.Read(buffer)
 		if err != nil {
@@ -279,7 +283,7 @@ func (r *udpRelay) receive(targetConn *udpTarget) {
 		if n > frame.MaxDatagramPayload {
 			continue
 		}
-		packet, err := frame.EncodeDatagram(r.sequence.Add(1), targetConn.address, buffer[:n])
+		packet, err := frame.EncodeDatagramInto(datagramBuffer, r.sequence.Add(1), targetConn.address, buffer[:n])
 		if err != nil {
 			continue
 		}
@@ -287,6 +291,14 @@ func (r *udpRelay) receive(targetConn *udpTarget) {
 		err = r.stream.SendDatagram(packet)
 		r.sendMu.Unlock()
 		if err != nil {
+			var tooLarge *quic.DatagramTooLargeError
+			if errors.As(err, &tooLarge) {
+				if !oversizeLogged {
+					log.Printf("HTTP/3 UDP response dropped: path datagram limit=%d", tooLarge.MaxDatagramPayloadSize)
+					oversizeLogged = true
+				}
+				continue
+			}
 			return
 		}
 	}

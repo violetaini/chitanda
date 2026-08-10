@@ -8,26 +8,30 @@ import (
 )
 
 const (
-	InitialStreamWindow     = 32 << 20
-	MaxStreamWindow         = 128 << 20
-	InitialConnectionWindow = 64 << 20
-	MaxConnectionWindow     = 256 << 20
+	MinInitialPacketSize     = 1200
+	DefaultInitialPacketSize = 1452
+	MaxInitialPacketSize     = 1452
+	InitialStreamWindow      = 32 << 20
+	MaxStreamWindow          = 128 << 20
+	InitialConnectionWindow  = 64 << 20
+	MaxConnectionWindow      = 256 << 20
 )
 
-func Client() *quic.Config {
-	config := base()
+func Client(initialPacketSize uint16) *quic.Config {
+	config := base(initialPacketSize)
 	config.Tracer = h3qlog.DefaultConnectionTracer
 	return config
 }
 
-func Server() *quic.Config {
-	config := base()
+func Server(initialPacketSize uint16) *quic.Config {
+	config := base(initialPacketSize)
 	config.Allow0RTT = true
 	return config
 }
 
-func base() *quic.Config {
+func base(initialPacketSize uint16) *quic.Config {
 	return &quic.Config{
+		InitialPacketSize:              initialPacketSize,
 		HandshakeIdleTimeout:           10 * time.Second,
 		MaxIdleTimeout:                 3 * time.Minute,
 		InitialStreamReceiveWindow:     InitialStreamWindow,

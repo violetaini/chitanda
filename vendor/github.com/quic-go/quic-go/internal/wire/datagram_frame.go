@@ -39,8 +39,9 @@ func parseDatagramFrame(b []byte, typ FrameType, _ protocol.Version) (*DatagramF
 	} else {
 		length = uint64(len(b))
 	}
-	f.Data = make([]byte, length)
-	copy(f.Data, b)
+	// The connection copies the payload into its receive queue before the
+	// packet buffer is released, so retaining this view here is safe.
+	f.Data = b[:length]
 	return f, startLen - len(b) + int(length), nil
 }
 

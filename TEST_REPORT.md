@@ -79,6 +79,18 @@ Warm reverse tests reached 50.0 Mbps with 0.011% loss and 98.8 Mbps with 1.2% lo
 
 The Datagram receive queue and private replay window are both 2,048 entries. Raising the replay window reduced false-replay risk under reordering but did not remove the CPU/packet-rate saturation point.
 
+## 2026-08-10 throughput optimization
+
+The two nodes remain Debian 13 ARM64 VMs with two Neoverse-N1 vCPUs. During UDP saturation, `vmstat` measured about 12-22% CPU steal on the client and 9-15% on the server, so single-run rates are noisy and should not be treated as a hardware-independent ceiling.
+
+- The private UDP hot path now reuses frame and SOCKS buffers and caches repeated target addresses. QUIC HTTP Datagram send removes one intermediate copy; QUIC receive removes one redundant copy before the receive queue. Protocol bytes and replay checks are unchanged.
+- The private QUIC ACK threshold, Linux receive batch size, and large GSO buffer experiments were reverted after they reduced TCP single-flow throughput. They are not part of the deployed build.
+- With a fresh connection and the high-MTU profile, TCP download reached 398 Mbps over the proxy, with stable one-second intervals around 387-406 Mbps. TCP upload reached 199 Mbps in the same test window. The earlier 1.46 Gbps direct iperf3 result remains the path ceiling, not a proxy result.
+- At 1,350-byte UDP payloads, 150 Mbps offered reached 120 Mbps with 19% loss on a fresh association. After a 1,200-byte warm-up, the same path reached about 129 Mbps with 13% loss. At 50 Mbps, forward and reverse tests received 48.1 and 48.7 Mbps, with aggregate loss around 2.7-2.9% concentrated partly in startup.
+- The deployed `-quic-initial-packet-size 1452` assumes the measured IPv4/1500-byte path. A temporary 1280-byte client correctly dropped an oversized 1,350-byte packet but kept its association and subsequently delivered 1,200-byte packets at 19.1 Mbps. Use 1280 on unknown or smaller-MTU paths.
+
+The optimization reduces per-packet allocations and copies, but the end-to-end UDP improvement is dominated by packet size and the two-vCPU VM's kernel/steal behavior. It does not establish a universal throughput guarantee.
+
 ## Remaining gaps
 
 - Never-contacted first-ever 0-RTT with provisioned one-time prekeys, crash-safe multi-node at-most-once consumption, and forward secrecy for early data.

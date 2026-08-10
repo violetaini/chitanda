@@ -84,6 +84,47 @@ func TestDatagramRoundTripAndReplayWindow(t *testing.T) {
 	}
 }
 
+func TestEncodeDatagramIntoMatchesEncodeDatagram(t *testing.T) {
+	want, err := EncodeDatagram(99, "[2001:db8::1]:443", []byte("payload"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	buffer := make([]byte, MaxDatagramSize)
+	got, err := EncodeDatagramInto(buffer, 99, "[2001:db8::1]:443", []byte("payload"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("encoded datagram differs: got %x want %x", got, want)
+	}
+	if len(got) == 0 || &got[0] != &buffer[0] {
+		t.Fatal("caller buffer was not reused")
+	}
+}
+
+func TestEncodeDatagramIntoRejectsSmallBuffer(t *testing.T) {
+	if _, err := EncodeDatagramInto(make([]byte, 1), 1, "1.1.1.1:53", []byte("query")); err == nil {
+		t.Fatal("small output buffer accepted")
+	}
+}
+
+func TestDatagramCacheTracksAddressChanges(t *testing.T) {
+	var cache DatagramCache
+	for _, address := range []string{"1.1.1.1:53", "1.1.1.1:53", "8.8.8.8:53"} {
+		packet, err := EncodeDatagram(1, address, []byte("query"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, got, payload, err := cache.Decode(packet)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != address || string(payload) != "query" {
+			t.Fatalf("decoded address=%q payload=%q", got, payload)
+		}
+	}
+}
+
 func TestReplayWindowAcceptsDeepReordering(t *testing.T) {
 	var window ReplayWindow
 	if !window.Accept(4096) || !window.Accept(4096-1500) {

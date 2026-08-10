@@ -3025,6 +3025,16 @@ func (c *Conn) onStreamCompleted(id protocol.StreamID) {
 // In addition, a datagram may be dropped before being sent out if the available packet size suddenly decreases.
 // If the payload is too large to be sent at the current time, a DatagramTooLargeError is returned.
 func (c *Conn) SendDatagram(p []byte) error {
+	return c.sendDatagram(p, true)
+}
+
+// SendDatagramNoCopy transfers ownership of p to the connection. The caller
+// must not access p after this method returns.
+func (c *Conn) SendDatagramNoCopy(p []byte) error {
+	return c.sendDatagram(p, false)
+}
+
+func (c *Conn) sendDatagram(p []byte, copyPayload bool) error {
 	if !c.supportsDatagrams() {
 		return errors.New("datagram support disabled")
 	}
@@ -3039,8 +3049,10 @@ func (c *Conn) SendDatagram(p []byte) error {
 	if protocol.ByteCount(len(p)) > maxDataLen {
 		return &DatagramTooLargeError{MaxDatagramPayloadSize: int64(maxDataLen)}
 	}
-	f.Data = make([]byte, len(p))
-	copy(f.Data, p)
+	if copyPayload {
+		p = bytes.Clone(p)
+	}
+	f.Data = p
 	return c.datagramQueue.Add(f)
 }
 
