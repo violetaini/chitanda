@@ -29,6 +29,8 @@ type ReplayCache struct {
 	file        *os.File
 	path        string
 	writesSince int
+	persistent  bool
+	persistErr  error
 }
 
 type replayExpiry struct {
@@ -81,7 +83,7 @@ func OpenReplayCache(path string, now time.Time) (*ReplayCache, error) {
 			return nil, syncErr
 		}
 	}
-	cache := &ReplayCache{expires: make(map[string]time.Time), file: file, path: path}
+	cache := &ReplayCache{expires: make(map[string]time.Time), file: file, path: path, persistent: true}
 	if err := cache.load(now); err != nil {
 		_ = file.Close()
 		return nil, err
@@ -121,6 +123,12 @@ func (c *ReplayCache) load(now time.Time) error {
 func (c *ReplayCache) Accept(nonce string, now time.Time) (bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.persistErr != nil {
+		return false, c.persistErr
+	}
+	if c.persistent && c.file == nil {
+		return false, c.markPersistenceFailure(errors.New("replay cache file is unavailable"))
+	}
 
 	for c.expiryQueue.Len() > 0 && !c.expiryQueue[0].expiry.After(now) {
 		expired := heap.Pop(&c.expiryQueue).(replayExpiry)
@@ -134,16 +142,16 @@ func (c *ReplayCache) Accept(nonce string, now time.Time) (bool, error) {
 	if c.file != nil {
 		if c.writesSince >= replayCompactAfter {
 			if err := c.compact(); err != nil {
-				return false, err
+				return false, c.markPersistenceFailure(err)
 			}
 		}
 		expiry := now.Add(2 * MaxClockSkew)
 		record := strconv.FormatInt(expiry.Unix(), 10) + "\t" + base64.RawURLEncoding.EncodeToString([]byte(nonce)) + "\n"
 		if _, err := io.WriteString(c.file, record); err != nil {
-			return false, err
+			return false, c.markPersistenceFailure(err)
 		}
 		if err := c.file.Sync(); err != nil {
-			return false, err
+			return false, c.markPersistenceFailure(err)
 		}
 		c.writesSince++
 	}
@@ -151,6 +159,13 @@ func (c *ReplayCache) Accept(nonce string, now time.Time) (bool, error) {
 	c.expires[nonce] = expiry
 	heap.Push(&c.expiryQueue, replayExpiry{nonce: nonce, expiry: expiry})
 	return true, nil
+}
+
+func (c *ReplayCache) markPersistenceFailure(err error) error {
+	if c.persistErr == nil {
+		c.persistErr = fmt.Errorf("replay cache persistence failed: %w", err)
+	}
+	return c.persistErr
 }
 
 func (c *ReplayCache) compact() error {

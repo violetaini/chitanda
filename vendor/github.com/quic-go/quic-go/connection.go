@@ -3034,6 +3034,32 @@ func (c *Conn) SendDatagramNoCopy(p []byte) error {
 	return c.sendDatagram(p, false)
 }
 
+// SendDatagramsNoCopy atomically queues a batch of DATAGRAM payloads. It
+// transfers ownership only when the entire batch is accepted.
+func (c *Conn) SendDatagramsNoCopy(payloads [][]byte) error {
+	if !c.supportsDatagrams() {
+		return errors.New("datagram support disabled")
+	}
+	if len(payloads) == 0 {
+		return nil
+	}
+	frames := make([]*wire.DatagramFrame, len(payloads))
+	for i, payload := range payloads {
+		frame := &wire.DatagramFrame{}
+		frame.DataLenPresent = true
+		maxDataLen := min(
+			frame.MaxDataLen(c.peerParams.MaxDatagramFrameSize, c.version),
+			protocol.ByteCount(c.maxPayloadSizeEstimate.Load()),
+		)
+		if protocol.ByteCount(len(payload)) > maxDataLen {
+			return &DatagramTooLargeError{MaxDatagramPayloadSize: int64(maxDataLen)}
+		}
+		frame.Data = payload
+		frames[i] = frame
+	}
+	return c.datagramQueue.AddBatch(frames)
+}
+
 func (c *Conn) sendDatagram(p []byte, copyPayload bool) error {
 	if !c.supportsDatagrams() {
 		return errors.New("datagram support disabled")
@@ -3062,6 +3088,15 @@ func (c *Conn) ReceiveDatagram(ctx context.Context) ([]byte, error) {
 		return nil, errors.New("datagram support disabled")
 	}
 	return c.datagramQueue.Receive(ctx)
+}
+
+// ReceiveDatagrams receives one or more queued QUIC DATAGRAM payloads. It
+// blocks until at least one payload is available, then drains without waiting.
+func (c *Conn) ReceiveDatagrams(ctx context.Context, datagrams [][]byte) (int, error) {
+	if !c.config.EnableDatagrams {
+		return 0, errors.New("datagram support disabled")
+	}
+	return c.datagramQueue.ReceiveBatch(ctx, datagrams)
 }
 
 // LocalAddr returns the local address of the QUIC connection.

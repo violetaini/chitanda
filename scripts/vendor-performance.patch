@@ -1,0 +1,1068 @@
+diff --git a/vendor/github.com/quic-go/quic-go/connection.go b/vendor/github.com/quic-go/quic-go/connection.go
+index 26db8cd..804d5ff 100644
+--- a/vendor/github.com/quic-go/quic-go/connection.go
++++ b/vendor/github.com/quic-go/quic-go/connection.go
+@@ -3034,6 +3034,32 @@ func (c *Conn) SendDatagramNoCopy(p []byte) error {
+ 	return c.sendDatagram(p, false)
+ }
+ 
++// SendDatagramsNoCopy atomically queues a batch of DATAGRAM payloads. It
++// transfers ownership only when the entire batch is accepted.
++func (c *Conn) SendDatagramsNoCopy(payloads [][]byte) error {
++	if !c.supportsDatagrams() {
++		return errors.New("datagram support disabled")
++	}
++	if len(payloads) == 0 {
++		return nil
++	}
++	frames := make([]*wire.DatagramFrame, len(payloads))
++	for i, payload := range payloads {
++		frame := &wire.DatagramFrame{}
++		frame.DataLenPresent = true
++		maxDataLen := min(
++			frame.MaxDataLen(c.peerParams.MaxDatagramFrameSize, c.version),
++			protocol.ByteCount(c.maxPayloadSizeEstimate.Load()),
++		)
++		if protocol.ByteCount(len(payload)) > maxDataLen {
++			return &DatagramTooLargeError{MaxDatagramPayloadSize: int64(maxDataLen)}
++		}
++		frame.Data = payload
++		frames[i] = frame
++	}
++	return c.datagramQueue.AddBatch(frames)
++}
++
+ func (c *Conn) sendDatagram(p []byte, copyPayload bool) error {
+ 	if !c.supportsDatagrams() {
+ 		return errors.New("datagram support disabled")
+@@ -3064,6 +3090,15 @@ func (c *Conn) ReceiveDatagram(ctx context.Context) ([]byte, error) {
+ 	return c.datagramQueue.Receive(ctx)
+ }
+ 
++// ReceiveDatagrams receives one or more queued QUIC DATAGRAM payloads. It
++// blocks until at least one payload is available, then drains without waiting.
++func (c *Conn) ReceiveDatagrams(ctx context.Context, datagrams [][]byte) (int, error) {
++	if !c.config.EnableDatagrams {
++		return 0, errors.New("datagram support disabled")
++	}
++	return c.datagramQueue.ReceiveBatch(ctx, datagrams)
++}
++
+ // LocalAddr returns the local address of the QUIC connection.
+ func (c *Conn) LocalAddr() net.Addr { return c.conn.LocalAddr() }
+ 
+diff --git a/vendor/github.com/quic-go/quic-go/datagram_queue.go b/vendor/github.com/quic-go/quic-go/datagram_queue.go
+index 77f0f4a..f82f610 100644
+--- a/vendor/github.com/quic-go/quic-go/datagram_queue.go
++++ b/vendor/github.com/quic-go/quic-go/datagram_queue.go
+@@ -2,6 +2,7 @@ package quic
+ 
+ import (
+ 	"context"
++	"errors"
+ 	"sync"
+ 
+ 	"github.com/quic-go/quic-go/internal/utils"
+@@ -21,10 +22,14 @@ type datagramQueue struct {
+ 
+ 	rcvMx    sync.Mutex
+ 	rcvQueue [][]byte
++	rcvHead  int
++	rcvLen   int
+ 	rcvd     chan struct{} // used to notify Receive that a new datagram was received
+ 
+-	closeErr error
+-	closed   chan struct{}
++	closeErr   error
++	closed     chan struct{}
++	closeOnce  sync.Once
++	sendClosed bool
+ 
+ 	hasData func()
+ 
+@@ -48,6 +53,11 @@ func (h *datagramQueue) Add(f *wire.DatagramFrame) error {
+ 	h.sendMx.Lock()
+ 
+ 	for {
++		if h.sendClosed {
++			err := h.closeErr
++			h.sendMx.Unlock()
++			return err
++		}
+ 		if h.sendQueue.Len() < maxDatagramSendQueueLen {
+ 			h.sendQueue.PushBack(f)
+ 			h.sendMx.Unlock()
+@@ -68,6 +78,44 @@ func (h *datagramQueue) Add(f *wire.DatagramFrame) error {
+ 	}
+ }
+ 
++// AddBatch atomically queues a batch of DATAGRAM frames and wakes the sender
++// once, allowing the packet packer to build a UDP GSO batch.
++func (h *datagramQueue) AddBatch(frames []*wire.DatagramFrame) error {
++	if len(frames) == 0 {
++		return nil
++	}
++	if len(frames) > maxDatagramSendQueueLen {
++		return errors.New("too many datagrams in batch")
++	}
++	h.sendMx.Lock()
++	for {
++		if h.sendClosed {
++			err := h.closeErr
++			h.sendMx.Unlock()
++			return err
++		}
++		if h.sendQueue.Len()+len(frames) <= maxDatagramSendQueueLen {
++			for _, frame := range frames {
++				h.sendQueue.PushBack(frame)
++			}
++			h.sendMx.Unlock()
++			h.hasData()
++			return nil
++		}
++		select {
++		case <-h.sent:
++		default:
++		}
++		h.sendMx.Unlock()
++		select {
++		case <-h.closed:
++			return h.closeErr
++		case <-h.sent:
++		}
++		h.sendMx.Lock()
++	}
++}
++
+ // Peek gets the next DATAGRAM frame for sending.
+ // If actually sent out, Pop needs to be called before the next call to Peek.
+ func (h *datagramQueue) Peek() *wire.DatagramFrame {
+@@ -91,47 +139,91 @@ func (h *datagramQueue) Pop() {
+ 
+ // HandleDatagramFrame handles a received DATAGRAM frame.
+ func (h *datagramQueue) HandleDatagramFrame(f *wire.DatagramFrame) {
+-	data := make([]byte, len(f.Data))
+-	copy(data, f.Data)
+-	var queued bool
+ 	h.rcvMx.Lock()
+-	if len(h.rcvQueue) < maxDatagramRcvQueueLen {
+-		h.rcvQueue = append(h.rcvQueue, data)
+-		queued = true
+-		select {
+-		case h.rcvd <- struct{}{}:
+-		default:
++	if h.rcvLen >= maxDatagramRcvQueueLen {
++		h.rcvMx.Unlock()
++		if h.logger.Debug() {
++			h.logger.Debugf("Discarding received DATAGRAM frame (%d bytes payload)", len(f.Data))
+ 		}
++		return
+ 	}
+-	h.rcvMx.Unlock()
+-	if !queued && h.logger.Debug() {
+-		h.logger.Debugf("Discarding received DATAGRAM frame (%d bytes payload)", len(f.Data))
++	if len(h.rcvQueue) == 0 {
++		h.rcvQueue = make([][]byte, 1)
++	} else if h.rcvLen == len(h.rcvQueue) {
++		newCapacity := min(len(h.rcvQueue)*2, maxDatagramRcvQueueLen)
++		grown := make([][]byte, newCapacity)
++		for i := range h.rcvLen {
++			grown[i] = h.rcvQueue[(h.rcvHead+i)%len(h.rcvQueue)]
++		}
++		h.rcvQueue = grown
++		h.rcvHead = 0
+ 	}
++	data := make([]byte, len(f.Data))
++	copy(data, f.Data)
++	index := (h.rcvHead + h.rcvLen) % len(h.rcvQueue)
++	h.rcvQueue[index] = data
++	h.rcvLen++
++	select {
++	case h.rcvd <- struct{}{}:
++	default:
++	}
++	h.rcvMx.Unlock()
+ }
+ 
+ // Receive gets a received DATAGRAM frame.
+ func (h *datagramQueue) Receive(ctx context.Context) ([]byte, error) {
++	var datagrams [1][]byte
++	count, err := h.ReceiveBatch(ctx, datagrams[:])
++	if err != nil {
++		return nil, err
++	}
++	if count != 1 {
++		return nil, errors.New("invalid datagram batch result")
++	}
++	return datagrams[0], nil
++}
++
++// ReceiveBatch receives one or more queued datagrams without blocking after
++// the first payload is available.
++func (h *datagramQueue) ReceiveBatch(ctx context.Context, datagrams [][]byte) (int, error) {
++	if len(datagrams) == 0 {
++		return 0, errors.New("empty datagram batch buffer")
++	}
+ 	for {
+ 		h.rcvMx.Lock()
+-		if len(h.rcvQueue) > 0 {
+-			data := h.rcvQueue[0]
+-			h.rcvQueue = h.rcvQueue[1:]
++		if h.rcvLen > 0 {
++			count := min(len(datagrams), h.rcvLen)
++			for i := range count {
++				index := (h.rcvHead + i) % len(h.rcvQueue)
++				datagrams[i] = h.rcvQueue[index]
++				h.rcvQueue[index] = nil
++			}
++			h.rcvHead = (h.rcvHead + count) % len(h.rcvQueue)
++			h.rcvLen -= count
++			if h.rcvLen == 0 {
++				h.rcvHead = 0
++			}
+ 			h.rcvMx.Unlock()
+-			return data, nil
++			return count, nil
+ 		}
+ 		h.rcvMx.Unlock()
+ 		select {
+ 		case <-h.rcvd:
+-			continue
++			// Recheck the queue after the producer notification.
+ 		case <-h.closed:
+-			return nil, h.closeErr
++			return 0, h.closeErr
+ 		case <-ctx.Done():
+-			return nil, ctx.Err()
++			return 0, ctx.Err()
+ 		}
+ 	}
+ }
+ 
+ func (h *datagramQueue) CloseWithError(e error) {
+-	h.closeErr = e
+-	close(h.closed)
++	h.closeOnce.Do(func() {
++		h.sendMx.Lock()
++		h.closeErr = e
++		h.sendClosed = true
++		close(h.closed)
++		h.sendMx.Unlock()
++	})
+ }
+diff --git a/vendor/github.com/quic-go/quic-go/http3/conn.go b/vendor/github.com/quic-go/quic-go/http3/conn.go
+index aa8ecbf..7bd0bbe 100644
+--- a/vendor/github.com/quic-go/quic-go/http3/conn.go
++++ b/vendor/github.com/quic-go/quic-go/http3/conn.go
+@@ -19,6 +19,11 @@ import (
+ 
+ const maxQuarterStreamID = 1<<60 - 1
+ 
++// Bound queued HTTP Datagrams across all streams on one connection. A single
++// authenticated UDP association needs far less than this, while the limit
++// prevents unauthenticated streams from multiplying their per-stream queues.
++const maxQueuedDatagramBytes = 8 << 20
++
+ // invalidStreamID is a stream ID that is invalid. The first valid stream ID in QUIC is 0.
+ const invalidStreamID = quic.StreamID(-1)
+ 
+@@ -32,8 +37,9 @@ type rawConn struct {
+ 
+ 	enableDatagrams bool
+ 
+-	streamMx sync.Mutex
+-	streams  map[quic.StreamID]*stateTrackingStream
++	streamMx            sync.Mutex
++	streams             map[quic.StreamID]*stateTrackingStream
++	queuedDatagramBytes atomic.Int64
+ 
+ 	rcvdControlStr      atomic.Bool
+ 	rcvdQPACKEncoderStr atomic.Bool
+@@ -114,7 +120,12 @@ func (c *rawConn) openControlStream(settings *settingsFrame) (*quic.SendStream,
+ }
+ 
+ func (c *rawConn) TrackStream(str *quic.Stream) *stateTrackingStream {
+-	hstr := newStateTrackingStream(str, c, func(b []byte) error { return c.sendDatagram(str.StreamID(), b) })
++	hstr := newStateTrackingStream(
++		str,
++		c,
++		func(b []byte) error { return c.sendDatagram(str.StreamID(), b) },
++		func(datagrams [][]byte) error { return c.sendDatagrams(str.StreamID(), datagrams) },
++	)
+ 
+ 	c.streamMx.Lock()
+ 	c.streams[str.StreamID()] = hstr
+@@ -144,6 +155,24 @@ func (c *rawConn) clearStream(id quic.StreamID) {
+ 	}
+ }
+ 
++func (c *rawConn) reserveDatagram(size int) bool {
++	for {
++		current := c.queuedDatagramBytes.Load()
++		if size < 0 || current+int64(size) > maxQueuedDatagramBytes {
++			return false
++		}
++		if c.queuedDatagramBytes.CompareAndSwap(current, current+int64(size)) {
++			return true
++		}
++	}
++}
++
++func (c *rawConn) releaseDatagram(size int) {
++	if size > 0 {
++		c.queuedDatagramBytes.Add(-int64(size))
++	}
++}
++
+ func (c *rawConn) hasActiveStreams() bool {
+ 	c.streamMx.Lock()
+ 	defer c.streamMx.Unlock()
+@@ -235,6 +264,7 @@ func (c *rawConn) handleControlStream(str *quic.ReceiveStream) {
+ 		}
+ 		c.qloggerWG.Go(func() {
+ 			if err := c.receiveDatagrams(); err != nil {
++				c.closeDatagramReceivers(err)
+ 				if c.logger != nil {
+ 					c.logger.Debug("receiving datagrams failed", "error", err)
+ 				}
+@@ -247,6 +277,23 @@ func (c *rawConn) handleControlStream(str *quic.ReceiveStream) {
+ 	}
+ }
+ 
++func (c *rawConn) closeDatagramReceivers(err error) {
++	if err == nil {
++		err = errors.New("HTTP Datagram receive loop stopped")
++	}
++	c.streamMx.Lock()
++	streams := make([]*stateTrackingStream, 0, len(c.streams))
++	for _, stream := range c.streams {
++		streams = append(streams, stream)
++	}
++	c.streamMx.Unlock()
++	// closeReceive can clear a fully closed stream and take streamMx. Never
++	// call it while holding the connection's stream map lock.
++	for _, stream := range streams {
++		stream.closeReceive(err)
++	}
++}
++
+ func (c *rawConn) sendDatagram(streamID quic.StreamID, b []byte) error {
+ 	// TODO: this creates a lot of garbage and an additional copy
+ 	data := make([]byte, 0, len(b)+8)
+@@ -265,38 +312,103 @@ func (c *rawConn) sendDatagram(streamID quic.StreamID, b []byte) error {
+ 	return c.conn.SendDatagramNoCopy(data)
+ }
+ 
++func (c *rawConn) sendDatagrams(streamID quic.StreamID, datagrams [][]byte) error {
++	quarterStreamID := uint64(streamID / 4)
++	prefix := quicvarint.Append(nil, quarterStreamID)
++	totalSize := 0
++	for _, datagram := range datagrams {
++		totalSize += len(prefix) + len(datagram)
++	}
++	dataBuffer := make([]byte, totalSize)
++	payloads := make([][]byte, len(datagrams))
++	offset := 0
++	for i, datagram := range datagrams {
++		end := offset + len(prefix) + len(datagram)
++		data := dataBuffer[offset:end:end]
++		copy(data, prefix)
++		copy(data[len(prefix):], datagram)
++		payloads[i] = data
++		offset = end
++		if c.qlogger != nil {
++			c.qlogger.RecordEvent(qlog.DatagramCreated{
++				QuarterStreamID: quarterStreamID,
++				Raw:             qlog.RawInfo{Length: len(data), PayloadLength: len(datagram)},
++			})
++		}
++	}
++	return c.conn.SendDatagramsNoCopy(payloads)
++}
++
+ func (c *rawConn) receiveDatagrams() error {
++	var datagrams [32][]byte
++	var lastStreamID quic.StreamID = invalidStreamID
++	var lastStream *stateTrackingStream
+ 	for {
+-		b, err := c.conn.ReceiveDatagram(context.Background())
+-		if err != nil {
+-			return err
++		count, receiveErr := c.conn.ReceiveDatagrams(context.Background(), datagrams[:])
++		if count < 0 || count > len(datagrams) {
++			return fmt.Errorf("invalid datagram batch size: %d", count)
+ 		}
+-		quarterStreamID, n, err := quicvarint.Parse(b)
+-		if err != nil {
+-			c.CloseWithError(quic.ApplicationErrorCode(ErrCodeDatagramError), "")
+-			return fmt.Errorf("could not read quarter stream id: %w", err)
++		var pendingStream *stateTrackingStream
++		var pending [][]byte
++		flush := func() {
++			if pendingStream != nil && len(pending) > 0 {
++				pendingStream.enqueueDatagrams(pending)
++			}
++			pendingStream = nil
++			pending = pending[:0]
+ 		}
+-		if c.qlogger != nil {
+-			c.qlogger.RecordEvent(qlog.DatagramParsed{
+-				QuarterStreamID: quarterStreamID,
+-				Raw: qlog.RawInfo{
+-					Length:        len(b),
+-					PayloadLength: len(b) - n,
+-				},
+-			})
++		for i := range count {
++			b := datagrams[i]
++			quarterStreamID, n, err := quicvarint.Parse(b)
++			if err != nil {
++				c.CloseWithError(quic.ApplicationErrorCode(ErrCodeDatagramError), "")
++				return fmt.Errorf("could not read quarter stream id: %w", err)
++			}
++			if c.qlogger != nil {
++				c.qlogger.RecordEvent(qlog.DatagramParsed{
++					QuarterStreamID: quarterStreamID,
++					Raw: qlog.RawInfo{
++						Length:        len(b),
++						PayloadLength: len(b) - n,
++					},
++				})
++			}
++			if quarterStreamID > maxQuarterStreamID {
++				c.CloseWithError(quic.ApplicationErrorCode(ErrCodeDatagramError), "")
++				return fmt.Errorf("invalid quarter stream id: %d", quarterStreamID)
++			}
++			streamID := quic.StreamID(4 * quarterStreamID)
++			var dg *stateTrackingStream
++			if streamID == lastStreamID && lastStream != nil {
++				dg = lastStream
++			} else {
++				c.streamMx.Lock()
++				dg = c.streams[streamID]
++				c.streamMx.Unlock()
++				if dg != nil {
++					lastStreamID = streamID
++					lastStream = dg
++				} else {
++					lastStreamID = invalidStreamID
++					lastStream = nil
++				}
++			}
++			if dg == nil {
++				continue
++			}
++			if pendingStream != dg {
++				flush()
++				pendingStream = dg
++			}
++			pending = append(pending, b[n:])
+ 		}
+-		if quarterStreamID > maxQuarterStreamID {
+-			c.CloseWithError(quic.ApplicationErrorCode(ErrCodeDatagramError), "")
+-			return fmt.Errorf("invalid quarter stream id: %w", err)
++		flush()
++		for i := range count {
++			datagrams[i] = nil
+ 		}
+-		streamID := quic.StreamID(4 * quarterStreamID)
+-		c.streamMx.Lock()
+-		dg, ok := c.streams[streamID]
+-		c.streamMx.Unlock()
+-		if !ok {
+-			continue
++		if receiveErr != nil {
++			return receiveErr
+ 		}
+-		dg.enqueueDatagram(b[n:])
+ 	}
+ }
+ 
+diff --git a/vendor/github.com/quic-go/quic-go/http3/state_tracking_stream.go b/vendor/github.com/quic-go/quic-go/http3/state_tracking_stream.go
+index 6c7fa52..e878c4b 100644
+--- a/vendor/github.com/quic-go/quic-go/http3/state_tracking_stream.go
++++ b/vendor/github.com/quic-go/quic-go/http3/state_tracking_stream.go
+@@ -9,7 +9,11 @@ import (
+ 	"github.com/quic-go/quic-go"
+ )
+ 
+-const streamDatagramQueueLen = 32
++const streamDatagramQueueLen = 256
++
++// Account for the queue slot and slice metadata as well as payload bytes in
++// the connection-wide budget. This also bounds streams full of empty frames.
++const queuedDatagramAccountingOverhead = 32
+ 
+ // stateTrackingStream is an implementation of quic.Stream that delegates
+ // to an underlying stream
+@@ -21,9 +25,13 @@ const streamDatagramQueueLen = 32
+ type stateTrackingStream struct {
+ 	*quic.Stream
+ 
+-	sendDatagram func([]byte) error
+-	hasData      chan struct{}
+-	queue        [][]byte // TODO: use a ring buffer
++	sendDatagram  func([]byte) error
++	sendDatagrams func([][]byte) error
++	hasData       chan struct{}
++	recvClosed    chan struct{}
++	queue         [][]byte
++	queueHead     int
++	queueLen      int
+ 
+ 	mx      sync.Mutex
+ 	sendErr error
+@@ -36,14 +44,23 @@ var _ datagramStream = &stateTrackingStream{}
+ 
+ type streamClearer interface {
+ 	clearStream(quic.StreamID)
++	reserveDatagram(int) bool
++	releaseDatagram(int)
+ }
+ 
+-func newStateTrackingStream(s *quic.Stream, clearer streamClearer, sendDatagram func([]byte) error) *stateTrackingStream {
++func newStateTrackingStream(
++	s *quic.Stream,
++	clearer streamClearer,
++	sendDatagram func([]byte) error,
++	sendDatagrams func([][]byte) error,
++) *stateTrackingStream {
+ 	t := &stateTrackingStream{
+-		Stream:       s,
+-		clearer:      clearer,
+-		sendDatagram: sendDatagram,
+-		hasData:      make(chan struct{}, 1),
++		Stream:        s,
++		clearer:       clearer,
++		sendDatagram:  sendDatagram,
++		sendDatagrams: sendDatagrams,
++		hasData:       make(chan struct{}, 1),
++		recvClosed:    make(chan struct{}),
+ 	}
+ 
+ 	context.AfterFunc(s.Context(), func() {
+@@ -78,7 +95,16 @@ func (s *stateTrackingStream) closeReceive(e error) {
+ 			s.clearer.clearStream(s.StreamID())
+ 		}
+ 		s.recvErr = e
+-		s.signalHasDatagram()
++		queuedBytes := 0
++		for i := range s.queueLen {
++			index := (s.queueHead + i) % len(s.queue)
++			queuedBytes += len(s.queue[index]) + queuedDatagramAccountingOverhead
++			s.queue[index] = nil
++		}
++		s.queueHead = 0
++		s.queueLen = 0
++		s.clearer.releaseDatagram(queuedBytes)
++		close(s.recvClosed)
+ 	}
+ }
+ 
+@@ -124,6 +150,16 @@ func (s *stateTrackingStream) SendDatagram(b []byte) error {
+ 	return s.sendDatagram(b)
+ }
+ 
++func (s *stateTrackingStream) SendDatagrams(datagrams [][]byte) error {
++	s.mx.Lock()
++	sendErr := s.sendErr
++	s.mx.Unlock()
++	if sendErr != nil {
++		return sendErr
++	}
++	return s.sendDatagrams(datagrams)
++}
++
+ func (s *stateTrackingStream) signalHasDatagram() {
+ 	select {
+ 	case s.hasData <- struct{}{}:
+@@ -132,37 +168,87 @@ func (s *stateTrackingStream) signalHasDatagram() {
+ }
+ 
+ func (s *stateTrackingStream) enqueueDatagram(data []byte) {
++	s.enqueueDatagrams([][]byte{data})
++}
++
++func (s *stateTrackingStream) enqueueDatagrams(datagrams [][]byte) {
+ 	s.mx.Lock()
+ 	defer s.mx.Unlock()
+ 
+-	if s.recvErr != nil {
+-		return
++	added := false
++	for _, data := range datagrams {
++		accountedSize := len(data) + queuedDatagramAccountingOverhead
++		if s.recvErr != nil || s.queueLen >= streamDatagramQueueLen || !s.clearer.reserveDatagram(accountedSize) {
++			continue
++		}
++		if s.queue == nil {
++			s.queue = make([][]byte, 1)
++		} else if s.queueLen == len(s.queue) {
++			newCapacity := min(len(s.queue)*2, streamDatagramQueueLen)
++			grown := make([][]byte, newCapacity)
++			for i := range s.queueLen {
++				grown[i] = s.queue[(s.queueHead+i)%len(s.queue)]
++			}
++			s.queue = grown
++			s.queueHead = 0
++		}
++		index := (s.queueHead + s.queueLen) % len(s.queue)
++		s.queue[index] = data
++		s.queueLen++
++		added = true
+ 	}
+-	if len(s.queue) >= streamDatagramQueueLen {
+-		return
++	if added {
++		s.signalHasDatagram()
+ 	}
+-	s.queue = append(s.queue, data)
+-	s.signalHasDatagram()
+ }
+ 
+ func (s *stateTrackingStream) ReceiveDatagram(ctx context.Context) ([]byte, error) {
++	var datagrams [1][]byte
++	count, err := s.ReceiveDatagramsInto(ctx, datagrams[:])
++	if err != nil {
++		return nil, err
++	}
++	if count != 1 {
++		return nil, errors.New("invalid datagram batch result")
++	}
++	return datagrams[0], nil
++}
++
++func (s *stateTrackingStream) ReceiveDatagramsInto(ctx context.Context, datagrams [][]byte) (int, error) {
++	if len(datagrams) < 1 {
++		return 0, errors.New("empty datagram batch buffer")
++	}
+ start:
+ 	s.mx.Lock()
+-	if len(s.queue) > 0 {
+-		data := s.queue[0]
+-		s.queue = s.queue[1:]
++	if s.queueLen > 0 {
++		batchSize := min(len(datagrams), s.queueLen)
++		queuedBytes := 0
++		for i := range batchSize {
++			index := (s.queueHead + i) % len(s.queue)
++			datagrams[i] = s.queue[index]
++			queuedBytes += len(s.queue[index]) + queuedDatagramAccountingOverhead
++			s.queue[index] = nil
++		}
++		s.queueHead = (s.queueHead + batchSize) % len(s.queue)
++		s.queueLen -= batchSize
++		if s.queueLen > 0 {
++			s.signalHasDatagram()
++		}
+ 		s.mx.Unlock()
+-		return data, nil
++		s.clearer.releaseDatagram(queuedBytes)
++		return batchSize, nil
+ 	}
+ 	if receiveErr := s.recvErr; receiveErr != nil {
+ 		s.mx.Unlock()
+-		return nil, receiveErr
++		return 0, receiveErr
+ 	}
+ 	s.mx.Unlock()
+ 
+ 	select {
+ 	case <-ctx.Done():
+-		return nil, context.Cause(ctx)
++		return 0, context.Cause(ctx)
++	case <-s.recvClosed:
++		return 0, s.recvErr
+ 	case <-s.hasData:
+ 	}
+ 	goto start
+diff --git a/vendor/github.com/quic-go/quic-go/http3/stream.go b/vendor/github.com/quic-go/quic-go/http3/stream.go
+index 0d6d302..665747e 100644
+--- a/vendor/github.com/quic-go/quic-go/http3/stream.go
++++ b/vendor/github.com/quic-go/quic-go/http3/stream.go
+@@ -26,11 +26,16 @@ type datagramStream interface {
+ 	SetReadDeadline(time.Time) error
+ 	SetWriteDeadline(time.Time) error
+ 	SendDatagram(b []byte) error
++	SendDatagrams(datagrams [][]byte) error
+ 	ReceiveDatagram(ctx context.Context) ([]byte, error)
+ 
+ 	QUICStream() *quic.Stream
+ }
+ 
++type datagramBatchReceiver interface {
++	ReceiveDatagramsInto(context.Context, [][]byte) (int, error)
++}
++
+ // A Stream is an HTTP/3 stream.
+ //
+ // When writing to and reading from the stream, data is framed in HTTP/3 DATA frames.
+@@ -148,11 +153,32 @@ func (s *Stream) SendDatagram(b []byte) error {
+ 	return s.datagramStream.SendDatagram(b)
+ }
+ 
++// SendDatagrams atomically queues a batch of HTTP Datagrams.
++func (s *Stream) SendDatagrams(datagrams [][]byte) error {
++	return s.datagramStream.SendDatagrams(datagrams)
++}
++
+ func (s *Stream) ReceiveDatagram(ctx context.Context) ([]byte, error) {
+ 	// TODO: reject if datagrams are not negotiated (yet)
+ 	return s.datagramStream.ReceiveDatagram(ctx)
+ }
+ 
++// ReceiveDatagramsInto receives HTTP Datagrams into datagrams.
++func (s *Stream) ReceiveDatagramsInto(ctx context.Context, datagrams [][]byte) (int, error) {
++	if len(datagrams) < 1 {
++		return 0, errors.New("empty datagram batch buffer")
++	}
++	if receiver, ok := s.datagramStream.(datagramBatchReceiver); ok {
++		return receiver.ReceiveDatagramsInto(ctx, datagrams)
++	}
++	datagram, err := s.ReceiveDatagram(ctx)
++	if err != nil {
++		return 0, err
++	}
++	datagrams[0] = datagram
++	return 1, nil
++}
++
+ // A RequestStream is a low-level abstraction representing an HTTP/3 request stream.
+ // It decouples sending of the HTTP request from reading the HTTP response, allowing
+ // the application to optimistically use the stream (and, for example, send datagrams)
+@@ -272,6 +298,11 @@ func (s *RequestStream) SendDatagram(b []byte) error {
+ 	return s.str.SendDatagram(b)
+ }
+ 
++// SendDatagrams atomically queues a batch of HTTP Datagrams.
++func (s *RequestStream) SendDatagrams(datagrams [][]byte) error {
++	return s.str.SendDatagrams(datagrams)
++}
++
+ // ReceiveDatagram receives HTTP Datagrams (RFC 9297).
+ //
+ // It is only possible if support for HTTP Datagrams was enabled, using the EnableDatagram
+@@ -280,6 +311,11 @@ func (s *RequestStream) ReceiveDatagram(ctx context.Context) ([]byte, error) {
+ 	return s.str.ReceiveDatagram(ctx)
+ }
+ 
++// ReceiveDatagramsInto receives HTTP Datagrams into datagrams.
++func (s *RequestStream) ReceiveDatagramsInto(ctx context.Context, datagrams [][]byte) (int, error) {
++	return s.str.ReceiveDatagramsInto(ctx, datagrams)
++}
++
+ // SendRequestHeader sends the HTTP request.
+ //
+ // It can only used for requests that don't have a request body.
+diff --git a/vendor/github.com/quic-go/quic-go/internal/ackhandler/sent_packet_handler.go b/vendor/github.com/quic-go/quic-go/internal/ackhandler/sent_packet_handler.go
+index 9b539ea..a521362 100644
+--- a/vendor/github.com/quic-go/quic-go/internal/ackhandler/sent_packet_handler.go
++++ b/vendor/github.com/quic-go/quic-go/internal/ackhandler/sent_packet_handler.go
+@@ -134,7 +134,7 @@ func NewSentPacketHandler(
+ 		rttStats,
+ 		connStats,
+ 		initialMaxDatagramSize,
+-		true, // use Reno
++		false, // use CUBIC
+ 		qlogger,
+ 	)
+ 
+@@ -1136,7 +1136,7 @@ func (h *sentPacketHandler) MigratedPath(now monotime.Time, initialMaxDatagramSi
+ 		h.rttStats,
+ 		h.connStats,
+ 		initialMaxDatagramSize,
+-		true, // use Reno
++		false, // use CUBIC
+ 		h.qlogger,
+ 	)
+ 	h.setLossDetectionTimer(now)
+diff --git a/vendor/github.com/quic-go/quic-go/internal/congestion/cubic.go b/vendor/github.com/quic-go/quic-go/internal/congestion/cubic.go
+index 40655de..d1a0181 100644
+--- a/vendor/github.com/quic-go/quic-go/internal/congestion/cubic.go
++++ b/vendor/github.com/quic-go/quic-go/internal/congestion/cubic.go
+@@ -25,7 +25,7 @@ const (
+ 	maxDatagramSize = protocol.ByteCount(protocol.InitialPacketSize)
+ )
+ 
+-const defaultNumConnections = 1
++const defaultNumConnections = 4
+ 
+ // Default Cubic backoff factor
+ const beta float32 = 0.7
+diff --git a/vendor/github.com/quic-go/quic-go/internal/protocol/protocol.go b/vendor/github.com/quic-go/quic-go/internal/protocol/protocol.go
+index b1109ff..5d949ba 100644
+--- a/vendor/github.com/quic-go/quic-go/internal/protocol/protocol.go
++++ b/vendor/github.com/quic-go/quic-go/internal/protocol/protocol.go
+@@ -111,7 +111,7 @@ type StatelessResetToken [16]byte
+ const MaxPacketBufferSize = 1452
+ 
+ // MaxLargePacketBufferSize is used when using GSO
+-const MaxLargePacketBufferSize = 20 * 1024
++const MaxLargePacketBufferSize = 4 * MaxPacketBufferSize
+ 
+ // MinInitialPacketSize is the minimum size an Initial packet is required to have.
+ const MinInitialPacketSize = 1200
+diff --git a/vendor/github.com/quic-go/quic-go/send_conn.go b/vendor/github.com/quic-go/quic-go/send_conn.go
+index 4cbffc7..32e0471 100644
+--- a/vendor/github.com/quic-go/quic-go/send_conn.go
++++ b/vendor/github.com/quic-go/quic-go/send_conn.go
+@@ -11,6 +11,7 @@ import (
+ // A sendConn allows sending using a simple Write() on a non-connected packet conn.
+ type sendConn interface {
+ 	Write(b []byte, gsoSize uint16, ecn protocol.ECN) error
++	WriteBatch([]packetWrite) (int, error)
+ 	WriteTo([]byte, net.Addr, packetInfo) error
+ 	Close() error
+ 	LocalAddr() net.Addr
+@@ -20,6 +21,16 @@ type sendConn interface {
+ 	capabilities() connCapabilities
+ }
+ 
++type packetWrite struct {
++	data    []byte
++	gsoSize uint16
++	ecn     protocol.ECN
++}
++
++type rawPacketBatchWriter interface {
++	WritePackets([]packetWrite, net.Addr, []byte) (int, error)
++}
++
+ type remoteAddrInfo struct {
+ 	addr net.Addr
+ 	oob  []byte
+@@ -91,6 +102,73 @@ func (c *sconn) Write(p []byte, gsoSize uint16, ecn protocol.ECN) error {
+ 	return err
+ }
+ 
++func (c *sconn) WriteBatch(packets []packetWrite) (int, error) {
++	if len(packets) == 0 {
++		return 0, nil
++	}
++	writer, ok := c.rawConn.(rawPacketBatchWriter)
++	if !ok || len(packets) == 1 {
++		for i, packet := range packets {
++			if err := c.Write(packet.data, packet.gsoSize, packet.ecn); err != nil {
++				return i, err
++			}
++		}
++		return len(packets), nil
++	}
++	ai := c.remoteAddrInfo.Load()
++	written, err := writer.WritePackets(packets, ai.addr, ai.oob)
++	if err != nil && written == 0 && !c.wroteFirstPacket && isPermissionError(err) {
++		written, err = writer.WritePackets(packets, ai.addr, ai.oob)
++	}
++	c.wroteFirstPacket = true
++	if err != nil && isGSOError(err) {
++		c.gotGSOError = true
++		for i := written; i < len(packets); i++ {
++			if fallbackErr := c.writePacketWithoutGSO(packets[i], ai); fallbackErr != nil {
++				return i, fallbackErr
++			}
++		}
++		return len(packets), nil
++	}
++	if err != nil && !isSendMsgSizeErr(err) {
++		return written, err
++	}
++	// Linux sendmmsg can report a partial write with either EMSGSIZE or a nil
++	// error. Retry the unsent part individually so one PMTU probe doesn't
++	// discard unrelated packets later in this batch.
++	var firstSizeErr error
++	if isSendMsgSizeErr(err) {
++		firstSizeErr = err
++	}
++	for i := written; i < len(packets); i++ {
++		if fallbackErr := c.Write(packets[i].data, packets[i].gsoSize, packets[i].ecn); fallbackErr != nil {
++			if isSendMsgSizeErr(fallbackErr) {
++				if firstSizeErr == nil {
++					firstSizeErr = fallbackErr
++				}
++				continue
++			}
++			return i, fallbackErr
++		}
++	}
++	return len(packets), firstSizeErr
++}
++
++func (c *sconn) writePacketWithoutGSO(packet packetWrite, ai *remoteAddrInfo) error {
++	if packet.gsoSize == 0 {
++		return c.writePacket(packet.data, ai.addr, ai.oob, 0, packet.ecn)
++	}
++	data := packet.data
++	for len(data) > 0 {
++		length := min(len(data), int(packet.gsoSize))
++		if err := c.writePacket(data[:length], ai.addr, ai.oob, 0, packet.ecn); err != nil {
++			return err
++		}
++		data = data[length:]
++	}
++	return nil
++}
++
+ func (c *sconn) writePacket(p []byte, addr net.Addr, oob []byte, gsoSize uint16, ecn protocol.ECN) error {
+ 	_, err := c.WritePacket(p, addr, oob, gsoSize, ecn)
+ 	if err != nil && !c.wroteFirstPacket && isPermissionError(err) {
+diff --git a/vendor/github.com/quic-go/quic-go/send_queue.go b/vendor/github.com/quic-go/quic-go/send_queue.go
+index c8060cb..dbbfa21 100644
+--- a/vendor/github.com/quic-go/quic-go/send_queue.go
++++ b/vendor/github.com/quic-go/quic-go/send_queue.go
+@@ -86,8 +86,29 @@ func (h *sendQueue) Run() error {
+ 			h.closeCalled = nil // prevent this case from being selected again
+ 			// make sure that all queued packets are actually sent out
+ 			shouldClose = true
+-		case e := <-h.queue:
+-			if err := h.conn.Write(e.buf.Data, e.gsoSize, e.ecn); err != nil {
++		case first := <-h.queue:
++			var entries [sendQueueCapacity]queueEntry
++			var packets [sendQueueCapacity]packetWrite
++			entries[0] = first
++			count := 1
++		drain:
++			for count < len(entries) {
++				select {
++				case entry := <-h.queue:
++					entries[count] = entry
++					count++
++				default:
++					break drain
++				}
++			}
++			for i := range count {
++				packets[i] = packetWrite{data: entries[i].buf.Data, gsoSize: entries[i].gsoSize, ecn: entries[i].ecn}
++			}
++			_, err := h.conn.WriteBatch(packets[:count])
++			for i := range count {
++				entries[i].buf.Release()
++			}
++			if err != nil {
+ 				// This additional check enables:
+ 				// 1. Checking for "datagram too large" message from the kernel, as such,
+ 				// 2. Path MTU discovery,and
+@@ -96,7 +117,6 @@ func (h *sendQueue) Run() error {
+ 					return err
+ 				}
+ 			}
+-			e.buf.Release()
+ 			select {
+ 			case h.available <- struct{}{}:
+ 			default:
+diff --git a/vendor/github.com/quic-go/quic-go/sys_conn_helper_linux.go b/vendor/github.com/quic-go/quic-go/sys_conn_helper_linux.go
+index 9a890cb..3d96ba2 100644
+--- a/vendor/github.com/quic-go/quic-go/sys_conn_helper_linux.go
++++ b/vendor/github.com/quic-go/quic-go/sys_conn_helper_linux.go
+@@ -107,13 +107,13 @@ func isGSOError(err error) bool {
+ 	return false
+ }
+ 
+-// The first sendmsg call on a new UDP socket sometimes errors on Linux.
++// The first sendmsg or sendmmsg call on a new UDP socket sometimes errors on Linux.
+ // It's not clear why this happens.
+ // See https://github.com/golang/go/issues/63322.
+ func isPermissionError(err error) bool {
+ 	var serr *os.SyscallError
+ 	if errors.As(err, &serr) {
+-		return serr.Syscall == "sendmsg" && serr.Err == unix.EPERM
++		return (serr.Syscall == "sendmsg" || serr.Syscall == "sendmmsg") && serr.Err == unix.EPERM
+ 	}
+ 	return false
+ }
+diff --git a/vendor/github.com/quic-go/quic-go/sys_conn_oob.go b/vendor/github.com/quic-go/quic-go/sys_conn_oob.go
+index 8a5f37b..7a2d71e 100644
+--- a/vendor/github.com/quic-go/quic-go/sys_conn_oob.go
++++ b/vendor/github.com/quic-go/quic-go/sys_conn_oob.go
+@@ -37,6 +37,10 @@ type batchConn interface {
+ 	ReadBatch(ms []ipv4.Message, flags int) (int, error)
+ }
+ 
++type writeBatchConn interface {
++	WriteBatch(ms []ipv4.Message, flags int) (int, error)
++}
++
+ func inspectReadBuffer(c syscall.RawConn) (int, error) {
+ 	var size int
+ 	var serr error
+@@ -66,7 +70,8 @@ func isECNDisabledUsingEnv() bool {
+ 
+ type oobConn struct {
+ 	OOBCapablePacketConn
+-	batchConn batchConn
++	batchConn      batchConn
++	writeBatchConn writeBatchConn
+ 
+ 	readPos uint8
+ 	// Packets received from the kernel, but not yet returned by ReadPacket().
+@@ -128,11 +133,18 @@ func newConn(c OOBCapablePacketConn, supportsDF bool) (*oobConn, error) {
+ 	// Allows callers to pass in a connection that already satisfies batchConn interface
+ 	// to make use of the optimisation. Otherwise, ipv4.NewPacketConn would unwrap the file descriptor
+ 	// via SyscallConn(), and read it that way, which might not be what the caller wants.
++	packetConn := ipv4.NewPacketConn(c)
+ 	var bc batchConn
+ 	if ibc, ok := c.(batchConn); ok {
+ 		bc = ibc
+ 	} else {
+-		bc = ipv4.NewPacketConn(c)
++		bc = packetConn
++	}
++	var wbc writeBatchConn
++	if iwbc, ok := c.(writeBatchConn); ok {
++		wbc = iwbc
++	} else {
++		wbc = packetConn
+ 	}
+ 
+ 	msgs := make([]ipv4.Message, batchSize)
+@@ -143,6 +155,7 @@ func newConn(c OOBCapablePacketConn, supportsDF bool) (*oobConn, error) {
+ 	oobConn := &oobConn{
+ 		OOBCapablePacketConn: c,
+ 		batchConn:            bc,
++		writeBatchConn:       wbc,
+ 		messages:             msgs,
+ 		readPos:              batchSize,
+ 		cap: connCapabilities{
+@@ -268,6 +281,43 @@ func (c *oobConn) WritePacket(b []byte, addr net.Addr, packetInfoOOB []byte, gso
+ 	return n, err
+ }
+ 
++func (c *oobConn) WritePackets(packets []packetWrite, addr net.Addr, packetInfoOOB []byte) (int, error) {
++	if len(packets) == 0 {
++		return 0, nil
++	}
++	if len(packets) > sendQueueCapacity {
++		return 0, errors.New("packet batch exceeds send queue capacity")
++	}
++	var messages [sendQueueCapacity]ipv4.Message
++	var buffers [sendQueueCapacity][1][]byte
++	var oobBuffers [sendQueueCapacity][oobBufferSize]byte
++	for i, packet := range packets {
++		if packet.gsoSize > 0 && !c.capabilities().GSO {
++			panic("GSO disabled")
++		}
++		if packet.ecn != protocol.ECNUnsupported && !c.capabilities().ECN {
++			panic("tried to send an ECN-marked packet although ECN is disabled")
++		}
++		buffers[i][0] = packet.data
++		messages[i].Buffers = buffers[i][:]
++		messages[i].Addr = addr
++		oobLength := copy(oobBuffers[i][:], packetInfoOOB)
++		oob := oobBuffers[i][:oobLength]
++		if packet.gsoSize > 0 {
++			oob = appendUDPSegmentSizeMsg(oob, packet.gsoSize)
++		}
++		if packet.ecn != protocol.ECNUnsupported {
++			if remoteUDPAddr, ok := addr.(*net.UDPAddr); ok && remoteUDPAddr.IP.To4() != nil {
++				oob = appendIPv4ECNMsg(oob, packet.ecn)
++			} else {
++				oob = appendIPv6ECNMsg(oob, packet.ecn)
++			}
++		}
++		messages[i].OOB = oob
++	}
++	return c.writeBatchConn.WriteBatch(messages[:len(packets)], 0)
++}
++
+ func (c *oobConn) capabilities() connCapabilities {
+ 	return c.cap
+ }

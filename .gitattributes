@@ -6,5 +6,6 @@ go.mod text eol=lf
 *.sh text eol=lf
 *.service text eol=lf
 *.timer text eol=lf
+scripts/vendor-performance.patch whitespace=-blank-at-eol,-space-before-tab
 *.md text eol=lf
 *.ps1 text eol=crlf

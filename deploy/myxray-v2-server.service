@@ -1,0 +1,27 @@
+[Unit]
+Description=MyXray V2 HTTP/2 and HTTP/3 server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=myxray
+Group=myxray
+ExecStart=/opt/myxray-test/bin/myxray-server-current-arm64 -listen :11322 -quic-listen :11322 -quic-initial-packet-size 1452 -admin-listen 127.0.0.1:18122 -cert /etc/myxray-test/tls/fullchain.pem -key /etc/myxray-test/tls/privkey.pem -psk-file /etc/myxray-test/psk -path-file /etc/myxray-test/path -replay-file /var/lib/myxray-test/replay.log -ticket-key-file /etc/myxray-test/ticket-key -udp-target-buffer 4194304 -fallback https://127.0.0.1:443 -fallback-server-name status.chitanda.org
+Restart=on-failure
+RestartSec=2s
+StateDirectory=myxray-test
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=true
+MemoryDenyWriteExecute=true
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

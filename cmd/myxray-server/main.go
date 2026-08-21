@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"runtime/pprof"
 	"strings"
 	"syscall"
 	"time"
@@ -22,6 +23,7 @@ import (
 	"golang.org/x/net/http2"
 
 	"myxray/internal/auth"
+	"myxray/internal/frame"
 	"myxray/internal/quicconfig"
 	"myxray/internal/target"
 )
@@ -31,16 +33,19 @@ const (
 	headerTimestamp = "X-Session-Time"
 	headerNonce     = "X-Session-Nonce"
 	headerSignature = "X-Session-Auth"
+	headerSessionOK = "X-Session-OK"
+	headerFraming   = "X-Session-Framing"
 
 	h2ConnectionReceiveWindow = 64 << 20
 	h2StreamReceiveWindow     = 16 << 20
 )
 
 type server struct {
-	path     string
-	psk      []byte
-	replays  *auth.ReplayCache
-	fallback http.Handler
+	path            string
+	psk             []byte
+	replays         *auth.ReplayCache
+	fallback        http.Handler
+	udpTargetBuffer int
 }
 
 func main() {
@@ -52,14 +57,24 @@ func main() {
 	privatePath := flag.String("path", "", "private HTTP path")
 	pathFile := flag.String("path-file", "", "file containing the private HTTP path")
 	replayFile := flag.String("replay-file", "/var/lib/myxray/replay.log", "durable replay cache file")
+	cpuProfile := flag.String("cpu-profile", "", "optional CPU profile output file")
 	quicListen := flag.String("quic-listen", "", "optional HTTP/3 UDP listen address")
 	quicInitialPacketSize := flag.Uint("quic-initial-packet-size", quicconfig.DefaultInitialPacketSize, "QUIC initial packet size (1200-1452)")
 	ticketKeyFile := flag.String("ticket-key-file", "", "32-byte hex or base64url HTTP/3 ticket key")
 	fallbackURL := flag.String("fallback", "https://127.0.0.1:443", "normal HTTPS fallback")
 	fallbackServerName := flag.String("fallback-server-name", "probe.chitanda.org", "fallback TLS server name")
+	udpTargetBuffer := flag.Int("udp-target-buffer", 4<<20, "UDP target socket buffer in bytes")
 	flag.Parse()
+	stopCPUProfile, err := startCPUProfile(*cpuProfile)
+	if err != nil {
+		log.Fatalf("start CPU profile: %v", err)
+	}
+	defer stopCPUProfile()
 	if *quicInitialPacketSize < quicconfig.MinInitialPacketSize || *quicInitialPacketSize > quicconfig.MaxInitialPacketSize {
 		log.Fatal("quic-initial-packet-size must be between 1200 and 1452")
+	}
+	if *udpTargetBuffer < 64<<10 || *udpTargetBuffer > 16<<20 {
+		log.Fatal("udp-target-buffer must be between 65536 and 16777216")
 	}
 
 	path, err := loadPath(*privatePath, *pathFile)
@@ -80,7 +95,7 @@ func main() {
 	}
 	defer replays.Close()
 
-	app := &server{path: path, psk: psk, replays: replays, fallback: fallback}
+	app := &server{path: path, psk: psk, replays: replays, fallback: fallback, udpTargetBuffer: *udpTargetBuffer}
 	public := &http.Server{
 		Addr:              *listen,
 		Handler:           app,
@@ -139,6 +154,24 @@ func main() {
 	}
 }
 
+func startCPUProfile(path string) (func(), error) {
+	if path == "" {
+		return func() {}, nil
+	}
+	profile, err := os.Create(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := pprof.StartCPUProfile(profile); err != nil {
+		_ = profile.Close()
+		return nil, err
+	}
+	return func() {
+		pprof.StopCPUProfile()
+		_ = profile.Close()
+	}, nil
+}
+
 func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.ProtoMajor == 3 {
 		s.serveHTTP3(w, r)
@@ -167,18 +200,45 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set(headerSessionOK, "1")
+	framedResponse := r.Header.Get(headerMode) == modeTCPH2Framed
+	if framedResponse {
+		w.Header().Set(headerFraming, "1")
+	}
 	w.WriteHeader(http.StatusOK)
 	if flusher, ok := w.(http.Flusher); ok {
 		flusher.Flush()
 	}
 
+	uploadDone := make(chan error, 1)
 	go func() {
-		_, _ = io.Copy(upstream, r.Body)
-		if tcp, ok := upstream.(*net.TCPConn); ok {
-			_ = tcp.CloseWrite()
+		_, uploadErr := io.Copy(upstream, r.Body)
+		if uploadErr == nil {
+			if tcp, ok := upstream.(*net.TCPConn); ok {
+				uploadErr = tcp.CloseWrite()
+			}
+		} else {
+			_ = upstream.Close()
 		}
+		uploadDone <- uploadErr
 	}()
-	_, _ = io.Copy(flushWriter{w: w}, upstream)
+	var downloadErr error
+	if framedResponse {
+		downloadErr = frame.CopyAsDataFramesAndClose(flushWriter{w: w}, upstream)
+	} else {
+		_, downloadErr = io.Copy(flushWriter{w: w}, upstream)
+	}
+	if downloadErr != nil {
+		_ = upstream.Close()
+		return
+	}
+	if tcp, ok := upstream.(*net.TCPConn); ok {
+		_ = tcp.CloseRead()
+	}
+	select {
+	case <-uploadDone:
+	case <-r.Context().Done():
+	}
 }
 
 func (s *server) authorize(r *http.Request, targetAddress, timestamp, nonce, signature string) bool {
@@ -194,10 +254,35 @@ func (s *server) authorize(r *http.Request, targetAddress, timestamp, nonce, sig
 }
 
 func (s *server) serveFallback(w http.ResponseWriter, r *http.Request) {
-	r.Header.Del(headerTarget)
-	r.Header.Del(headerTimestamp)
-	r.Header.Del(headerNonce)
-	r.Header.Del(headerSignature)
+	privateAttempt := false
+	for _, name := range []string{headerTarget, headerTimestamp, headerNonce, headerSignature, headerMode} {
+		if _, present := r.Header[http.CanonicalHeaderKey(name)]; present {
+			privateAttempt = true
+		}
+		r.Header.Del(name)
+	}
+	if privateAttempt {
+		// Closing a server request body can synchronously drain a slow HTTP/1
+		// upload. Suppress it before proxying and close the HTTP/1 connection
+		// after the fallback response so net/http won't drain it for reuse.
+		if r.ProtoMajor == 1 {
+			w.Header().Set("Connection", "close")
+			defer func() {
+				// net/http retains the original request body separately from
+				// r.Body and may drain it after the handler returns. Expire
+				// reads so an incomplete chunked upload can't pin the server.
+				_ = http.NewResponseController(w).SetReadDeadline(time.Unix(1, 0))
+			}()
+		}
+		r.Body = http.NoBody
+		r.GetBody = nil
+		r.ContentLength = 0
+		r.TransferEncoding = nil
+		r.Trailer = nil
+		r.Header.Del("Content-Length")
+		r.Header.Del("Transfer-Encoding")
+		r.Header.Del("Expect")
+	}
 	s.fallback.ServeHTTP(w, r)
 }
 
@@ -220,6 +305,12 @@ func newFallback(rawURL, serverName string) (http.Handler, error) {
 	}
 	proxy := httputil.NewSingleHostReverseProxy(targetURL)
 	proxy.Transport = &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, ServerName: serverName}}
+	proxy.ModifyResponse = func(response *http.Response) error {
+		response.Header.Del(headerSessionOK)
+		response.Header.Del(headerFraming)
+		response.Header.Del("X-Session-Early")
+		return nil
+	}
 	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, _ error) {
 		http.NotFound(w, nil)
 	}

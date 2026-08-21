@@ -19,6 +19,11 @@ import (
 
 const maxQuarterStreamID = 1<<60 - 1
 
+// Bound queued HTTP Datagrams across all streams on one connection. A single
+// authenticated UDP association needs far less than this, while the limit
+// prevents unauthenticated streams from multiplying their per-stream queues.
+const maxQueuedDatagramBytes = 8 << 20
+
 // invalidStreamID is a stream ID that is invalid. The first valid stream ID in QUIC is 0.
 const invalidStreamID = quic.StreamID(-1)
 
@@ -32,8 +37,9 @@ type rawConn struct {
 
 	enableDatagrams bool
 
-	streamMx sync.Mutex
-	streams  map[quic.StreamID]*stateTrackingStream
+	streamMx            sync.Mutex
+	streams             map[quic.StreamID]*stateTrackingStream
+	queuedDatagramBytes atomic.Int64
 
 	rcvdControlStr      atomic.Bool
 	rcvdQPACKEncoderStr atomic.Bool
@@ -114,7 +120,12 @@ func (c *rawConn) openControlStream(settings *settingsFrame) (*quic.SendStream, 
 }
 
 func (c *rawConn) TrackStream(str *quic.Stream) *stateTrackingStream {
-	hstr := newStateTrackingStream(str, c, func(b []byte) error { return c.sendDatagram(str.StreamID(), b) })
+	hstr := newStateTrackingStream(
+		str,
+		c,
+		func(b []byte) error { return c.sendDatagram(str.StreamID(), b) },
+		func(datagrams [][]byte) error { return c.sendDatagrams(str.StreamID(), datagrams) },
+	)
 
 	c.streamMx.Lock()
 	c.streams[str.StreamID()] = hstr
@@ -141,6 +152,24 @@ func (c *rawConn) clearStream(id quic.StreamID) {
 	}
 	if len(c.streams) == 0 {
 		c.onStreamsEmpty()
+	}
+}
+
+func (c *rawConn) reserveDatagram(size int) bool {
+	for {
+		current := c.queuedDatagramBytes.Load()
+		if size < 0 || current+int64(size) > maxQueuedDatagramBytes {
+			return false
+		}
+		if c.queuedDatagramBytes.CompareAndSwap(current, current+int64(size)) {
+			return true
+		}
+	}
+}
+
+func (c *rawConn) releaseDatagram(size int) {
+	if size > 0 {
+		c.queuedDatagramBytes.Add(-int64(size))
 	}
 }
 
@@ -235,6 +264,7 @@ func (c *rawConn) handleControlStream(str *quic.ReceiveStream) {
 		}
 		c.qloggerWG.Go(func() {
 			if err := c.receiveDatagrams(); err != nil {
+				c.closeDatagramReceivers(err)
 				if c.logger != nil {
 					c.logger.Debug("receiving datagrams failed", "error", err)
 				}
@@ -244,6 +274,23 @@ func (c *rawConn) handleControlStream(str *quic.ReceiveStream) {
 
 	if c.controlStrHandler != nil {
 		c.controlStrHandler(str, fp)
+	}
+}
+
+func (c *rawConn) closeDatagramReceivers(err error) {
+	if err == nil {
+		err = errors.New("HTTP Datagram receive loop stopped")
+	}
+	c.streamMx.Lock()
+	streams := make([]*stateTrackingStream, 0, len(c.streams))
+	for _, stream := range c.streams {
+		streams = append(streams, stream)
+	}
+	c.streamMx.Unlock()
+	// closeReceive can clear a fully closed stream and take streamMx. Never
+	// call it while holding the connection's stream map lock.
+	for _, stream := range streams {
+		stream.closeReceive(err)
 	}
 }
 
@@ -265,38 +312,103 @@ func (c *rawConn) sendDatagram(streamID quic.StreamID, b []byte) error {
 	return c.conn.SendDatagramNoCopy(data)
 }
 
-func (c *rawConn) receiveDatagrams() error {
-	for {
-		b, err := c.conn.ReceiveDatagram(context.Background())
-		if err != nil {
-			return err
-		}
-		quarterStreamID, n, err := quicvarint.Parse(b)
-		if err != nil {
-			c.CloseWithError(quic.ApplicationErrorCode(ErrCodeDatagramError), "")
-			return fmt.Errorf("could not read quarter stream id: %w", err)
-		}
+func (c *rawConn) sendDatagrams(streamID quic.StreamID, datagrams [][]byte) error {
+	quarterStreamID := uint64(streamID / 4)
+	prefix := quicvarint.Append(nil, quarterStreamID)
+	totalSize := 0
+	for _, datagram := range datagrams {
+		totalSize += len(prefix) + len(datagram)
+	}
+	dataBuffer := make([]byte, totalSize)
+	payloads := make([][]byte, len(datagrams))
+	offset := 0
+	for i, datagram := range datagrams {
+		end := offset + len(prefix) + len(datagram)
+		data := dataBuffer[offset:end:end]
+		copy(data, prefix)
+		copy(data[len(prefix):], datagram)
+		payloads[i] = data
+		offset = end
 		if c.qlogger != nil {
-			c.qlogger.RecordEvent(qlog.DatagramParsed{
+			c.qlogger.RecordEvent(qlog.DatagramCreated{
 				QuarterStreamID: quarterStreamID,
-				Raw: qlog.RawInfo{
-					Length:        len(b),
-					PayloadLength: len(b) - n,
-				},
+				Raw:             qlog.RawInfo{Length: len(data), PayloadLength: len(datagram)},
 			})
 		}
-		if quarterStreamID > maxQuarterStreamID {
-			c.CloseWithError(quic.ApplicationErrorCode(ErrCodeDatagramError), "")
-			return fmt.Errorf("invalid quarter stream id: %w", err)
+	}
+	return c.conn.SendDatagramsNoCopy(payloads)
+}
+
+func (c *rawConn) receiveDatagrams() error {
+	var datagrams [32][]byte
+	var lastStreamID quic.StreamID = invalidStreamID
+	var lastStream *stateTrackingStream
+	for {
+		count, receiveErr := c.conn.ReceiveDatagrams(context.Background(), datagrams[:])
+		if count < 0 || count > len(datagrams) {
+			return fmt.Errorf("invalid datagram batch size: %d", count)
 		}
-		streamID := quic.StreamID(4 * quarterStreamID)
-		c.streamMx.Lock()
-		dg, ok := c.streams[streamID]
-		c.streamMx.Unlock()
-		if !ok {
-			continue
+		var pendingStream *stateTrackingStream
+		var pending [][]byte
+		flush := func() {
+			if pendingStream != nil && len(pending) > 0 {
+				pendingStream.enqueueDatagrams(pending)
+			}
+			pendingStream = nil
+			pending = pending[:0]
 		}
-		dg.enqueueDatagram(b[n:])
+		for i := range count {
+			b := datagrams[i]
+			quarterStreamID, n, err := quicvarint.Parse(b)
+			if err != nil {
+				c.CloseWithError(quic.ApplicationErrorCode(ErrCodeDatagramError), "")
+				return fmt.Errorf("could not read quarter stream id: %w", err)
+			}
+			if c.qlogger != nil {
+				c.qlogger.RecordEvent(qlog.DatagramParsed{
+					QuarterStreamID: quarterStreamID,
+					Raw: qlog.RawInfo{
+						Length:        len(b),
+						PayloadLength: len(b) - n,
+					},
+				})
+			}
+			if quarterStreamID > maxQuarterStreamID {
+				c.CloseWithError(quic.ApplicationErrorCode(ErrCodeDatagramError), "")
+				return fmt.Errorf("invalid quarter stream id: %d", quarterStreamID)
+			}
+			streamID := quic.StreamID(4 * quarterStreamID)
+			var dg *stateTrackingStream
+			if streamID == lastStreamID && lastStream != nil {
+				dg = lastStream
+			} else {
+				c.streamMx.Lock()
+				dg = c.streams[streamID]
+				c.streamMx.Unlock()
+				if dg != nil {
+					lastStreamID = streamID
+					lastStream = dg
+				} else {
+					lastStreamID = invalidStreamID
+					lastStream = nil
+				}
+			}
+			if dg == nil {
+				continue
+			}
+			if pendingStream != dg {
+				flush()
+				pendingStream = dg
+			}
+			pending = append(pending, b[n:])
+		}
+		flush()
+		for i := range count {
+			datagrams[i] = nil
+		}
+		if receiveErr != nil {
+			return receiveErr
+		}
 	}
 }
 

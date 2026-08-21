@@ -14,6 +14,7 @@ import (
 
 	quic "github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
+	"golang.org/x/net/ipv4"
 
 	"myxray/internal/auth"
 	"myxray/internal/frame"
@@ -22,10 +23,12 @@ import (
 )
 
 const (
-	headerMode  = "X-Session-Mode"
-	modeTCPv2   = "tcp-v2"
-	modeUDPv2   = "udp-v2"
-	udpAuthName = "udp-association"
+	headerMode         = "X-Session-Mode"
+	modeTCPv2          = "tcp-v2"
+	modeUDPv2          = "udp-v2"
+	modeTCPH2Framed    = "tcp-h2-framed"
+	udpAuthName        = "udp-association"
+	privateOpenTimeout = 15 * time.Second
 )
 
 func newHTTP3Server(address string, handler http.Handler, ticketKeyFile, certFile, keyFile string, initialPacketSize uint16) (*http3.Server, error) {
@@ -80,6 +83,24 @@ func (s *server) serveHTTP3(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) serveHTTP3TCP(w http.ResponseWriter, r *http.Request, targetAddress string) {
+	streamer, ok := w.(http3.HTTPStreamer)
+	if !ok {
+		http.Error(w, "HTTP/3 stream unavailable", http.StatusInternalServerError)
+		return
+	}
+	controller := http.NewResponseController(w)
+	if err := controller.SetReadDeadline(time.Now().Add(privateOpenTimeout)); err != nil {
+		return
+	}
+	if err := readOpenFrame(r.Body, targetAddress); err != nil {
+		return
+	}
+	if err := controller.SetReadDeadline(time.Time{}); err != nil {
+		return
+	}
+
+	// An authenticated header is not enough to authorize an upstream side
+	// effect. Validate the private OPEN frame first, including for 0-RTT.
 	upstream, err := target.DialContext(r.Context(), targetAddress)
 	if err != nil {
 		log.Printf("authenticated HTTP/3 upstream dial failed")
@@ -90,6 +111,7 @@ func (s *server) serveHTTP3TCP(w http.ResponseWriter, r *http.Request, targetAdd
 
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set(headerSessionOK, "1")
 	if r.TLS != nil && !r.TLS.HandshakeComplete {
 		w.Header().Set("X-Session-Early", "1")
 	}
@@ -97,36 +119,42 @@ func (s *server) serveHTTP3TCP(w http.ResponseWriter, r *http.Request, targetAdd
 	if flusher, ok := w.(http.Flusher); ok {
 		flusher.Flush()
 	}
-	streamer, ok := w.(http3.HTTPStreamer)
-	if !ok {
+	stream := streamer.HTTPStream()
+	defer func() {
+		stream.CancelRead(0)
+		_ = stream.Close()
+	}()
+	if err := frame.WriteFrame(stream, frame.TypeOpenAck, 0, nil); err != nil {
 		return
 	}
-	stream := streamer.HTTPStream()
-	defer stream.Close()
-
 	uploadDone := make(chan error, 1)
 	go func() {
-		uploadErr := copyFramesToTCP(stream, upstream, targetAddress)
+		uploadErr := copyDataFramesToTCP(stream, upstream)
 		if uploadErr != nil {
 			_ = upstream.Close()
 		}
 		uploadDone <- uploadErr
 	}()
-	if err := frame.WriteFrame(stream, frame.TypeOpenAck, 0, nil); err != nil {
+	if err := frame.CopyAsDataFramesAndClose(stream, upstream); err != nil {
+		stream.CancelWrite(0)
 		return
 	}
-	_, _ = frame.CopyAsDataFrames(stream, upstream)
-	_ = frame.WriteFrame(stream, frame.TypeHalfClose, 0, nil)
-	<-uploadDone
+	select {
+	case <-uploadDone:
+	case <-r.Context().Done():
+	}
 }
 
-func copyFramesToTCP(stream io.Reader, upstream net.Conn, targetAddress string) error {
+func readOpenFrame(stream io.Reader, targetAddress string) error {
 	header, err := frame.ReadHeader(stream)
 	if err != nil {
 		return err
 	}
-	if header.Type != frame.TypeOpen {
+	if header.Type != frame.TypeOpen || header.Flags != 0 {
 		return errors.New("first private frame is not OPEN")
+	}
+	if uint64(header.Length) != uint64(len(targetAddress)) {
+		return errors.New("OPEN target length mismatch")
 	}
 	payload, err := frame.ReadPayload(stream, header.Length)
 	if err != nil {
@@ -135,6 +163,10 @@ func copyFramesToTCP(stream io.Reader, upstream net.Conn, targetAddress string) 
 	if string(payload) != targetAddress {
 		return errors.New("OPEN target mismatch")
 	}
+	return nil
+}
+
+func copyDataFramesToTCP(stream io.Reader, upstream net.Conn) error {
 	for {
 		header, err := frame.ReadHeader(stream)
 		if err != nil {
@@ -181,6 +213,7 @@ func (s *server) serveHTTP3UDP(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Capsule-Protocol", "?1")
 	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set(headerSessionOK, "1")
 	w.WriteHeader(http.StatusOK)
 	if flusher, ok := w.(http.Flusher); ok {
 		flusher.Flush()
@@ -190,88 +223,228 @@ func (s *server) serveHTTP3UDP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	stream := streamer.HTTPStream()
-	defer stream.Close()
-	relay := newUDPRelay(r.Context(), stream)
+	defer func() {
+		stream.CancelRead(0)
+		_ = stream.Close()
+	}()
+	relay := newUDPRelay(r.Context(), stream, s.udpTargetBuffer)
 	defer relay.Close()
+	var packetBuffer [udpRelayBatchSize][]byte
 	for {
-		packet, err := stream.ReceiveDatagram(r.Context())
+		packets, err := receiveDatagramBatch(r.Context(), stream, packetBuffer[:])
 		if err != nil {
 			if r.Context().Err() == nil {
 				log.Printf("HTTP/3 UDP receive stopped: %v", err)
 			}
 			return
 		}
-		if err := relay.Forward(packet); err != nil {
+		if err := relay.ForwardBatch(packets); err != nil {
 			log.Printf("HTTP/3 UDP datagram rejected")
 		}
+		for i := range packets {
+			packetBuffer[i] = nil
+		}
 	}
+}
+
+type datagramBatchReceiver interface {
+	ReceiveDatagramsInto(context.Context, [][]byte) (int, error)
+}
+
+func receiveDatagramBatch(ctx context.Context, stream *http3.Stream, buffer [][]byte) ([][]byte, error) {
+	if receiver, ok := any(stream).(datagramBatchReceiver); ok {
+		count, err := receiver.ReceiveDatagramsInto(ctx, buffer)
+		if count < 0 || count > len(buffer) {
+			return nil, errors.New("invalid HTTP Datagram batch size")
+		}
+		return buffer[:count], err
+	}
+	packet, err := stream.ReceiveDatagram(ctx)
+	if err != nil {
+		return nil, err
+	}
+	buffer[0] = packet
+	return buffer[:1], nil
 }
 
 type datagramStream interface {
 	SendDatagram([]byte) error
 }
 
-type udpTarget struct {
-	address string
-	conn    *net.UDPConn
+type datagramBatchStream interface {
+	SendDatagrams([][]byte) error
 }
+
+type udpTarget struct {
+	address  string
+	conn     *net.UDPConn
+	batch    *ipv4.PacketConn
+	messages [udpRelayBatchSize]ipv4.Message
+}
+
+const udpRelayBatchSize = 32
 
 type udpRelay struct {
-	ctx       context.Context
-	stream    datagramStream
-	mu        sync.Mutex
-	sendMu    sync.Mutex
-	targets   map[string]*udpTarget
-	replay    frame.ReplayWindow
-	decoder   frame.DatagramCache
-	sequence  atomic.Uint64
-	waitGroup sync.WaitGroup
+	ctx          context.Context
+	stream       datagramStream
+	targetBuffer int
+	mu           sync.Mutex
+	sendMu       sync.Mutex
+	targets      map[string]*udpTarget
+	replay       frame.ReplayWindow
+	decoder      frame.DatagramCache
+	sequence     atomic.Uint64
+	waitGroup    sync.WaitGroup
 }
 
-func newUDPRelay(ctx context.Context, stream datagramStream) *udpRelay {
-	return &udpRelay{ctx: ctx, stream: stream, targets: make(map[string]*udpTarget)}
+func newUDPRelay(ctx context.Context, stream datagramStream, targetBuffers ...int) *udpRelay {
+	targetBuffer := 4 << 20
+	if len(targetBuffers) > 0 && targetBuffers[0] > 0 {
+		targetBuffer = targetBuffers[0]
+	}
+	return &udpRelay{ctx: ctx, stream: stream, targetBuffer: targetBuffer, targets: make(map[string]*udpTarget)}
 }
 
 func (r *udpRelay) Forward(packet []byte) error {
-	sequence, address, payload, err := r.decoder.Decode(packet)
-	if err != nil || !r.replay.Accept(sequence) {
-		return errors.New("invalid or replayed datagram")
+	return r.ForwardBatch([][]byte{packet})
+}
+
+func (r *udpRelay) ForwardBatch(packets [][]byte) error {
+	var currentTarget *udpTarget
+	var payloads [udpRelayBatchSize][]byte
+	payloadCount := 0
+	var firstErr error
+	flush := func() {
+		if payloadCount == 0 {
+			return
+		}
+		if err := currentTarget.writeBatch(payloads[:payloadCount]); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		for i := range payloadCount {
+			payloads[i] = nil
+		}
+		payloadCount = 0
 	}
+
+	for _, packet := range packets {
+		sequence, address, payload, err := r.decoder.Decode(packet)
+		if err != nil || !r.replay.Accept(sequence) {
+			if firstErr == nil {
+				firstErr = errors.New("invalid or replayed datagram")
+			}
+			continue
+		}
+		var targetConn *udpTarget
+		if currentTarget != nil && address == currentTarget.address {
+			targetConn = currentTarget
+		} else {
+			targetConn, err = r.target(address)
+			if err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+		}
+		if currentTarget != nil && targetConn != currentTarget {
+			flush()
+		}
+		currentTarget = targetConn
+		payloads[payloadCount] = payload
+		payloadCount++
+		if payloadCount == len(payloads) {
+			flush()
+		}
+	}
+	flush()
+	return firstErr
+}
+
+func (r *udpRelay) target(address string) (*udpTarget, error) {
 	r.mu.Lock()
 	targetConn := r.targets[address]
 	r.mu.Unlock()
 	if targetConn != nil {
-		_, err = targetConn.conn.Write(payload)
-		return err
+		return targetConn, nil
 	}
 	resolved, err := target.ResolveUDPAddr(r.ctx, address)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	r.mu.Lock()
 	targetConn = r.targets[address]
 	if targetConn == nil {
 		if len(r.targets) >= 64 {
 			r.mu.Unlock()
-			return errors.New("too many UDP targets")
+			return nil, errors.New("too many UDP targets")
 		}
 		connection, err := net.DialUDP("udp", nil, resolved)
 		if err != nil {
 			r.mu.Unlock()
-			return err
+			return nil, err
+		}
+		if err := connection.SetReadBuffer(r.targetBuffer); err != nil {
+			log.Printf("set UDP target receive buffer: %v", err)
+		}
+		if err := connection.SetWriteBuffer(r.targetBuffer); err != nil {
+			log.Printf("set UDP target send buffer: %v", err)
 		}
 		targetConn = &udpTarget{address: address, conn: connection}
+		if resolved.IP.To4() != nil {
+			targetConn.batch = ipv4.NewPacketConn(connection)
+			for i := range targetConn.messages {
+				targetConn.messages[i].Buffers = make([][]byte, 1)
+			}
+		}
 		r.targets[address] = targetConn
 		r.waitGroup.Add(1)
 		go r.receive(targetConn)
 	}
 	r.mu.Unlock()
-	_, err = targetConn.conn.Write(payload)
-	return err
+	return targetConn, nil
+}
+
+func (t *udpTarget) writeBatch(payloads [][]byte) error {
+	if t.batch == nil || len(payloads) == 1 {
+		for _, payload := range payloads {
+			if _, err := t.conn.Write(payload); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	for i, payload := range payloads {
+		t.messages[i].Buffers[0] = payload
+	}
+	written, _ := t.batch.WriteBatch(t.messages[:len(payloads)], 0)
+	written = max(0, min(written, len(payloads)))
+	var fallbackErr error
+	for _, payload := range payloads[written:] {
+		if _, err := t.conn.Write(payload); err != nil {
+			fallbackErr = err
+			break
+		}
+	}
+	for i := range payloads {
+		t.messages[i].Buffers[0] = nil
+	}
+	if fallbackErr != nil {
+		return fallbackErr
+	}
+	return nil
 }
 
 func (r *udpRelay) receive(targetConn *udpTarget) {
 	defer r.waitGroup.Done()
+	if targetConn.batch != nil {
+		r.receiveBatch(targetConn)
+		return
+	}
+	r.receiveSingle(targetConn)
+}
+
+func (r *udpRelay) receiveSingle(targetConn *udpTarget) {
 	buffer := make([]byte, 64<<10)
 	datagramBuffer := make([]byte, frame.MaxDatagramSize)
 	oversizeLogged := false
@@ -287,21 +460,87 @@ func (r *udpRelay) receive(targetConn *udpTarget) {
 		if err != nil {
 			continue
 		}
-		r.sendMu.Lock()
-		err = r.stream.SendDatagram(packet)
-		r.sendMu.Unlock()
-		if err != nil {
-			var tooLarge *quic.DatagramTooLargeError
-			if errors.As(err, &tooLarge) {
-				if !oversizeLogged {
-					log.Printf("HTTP/3 UDP response dropped: path datagram limit=%d", tooLarge.MaxDatagramPayloadSize)
-					oversizeLogged = true
-				}
-				continue
-			}
+		if err := r.sendResponseBatch([][]byte{packet}, &oversizeLogged); err != nil {
 			return
 		}
 	}
+}
+
+func (r *udpRelay) receiveBatch(targetConn *udpTarget) {
+	var messages [udpRelayBatchSize]ipv4.Message
+	var payloadBuffers [udpRelayBatchSize][]byte
+	var datagramBuffers [udpRelayBatchSize][]byte
+	var datagrams [udpRelayBatchSize][]byte
+	for i := range messages {
+		payloadBuffers[i] = make([]byte, frame.MaxDatagramPayload+1)
+		messages[i].Buffers = [][]byte{payloadBuffers[i]}
+		datagramBuffers[i] = make([]byte, frame.MaxDatagramSize)
+	}
+	oversizeLogged := false
+	for {
+		count, readErr := targetConn.batch.ReadBatch(messages[:], 0)
+		if count < 0 || count > len(messages) {
+			return
+		}
+		datagramCount := 0
+		for i := range count {
+			if messages[i].N > frame.MaxDatagramPayload {
+				continue
+			}
+			packet, err := frame.EncodeDatagramInto(
+				datagramBuffers[datagramCount],
+				r.sequence.Add(1),
+				targetConn.address,
+				messages[i].Buffers[0][:messages[i].N],
+			)
+			if err != nil {
+				continue
+			}
+			datagrams[datagramCount] = packet
+			datagramCount++
+		}
+		if err := r.sendResponseBatch(datagrams[:datagramCount], &oversizeLogged); err != nil {
+			return
+		}
+		for i := range datagramCount {
+			datagrams[i] = nil
+		}
+		if readErr != nil {
+			return
+		}
+	}
+}
+
+func (r *udpRelay) sendResponseBatch(datagrams [][]byte, oversizeLogged *bool) error {
+	if len(datagrams) == 0 {
+		return nil
+	}
+	r.sendMu.Lock()
+	defer r.sendMu.Unlock()
+	if sender, ok := r.stream.(datagramBatchStream); ok && len(datagrams) > 1 {
+		err := sender.SendDatagrams(datagrams)
+		if err == nil {
+			return nil
+		}
+		var tooLarge *quic.DatagramTooLargeError
+		if !errors.As(err, &tooLarge) {
+			return err
+		}
+	}
+	for _, datagram := range datagrams {
+		if err := r.stream.SendDatagram(datagram); err != nil {
+			var tooLarge *quic.DatagramTooLargeError
+			if errors.As(err, &tooLarge) {
+				if !*oversizeLogged {
+					log.Printf("HTTP/3 UDP response dropped: path datagram limit=%d", tooLarge.MaxDatagramPayloadSize)
+					*oversizeLogged = true
+				}
+				continue
+			}
+			return err
+		}
+	}
+	return nil
 }
 
 func (r *udpRelay) Close() {

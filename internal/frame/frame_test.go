@@ -2,9 +2,16 @@ package frame
 
 import (
 	"bytes"
+	"errors"
 	"io"
+	"math"
+	"math/rand"
 	"testing"
 )
+
+type failingReader struct{ err error }
+
+func (r failingReader) Read([]byte) (int, error) { return 0, r.err }
 
 func TestFrameRoundTrip(t *testing.T) {
 	var buffer bytes.Buffer
@@ -52,6 +59,36 @@ func TestCopyAsDataFrames(t *testing.T) {
 	}
 	if !bytes.Equal(decoded.Bytes(), source) {
 		t.Fatal("decoded payload differs")
+	}
+}
+
+func TestCopyAsDataFramesAndCloseMarksCleanEOF(t *testing.T) {
+	var encoded bytes.Buffer
+	if err := CopyAsDataFramesAndClose(&encoded, bytes.NewReader(nil)); err != nil {
+		t.Fatal(err)
+	}
+	header, err := ReadHeader(&encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if header.Type != TypeHalfClose || header.Length != 0 {
+		t.Fatalf("terminal frame = %+v", header)
+	}
+}
+
+func TestCopyAsDataFramesAndCloseMarksSourceFailure(t *testing.T) {
+	wantErr := errors.New("source failed")
+	var encoded bytes.Buffer
+	err := CopyAsDataFramesAndClose(&encoded, failingReader{err: wantErr})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("error = %v", err)
+	}
+	header, readErr := ReadHeader(&encoded)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if header.Type != TypeReset || header.Length != 0 {
+		t.Fatalf("terminal frame = %+v", header)
 	}
 }
 
@@ -138,5 +175,98 @@ func TestReplayWindowAcceptsDeepReordering(t *testing.T) {
 	}
 	if !window.Accept(4097) || window.Accept(4096) {
 		t.Fatal("window shift lost duplicate state")
+	}
+}
+
+type replayWindowModel struct {
+	initialized bool
+	highest     uint64
+	seen        map[uint64]struct{}
+}
+
+func (m *replayWindowModel) Accept(sequence uint64) bool {
+	if !m.initialized {
+		m.initialized = true
+		m.highest = sequence
+		m.seen = make(map[uint64]struct{})
+	} else {
+		if sequence > m.highest {
+			m.highest = sequence
+		}
+		if m.highest-sequence >= ReplayWindowSize {
+			return false
+		}
+	}
+	if _, duplicate := m.seen[sequence]; duplicate {
+		return false
+	}
+	m.seen[sequence] = struct{}{}
+	return true
+}
+
+func TestReplayWindowMatchesReferenceModel(t *testing.T) {
+	for seed := int64(0); seed < 8; seed++ {
+		rng := rand.New(rand.NewSource(seed))
+		var window ReplayWindow
+		var model replayWindowModel
+		sequence := uint64(1 << 40)
+		for operation := 0; operation < 20000; operation++ {
+			switch choice := rng.Intn(100); {
+			case !model.initialized:
+				sequence += uint64(rng.Intn(ReplayWindowSize * 2))
+			case choice < 45:
+				sequence = model.highest + 1 + uint64(rng.Intn(8))
+			case choice < 60:
+				sequence = model.highest + 1 + uint64(rng.Intn(ReplayWindowSize-1))
+			case choice < 65:
+				sequence = model.highest + ReplayWindowSize + uint64(rng.Intn(ReplayWindowSize*2))
+			default:
+				delta := uint64(rng.Intn(ReplayWindowSize + 512))
+				if delta > model.highest {
+					sequence = 0
+				} else {
+					sequence = model.highest - delta
+				}
+			}
+			got := window.Accept(sequence)
+			want := model.Accept(sequence)
+			if got != want {
+				t.Fatalf("seed=%d operation=%d sequence=%d highest=%d: got %v want %v", seed, operation, sequence, model.highest, got, want)
+			}
+		}
+	}
+}
+
+func TestReplayWindowUint64Boundary(t *testing.T) {
+	sequences := []uint64{
+		math.MaxUint64 - ReplayWindowSize - 10,
+		math.MaxUint64 - ReplayWindowSize,
+		math.MaxUint64 - 2,
+		math.MaxUint64,
+		math.MaxUint64 - 1,
+		math.MaxUint64 - 1,
+		math.MaxUint64 - ReplayWindowSize + 1,
+		math.MaxUint64 - ReplayWindowSize,
+		0,
+		1,
+		math.MaxUint64,
+	}
+	var window ReplayWindow
+	var model replayWindowModel
+	for index, sequence := range sequences {
+		got := window.Accept(sequence)
+		want := model.Accept(sequence)
+		if got != want {
+			t.Fatalf("index=%d sequence=%d: got %v want %v", index, sequence, got, want)
+		}
+	}
+}
+
+func BenchmarkReplayWindowAcceptInOrder(b *testing.B) {
+	var window ReplayWindow
+	for sequence := uint64(0); sequence < uint64(b.N); sequence++ {
+		if !window.Accept(sequence) {
+			b.Fatalf("sequence %d rejected", sequence)
+		}
 	}
 }

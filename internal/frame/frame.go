@@ -91,6 +91,18 @@ func CopyAsDataFrames(w io.Writer, r io.Reader) (int64, error) {
 	}
 }
 
+// CopyAsDataFramesAndClose emits HALF_CLOSE only after a clean source EOF.
+// Source or transport failures are marked as RESET so peers don't mistake a
+// truncated byte stream for a graceful TCP half-close.
+func CopyAsDataFramesAndClose(w io.Writer, r io.Reader) error {
+	_, err := CopyAsDataFrames(w, r)
+	if err != nil {
+		_ = WriteFrame(w, TypeReset, 0, nil)
+		return err
+	}
+	return WriteFrame(w, TypeHalfClose, 0, nil)
+}
+
 func encodeHeader(dst []byte, frameType Type, flags uint16, length uint32) {
 	dst[0] = Version
 	dst[1] = byte(frameType)
@@ -191,41 +203,57 @@ func (w *ReplayWindow) Accept(sequence uint64) bool {
 	if !w.initialized {
 		w.initialized = true
 		w.highest = sequence
-		w.bits[0] = 1
+		w.mark(sequence)
 		return true
 	}
 	if sequence > w.highest {
-		shift := sequence - w.highest
-		if shift >= ReplayWindowSize {
+		advance := sequence - w.highest
+		if advance >= ReplayWindowSize {
 			clear(w.bits[:])
 		} else {
-			wordShift := int(shift / 64)
-			bitShift := uint(shift % 64)
-			for index := len(w.bits) - 1; index >= 0; index-- {
-				source := index - wordShift
-				var value uint64
-				if source >= 0 {
-					value = w.bits[source] << bitShift
-					if bitShift != 0 && source > 0 {
-						value |= w.bits[source-1] >> (64 - bitShift)
-					}
-				}
-				w.bits[index] = value
-			}
+			// Slots are keyed by sequence modulo the window size. Clear only
+			// skipped slots; the final slot is overwritten by mark below. The
+			// common in-order case has no range to clear.
+			w.clearSlots(w.highest+1, advance-1)
 		}
-		w.bits[0] |= 1
 		w.highest = sequence
+		w.mark(sequence)
 		return true
 	}
 	delta := w.highest - sequence
 	if delta >= ReplayWindowSize {
 		return false
 	}
-	word := delta / 64
-	mask := uint64(1) << (delta % 64)
+	word, mask := replaySlot(sequence)
 	if w.bits[word]&mask != 0 {
 		return false
 	}
 	w.bits[word] |= mask
 	return true
+}
+
+func (w *ReplayWindow) mark(sequence uint64) {
+	word, mask := replaySlot(sequence)
+	w.bits[word] |= mask
+}
+
+func (w *ReplayWindow) clearSlots(sequence, count uint64) {
+	for count > 0 {
+		slot := sequence % ReplayWindowSize
+		word := int(slot / 64)
+		bit := slot % 64
+		chunk := min(count, 64-bit)
+		mask := ^uint64(0)
+		if chunk < 64 {
+			mask = (uint64(1) << chunk) - 1
+		}
+		w.bits[word] &^= mask << bit
+		sequence += chunk
+		count -= chunk
+	}
+}
+
+func replaySlot(sequence uint64) (int, uint64) {
+	slot := sequence % ReplayWindowSize
+	return int(slot / 64), uint64(1) << (slot % 64)
 }

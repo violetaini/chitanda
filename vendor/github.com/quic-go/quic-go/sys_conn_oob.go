@@ -37,6 +37,10 @@ type batchConn interface {
 	ReadBatch(ms []ipv4.Message, flags int) (int, error)
 }
 
+type writeBatchConn interface {
+	WriteBatch(ms []ipv4.Message, flags int) (int, error)
+}
+
 func inspectReadBuffer(c syscall.RawConn) (int, error) {
 	var size int
 	var serr error
@@ -66,7 +70,8 @@ func isECNDisabledUsingEnv() bool {
 
 type oobConn struct {
 	OOBCapablePacketConn
-	batchConn batchConn
+	batchConn      batchConn
+	writeBatchConn writeBatchConn
 
 	readPos uint8
 	// Packets received from the kernel, but not yet returned by ReadPacket().
@@ -128,11 +133,18 @@ func newConn(c OOBCapablePacketConn, supportsDF bool) (*oobConn, error) {
 	// Allows callers to pass in a connection that already satisfies batchConn interface
 	// to make use of the optimisation. Otherwise, ipv4.NewPacketConn would unwrap the file descriptor
 	// via SyscallConn(), and read it that way, which might not be what the caller wants.
+	packetConn := ipv4.NewPacketConn(c)
 	var bc batchConn
 	if ibc, ok := c.(batchConn); ok {
 		bc = ibc
 	} else {
-		bc = ipv4.NewPacketConn(c)
+		bc = packetConn
+	}
+	var wbc writeBatchConn
+	if iwbc, ok := c.(writeBatchConn); ok {
+		wbc = iwbc
+	} else {
+		wbc = packetConn
 	}
 
 	msgs := make([]ipv4.Message, batchSize)
@@ -143,6 +155,7 @@ func newConn(c OOBCapablePacketConn, supportsDF bool) (*oobConn, error) {
 	oobConn := &oobConn{
 		OOBCapablePacketConn: c,
 		batchConn:            bc,
+		writeBatchConn:       wbc,
 		messages:             msgs,
 		readPos:              batchSize,
 		cap: connCapabilities{
@@ -266,6 +279,43 @@ func (c *oobConn) WritePacket(b []byte, addr net.Addr, packetInfoOOB []byte, gso
 	}
 	n, _, err := c.WriteMsgUDP(b, oob, addr.(*net.UDPAddr))
 	return n, err
+}
+
+func (c *oobConn) WritePackets(packets []packetWrite, addr net.Addr, packetInfoOOB []byte) (int, error) {
+	if len(packets) == 0 {
+		return 0, nil
+	}
+	if len(packets) > sendQueueCapacity {
+		return 0, errors.New("packet batch exceeds send queue capacity")
+	}
+	var messages [sendQueueCapacity]ipv4.Message
+	var buffers [sendQueueCapacity][1][]byte
+	var oobBuffers [sendQueueCapacity][oobBufferSize]byte
+	for i, packet := range packets {
+		if packet.gsoSize > 0 && !c.capabilities().GSO {
+			panic("GSO disabled")
+		}
+		if packet.ecn != protocol.ECNUnsupported && !c.capabilities().ECN {
+			panic("tried to send an ECN-marked packet although ECN is disabled")
+		}
+		buffers[i][0] = packet.data
+		messages[i].Buffers = buffers[i][:]
+		messages[i].Addr = addr
+		oobLength := copy(oobBuffers[i][:], packetInfoOOB)
+		oob := oobBuffers[i][:oobLength]
+		if packet.gsoSize > 0 {
+			oob = appendUDPSegmentSizeMsg(oob, packet.gsoSize)
+		}
+		if packet.ecn != protocol.ECNUnsupported {
+			if remoteUDPAddr, ok := addr.(*net.UDPAddr); ok && remoteUDPAddr.IP.To4() != nil {
+				oob = appendIPv4ECNMsg(oob, packet.ecn)
+			} else {
+				oob = appendIPv6ECNMsg(oob, packet.ecn)
+			}
+		}
+		messages[i].OOB = oob
+	}
+	return c.writeBatchConn.WriteBatch(messages[:len(packets)], 0)
 }
 
 func (c *oobConn) capabilities() connCapabilities {

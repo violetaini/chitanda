@@ -28,4 +28,7 @@ func TestPerformanceAndEarlyDataSettings(t *testing.T) {
 	if client.InitialPacketSize != DefaultInitialPacketSize || server.InitialPacketSize != DefaultInitialPacketSize {
 		t.Fatal("QUIC initial packet size is not applied")
 	}
+	if client.Tracer == nil || server.Tracer == nil {
+		t.Fatal("QUIC qlog tracer is not configured on both perspectives")
+	}
 }

@@ -26,9 +26,14 @@ type datagramStream interface {
 	SetReadDeadline(time.Time) error
 	SetWriteDeadline(time.Time) error
 	SendDatagram(b []byte) error
+	SendDatagrams(datagrams [][]byte) error
 	ReceiveDatagram(ctx context.Context) ([]byte, error)
 
 	QUICStream() *quic.Stream
+}
+
+type datagramBatchReceiver interface {
+	ReceiveDatagramsInto(context.Context, [][]byte) (int, error)
 }
 
 // A Stream is an HTTP/3 stream.
@@ -148,9 +153,30 @@ func (s *Stream) SendDatagram(b []byte) error {
 	return s.datagramStream.SendDatagram(b)
 }
 
+// SendDatagrams atomically queues a batch of HTTP Datagrams.
+func (s *Stream) SendDatagrams(datagrams [][]byte) error {
+	return s.datagramStream.SendDatagrams(datagrams)
+}
+
 func (s *Stream) ReceiveDatagram(ctx context.Context) ([]byte, error) {
 	// TODO: reject if datagrams are not negotiated (yet)
 	return s.datagramStream.ReceiveDatagram(ctx)
+}
+
+// ReceiveDatagramsInto receives HTTP Datagrams into datagrams.
+func (s *Stream) ReceiveDatagramsInto(ctx context.Context, datagrams [][]byte) (int, error) {
+	if len(datagrams) < 1 {
+		return 0, errors.New("empty datagram batch buffer")
+	}
+	if receiver, ok := s.datagramStream.(datagramBatchReceiver); ok {
+		return receiver.ReceiveDatagramsInto(ctx, datagrams)
+	}
+	datagram, err := s.ReceiveDatagram(ctx)
+	if err != nil {
+		return 0, err
+	}
+	datagrams[0] = datagram
+	return 1, nil
 }
 
 // A RequestStream is a low-level abstraction representing an HTTP/3 request stream.
@@ -272,12 +298,22 @@ func (s *RequestStream) SendDatagram(b []byte) error {
 	return s.str.SendDatagram(b)
 }
 
+// SendDatagrams atomically queues a batch of HTTP Datagrams.
+func (s *RequestStream) SendDatagrams(datagrams [][]byte) error {
+	return s.str.SendDatagrams(datagrams)
+}
+
 // ReceiveDatagram receives HTTP Datagrams (RFC 9297).
 //
 // It is only possible if support for HTTP Datagrams was enabled, using the EnableDatagram
 // option on the [Transport].
 func (s *RequestStream) ReceiveDatagram(ctx context.Context) ([]byte, error) {
 	return s.str.ReceiveDatagram(ctx)
+}
+
+// ReceiveDatagramsInto receives HTTP Datagrams into datagrams.
+func (s *RequestStream) ReceiveDatagramsInto(ctx context.Context, datagrams [][]byte) (int, error) {
+	return s.str.ReceiveDatagramsInto(ctx, datagrams)
 }
 
 // SendRequestHeader sends the HTTP request.

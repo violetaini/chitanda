@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -85,5 +86,29 @@ func TestReplayCacheCompactionPreservesActiveNonces(t *testing.T) {
 		if accepted, err := reopened.Accept(nonce, now.Add(2*time.Second)); err != nil || accepted {
 			t.Fatalf("nonce %q after compaction: accepted=%v err=%v", nonce, accepted, err)
 		}
+	}
+}
+
+func TestPersistentReplayCacheStaysFailClosedAfterCompactionFailure(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	path := filepath.Join(t.TempDir(), "replay.log")
+	cache, err := OpenReplayCache(path, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cache.Close()
+
+	invalidTarget := filepath.Join(filepath.Dir(path), "rename-target")
+	if err := os.Mkdir(invalidTarget, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cache.path = invalidTarget
+	cache.writesSince = replayCompactAfter
+
+	if accepted, err := cache.Accept("first-after-failure", now); err == nil || accepted {
+		t.Fatalf("first accept after compaction failure: accepted=%v err=%v", accepted, err)
+	}
+	if accepted, err := cache.Accept("second-after-failure", now); err == nil || accepted {
+		t.Fatalf("second accept after compaction failure: accepted=%v err=%v", accepted, err)
 	}
 }

@@ -135,6 +135,37 @@ func BuildUDPPacketInto(dst []byte, address string, payload []byte) ([]byte, err
 	return dst, nil
 }
 
+// UDPBuilderCache avoids parsing and encoding the same destination address for
+// every packet in a flow. It is intended for use by one relay goroutine.
+type UDPBuilderCache struct {
+	address string
+	encoded []byte
+}
+
+func (c *UDPBuilderCache) BuildInto(dst []byte, address string, payload []byte) ([]byte, error) {
+	if c.address != address || len(c.encoded) == 0 {
+		encoded, err := encodeAddressInto(c.encoded[:0], address)
+		if err != nil {
+			return nil, err
+		}
+		c.address = address
+		c.encoded = encoded
+	}
+	return buildUDPPacketWithEncoded(dst, c.encoded, payload)
+}
+
+func buildUDPPacketWithEncoded(dst, encoded, payload []byte) ([]byte, error) {
+	length := 3 + len(encoded) + len(payload)
+	if cap(dst) < length {
+		return nil, errors.New("UDP output buffer too small")
+	}
+	dst = dst[:length]
+	clear(dst[:3])
+	copy(dst[3:], encoded)
+	copy(dst[3+len(encoded):], payload)
+	return dst, nil
+}
+
 func udpPayloadOffset(packet []byte) (int, error) {
 	if len(packet) < 4 || packet[0] != 0 || packet[1] != 0 || packet[2] != 0 {
 		return 0, errors.New("invalid or fragmented SOCKS UDP packet")

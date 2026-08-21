@@ -86,8 +86,29 @@ func (h *sendQueue) Run() error {
 			h.closeCalled = nil // prevent this case from being selected again
 			// make sure that all queued packets are actually sent out
 			shouldClose = true
-		case e := <-h.queue:
-			if err := h.conn.Write(e.buf.Data, e.gsoSize, e.ecn); err != nil {
+		case first := <-h.queue:
+			var entries [sendQueueCapacity]queueEntry
+			var packets [sendQueueCapacity]packetWrite
+			entries[0] = first
+			count := 1
+		drain:
+			for count < len(entries) {
+				select {
+				case entry := <-h.queue:
+					entries[count] = entry
+					count++
+				default:
+					break drain
+				}
+			}
+			for i := range count {
+				packets[i] = packetWrite{data: entries[i].buf.Data, gsoSize: entries[i].gsoSize, ecn: entries[i].ecn}
+			}
+			_, err := h.conn.WriteBatch(packets[:count])
+			for i := range count {
+				entries[i].buf.Release()
+			}
+			if err != nil {
 				// This additional check enables:
 				// 1. Checking for "datagram too large" message from the kernel, as such,
 				// 2. Path MTU discovery,and
@@ -96,7 +117,6 @@ func (h *sendQueue) Run() error {
 					return err
 				}
 			}
-			e.buf.Release()
 			select {
 			case h.available <- struct{}{}:
 			default:

@@ -9,7 +9,11 @@ import (
 	"github.com/quic-go/quic-go"
 )
 
-const streamDatagramQueueLen = 32
+const streamDatagramQueueLen = 256
+
+// Account for the queue slot and slice metadata as well as payload bytes in
+// the connection-wide budget. This also bounds streams full of empty frames.
+const queuedDatagramAccountingOverhead = 32
 
 // stateTrackingStream is an implementation of quic.Stream that delegates
 // to an underlying stream
@@ -21,9 +25,13 @@ const streamDatagramQueueLen = 32
 type stateTrackingStream struct {
 	*quic.Stream
 
-	sendDatagram func([]byte) error
-	hasData      chan struct{}
-	queue        [][]byte // TODO: use a ring buffer
+	sendDatagram  func([]byte) error
+	sendDatagrams func([][]byte) error
+	hasData       chan struct{}
+	recvClosed    chan struct{}
+	queue         [][]byte
+	queueHead     int
+	queueLen      int
 
 	mx      sync.Mutex
 	sendErr error
@@ -36,14 +44,23 @@ var _ datagramStream = &stateTrackingStream{}
 
 type streamClearer interface {
 	clearStream(quic.StreamID)
+	reserveDatagram(int) bool
+	releaseDatagram(int)
 }
 
-func newStateTrackingStream(s *quic.Stream, clearer streamClearer, sendDatagram func([]byte) error) *stateTrackingStream {
+func newStateTrackingStream(
+	s *quic.Stream,
+	clearer streamClearer,
+	sendDatagram func([]byte) error,
+	sendDatagrams func([][]byte) error,
+) *stateTrackingStream {
 	t := &stateTrackingStream{
-		Stream:       s,
-		clearer:      clearer,
-		sendDatagram: sendDatagram,
-		hasData:      make(chan struct{}, 1),
+		Stream:        s,
+		clearer:       clearer,
+		sendDatagram:  sendDatagram,
+		sendDatagrams: sendDatagrams,
+		hasData:       make(chan struct{}, 1),
+		recvClosed:    make(chan struct{}),
 	}
 
 	context.AfterFunc(s.Context(), func() {
@@ -78,7 +95,16 @@ func (s *stateTrackingStream) closeReceive(e error) {
 			s.clearer.clearStream(s.StreamID())
 		}
 		s.recvErr = e
-		s.signalHasDatagram()
+		queuedBytes := 0
+		for i := range s.queueLen {
+			index := (s.queueHead + i) % len(s.queue)
+			queuedBytes += len(s.queue[index]) + queuedDatagramAccountingOverhead
+			s.queue[index] = nil
+		}
+		s.queueHead = 0
+		s.queueLen = 0
+		s.clearer.releaseDatagram(queuedBytes)
+		close(s.recvClosed)
 	}
 }
 
@@ -124,6 +150,16 @@ func (s *stateTrackingStream) SendDatagram(b []byte) error {
 	return s.sendDatagram(b)
 }
 
+func (s *stateTrackingStream) SendDatagrams(datagrams [][]byte) error {
+	s.mx.Lock()
+	sendErr := s.sendErr
+	s.mx.Unlock()
+	if sendErr != nil {
+		return sendErr
+	}
+	return s.sendDatagrams(datagrams)
+}
+
 func (s *stateTrackingStream) signalHasDatagram() {
 	select {
 	case s.hasData <- struct{}{}:
@@ -132,37 +168,87 @@ func (s *stateTrackingStream) signalHasDatagram() {
 }
 
 func (s *stateTrackingStream) enqueueDatagram(data []byte) {
+	s.enqueueDatagrams([][]byte{data})
+}
+
+func (s *stateTrackingStream) enqueueDatagrams(datagrams [][]byte) {
 	s.mx.Lock()
 	defer s.mx.Unlock()
 
-	if s.recvErr != nil {
-		return
+	added := false
+	for _, data := range datagrams {
+		accountedSize := len(data) + queuedDatagramAccountingOverhead
+		if s.recvErr != nil || s.queueLen >= streamDatagramQueueLen || !s.clearer.reserveDatagram(accountedSize) {
+			continue
+		}
+		if s.queue == nil {
+			s.queue = make([][]byte, 1)
+		} else if s.queueLen == len(s.queue) {
+			newCapacity := min(len(s.queue)*2, streamDatagramQueueLen)
+			grown := make([][]byte, newCapacity)
+			for i := range s.queueLen {
+				grown[i] = s.queue[(s.queueHead+i)%len(s.queue)]
+			}
+			s.queue = grown
+			s.queueHead = 0
+		}
+		index := (s.queueHead + s.queueLen) % len(s.queue)
+		s.queue[index] = data
+		s.queueLen++
+		added = true
 	}
-	if len(s.queue) >= streamDatagramQueueLen {
-		return
+	if added {
+		s.signalHasDatagram()
 	}
-	s.queue = append(s.queue, data)
-	s.signalHasDatagram()
 }
 
 func (s *stateTrackingStream) ReceiveDatagram(ctx context.Context) ([]byte, error) {
+	var datagrams [1][]byte
+	count, err := s.ReceiveDatagramsInto(ctx, datagrams[:])
+	if err != nil {
+		return nil, err
+	}
+	if count != 1 {
+		return nil, errors.New("invalid datagram batch result")
+	}
+	return datagrams[0], nil
+}
+
+func (s *stateTrackingStream) ReceiveDatagramsInto(ctx context.Context, datagrams [][]byte) (int, error) {
+	if len(datagrams) < 1 {
+		return 0, errors.New("empty datagram batch buffer")
+	}
 start:
 	s.mx.Lock()
-	if len(s.queue) > 0 {
-		data := s.queue[0]
-		s.queue = s.queue[1:]
+	if s.queueLen > 0 {
+		batchSize := min(len(datagrams), s.queueLen)
+		queuedBytes := 0
+		for i := range batchSize {
+			index := (s.queueHead + i) % len(s.queue)
+			datagrams[i] = s.queue[index]
+			queuedBytes += len(s.queue[index]) + queuedDatagramAccountingOverhead
+			s.queue[index] = nil
+		}
+		s.queueHead = (s.queueHead + batchSize) % len(s.queue)
+		s.queueLen -= batchSize
+		if s.queueLen > 0 {
+			s.signalHasDatagram()
+		}
 		s.mx.Unlock()
-		return data, nil
+		s.clearer.releaseDatagram(queuedBytes)
+		return batchSize, nil
 	}
 	if receiveErr := s.recvErr; receiveErr != nil {
 		s.mx.Unlock()
-		return nil, receiveErr
+		return 0, receiveErr
 	}
 	s.mx.Unlock()
 
 	select {
 	case <-ctx.Done():
-		return nil, context.Cause(ctx)
+		return 0, context.Cause(ctx)
+	case <-s.recvClosed:
+		return 0, s.recvErr
 	case <-s.hasData:
 	}
 	goto start

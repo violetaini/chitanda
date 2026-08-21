@@ -26,6 +26,7 @@ func Client(initialPacketSize uint16) *quic.Config {
 func Server(initialPacketSize uint16) *quic.Config {
 	config := base(initialPacketSize)
 	config.Allow0RTT = true
+	config.Tracer = h3qlog.DefaultConnectionTracer
 	return config
 }
 

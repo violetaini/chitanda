@@ -25,7 +25,7 @@ const (
 	maxDatagramSize = protocol.ByteCount(protocol.InitialPacketSize)
 )
 
-const defaultNumConnections = 1
+const defaultNumConnections = 4
 
 // Default Cubic backoff factor
 const beta float32 = 0.7

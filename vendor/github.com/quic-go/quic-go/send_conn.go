@@ -11,6 +11,7 @@ import (
 // A sendConn allows sending using a simple Write() on a non-connected packet conn.
 type sendConn interface {
 	Write(b []byte, gsoSize uint16, ecn protocol.ECN) error
+	WriteBatch([]packetWrite) (int, error)
 	WriteTo([]byte, net.Addr, packetInfo) error
 	Close() error
 	LocalAddr() net.Addr
@@ -18,6 +19,16 @@ type sendConn interface {
 	ChangeRemoteAddr(addr net.Addr, info packetInfo)
 
 	capabilities() connCapabilities
+}
+
+type packetWrite struct {
+	data    []byte
+	gsoSize uint16
+	ecn     protocol.ECN
+}
+
+type rawPacketBatchWriter interface {
+	WritePackets([]packetWrite, net.Addr, []byte) (int, error)
 }
 
 type remoteAddrInfo struct {
@@ -89,6 +100,73 @@ func (c *sconn) Write(p []byte, gsoSize uint16, ecn protocol.ECN) error {
 		return nil
 	}
 	return err
+}
+
+func (c *sconn) WriteBatch(packets []packetWrite) (int, error) {
+	if len(packets) == 0 {
+		return 0, nil
+	}
+	writer, ok := c.rawConn.(rawPacketBatchWriter)
+	if !ok || len(packets) == 1 {
+		for i, packet := range packets {
+			if err := c.Write(packet.data, packet.gsoSize, packet.ecn); err != nil {
+				return i, err
+			}
+		}
+		return len(packets), nil
+	}
+	ai := c.remoteAddrInfo.Load()
+	written, err := writer.WritePackets(packets, ai.addr, ai.oob)
+	if err != nil && written == 0 && !c.wroteFirstPacket && isPermissionError(err) {
+		written, err = writer.WritePackets(packets, ai.addr, ai.oob)
+	}
+	c.wroteFirstPacket = true
+	if err != nil && isGSOError(err) {
+		c.gotGSOError = true
+		for i := written; i < len(packets); i++ {
+			if fallbackErr := c.writePacketWithoutGSO(packets[i], ai); fallbackErr != nil {
+				return i, fallbackErr
+			}
+		}
+		return len(packets), nil
+	}
+	if err != nil && !isSendMsgSizeErr(err) {
+		return written, err
+	}
+	// Linux sendmmsg can report a partial write with either EMSGSIZE or a nil
+	// error. Retry the unsent part individually so one PMTU probe doesn't
+	// discard unrelated packets later in this batch.
+	var firstSizeErr error
+	if isSendMsgSizeErr(err) {
+		firstSizeErr = err
+	}
+	for i := written; i < len(packets); i++ {
+		if fallbackErr := c.Write(packets[i].data, packets[i].gsoSize, packets[i].ecn); fallbackErr != nil {
+			if isSendMsgSizeErr(fallbackErr) {
+				if firstSizeErr == nil {
+					firstSizeErr = fallbackErr
+				}
+				continue
+			}
+			return i, fallbackErr
+		}
+	}
+	return len(packets), firstSizeErr
+}
+
+func (c *sconn) writePacketWithoutGSO(packet packetWrite, ai *remoteAddrInfo) error {
+	if packet.gsoSize == 0 {
+		return c.writePacket(packet.data, ai.addr, ai.oob, 0, packet.ecn)
+	}
+	data := packet.data
+	for len(data) > 0 {
+		length := min(len(data), int(packet.gsoSize))
+		if err := c.writePacket(data[:length], ai.addr, ai.oob, 0, packet.ecn); err != nil {
+			return err
+		}
+		data = data[length:]
+	}
+	return nil
 }
 
 func (c *sconn) writePacket(p []byte, addr net.Addr, oob []byte, gsoSize uint16, ecn protocol.ECN) error {

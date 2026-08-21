@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime/pprof"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,6 +23,7 @@ import (
 
 	quic "github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
+	"golang.org/x/net/ipv4"
 
 	"myxray/internal/auth"
 	"myxray/internal/frame"
@@ -31,14 +33,25 @@ import (
 )
 
 const (
-	headerTarget    = "X-Session-Target"
-	headerTimestamp = "X-Session-Time"
-	headerNonce     = "X-Session-Nonce"
-	headerSignature = "X-Session-Auth"
-	headerMode      = "X-Session-Mode"
-	modeTCPv2       = "tcp-v2"
-	modeUDPv2       = "udp-v2"
-	udpAuthName     = "udp-association"
+	headerTarget      = "X-Session-Target"
+	headerTimestamp   = "X-Session-Time"
+	headerNonce       = "X-Session-Nonce"
+	headerSignature   = "X-Session-Auth"
+	headerSessionOK   = "X-Session-OK"
+	headerFraming     = "X-Session-Framing"
+	headerMode        = "X-Session-Mode"
+	modeTCPv2         = "tcp-v2"
+	modeUDPv2         = "udp-v2"
+	modeTCPH2Framed   = "tcp-h2-framed"
+	udpAuthName       = "udp-association"
+	udpLocalBatchSize = 32
+	tcpTransportAuto  = "auto"
+	tcpTransportH2    = "h2"
+	tcpTransportH3    = "h3"
+
+	socksNegotiationTimeout = 15 * time.Second
+	autoH2ConnectTimeout    = 4 * time.Second
+	carrierConnectTimeout   = 15 * time.Second
 )
 
 type connection struct {
@@ -58,11 +71,16 @@ type manager struct {
 	quicConfig   *quic.Config
 	transport    *http3.Transport
 	sessionCache *sessioncache.Cache
-	current      *connection
+	// TCP and UDP must not share congestion-control state.
+	currentTCP *connection
+	currentUDP *connection
 }
 
 type proxyClient struct {
-	manager *manager
+	manager            *manager
+	h2                 *h2Client
+	tcpTransport       string
+	localUDPReadBuffer int
 }
 
 func main() {
@@ -74,10 +92,24 @@ func main() {
 	pathFile := flag.String("path-file", "", "file containing the private HTTP path")
 	sessionCacheFile := flag.String("session-cache-file", "", "persistent TLS session cache file")
 	provisionOnly := flag.Bool("provision-only", false, "obtain a resumable HTTP/3 ticket and exit")
+	cpuProfile := flag.String("cpu-profile", "", "optional CPU profile output file")
+	tcpTransport := flag.String("tcp-transport", tcpTransportAuto, "TCP carrier: auto, h2 or h3")
 	quicInitialPacketSize := flag.Uint("quic-initial-packet-size", quicconfig.DefaultInitialPacketSize, "QUIC initial packet size (1200-1452)")
+	localUDPReadBuffer := flag.Int("udp-local-read-buffer", 4<<20, "local SOCKS UDP receive buffer in bytes")
 	flag.Parse()
+	stopCPUProfile, err := startCPUProfile(*cpuProfile)
+	if err != nil {
+		log.Fatalf("start CPU profile: %v", err)
+	}
+	defer stopCPUProfile()
+	if !validTCPTransport(*tcpTransport) {
+		log.Fatal("tcp-transport must be auto, h2 or h3")
+	}
 	if *quicInitialPacketSize < quicconfig.MinInitialPacketSize || *quicInitialPacketSize > quicconfig.MaxInitialPacketSize {
 		log.Fatal("quic-initial-packet-size must be between 1200 and 1452")
+	}
+	if *localUDPReadBuffer < 64<<10 || *localUDPReadBuffer > 16<<20 {
+		log.Fatal("udp-local-read-buffer must be between 65536 and 16777216")
 	}
 
 	path, err := loadPath(*privatePath, *pathFile)
@@ -115,14 +147,32 @@ func main() {
 		log.Printf("HTTP/3 resumption ticket persisted")
 		return
 	}
+	var h2 *h2Client
+	if *tcpTransport != tcpTransportH3 {
+		h2, err = newH2Client(*serverAddress, *serverName, path, psk)
+		if err != nil {
+			log.Fatalf("configure HTTP/2 TCP carrier: %v", err)
+		}
+		defer h2.CloseIdleConnections()
+		prewarmCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := h2.Prewarm(prewarmCtx); err != nil {
+			log.Printf("HTTP/2 prewarm failed; first TCP stream will retry")
+		}
+		cancel()
+	}
 
 	listener, err := net.Listen("tcp", *listen)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer listener.Close()
-	client := &proxyClient{manager: mgr}
-	log.Printf("V2 SOCKS5 TCP/UDP listener started on %s; ticket_cached=%v", *listen, cache.HasEntries())
+	client := &proxyClient{
+		manager:            mgr,
+		h2:                 h2,
+		tcpTransport:       *tcpTransport,
+		localUDPReadBuffer: *localUDPReadBuffer,
+	}
+	log.Printf("V2 SOCKS5 TCP/UDP listener started on %s; tcp_transport=%s ticket_cached=%v", *listen, *tcpTransport, cache.HasEntries())
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
@@ -144,35 +194,73 @@ func main() {
 	}
 }
 
-func (m *manager) ensureConnection(ctx context.Context) (*connection, error) {
+func startCPUProfile(path string) (func(), error) {
+	if path == "" {
+		return func() {}, nil
+	}
+	profile, err := os.Create(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := pprof.StartCPUProfile(profile); err != nil {
+		_ = profile.Close()
+		return nil, err
+	}
+	return func() {
+		pprof.StopCPUProfile()
+		_ = profile.Close()
+	}, nil
+}
+
+func (m *manager) ensureConnection(ctx context.Context, current **connection) (*connection, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.current != nil && m.current.quic.Context().Err() == nil {
-		return m.current, nil
+	if *current != nil && (*current).quic.Context().Err() == nil {
+		return *current, nil
 	}
 	quicConn, err := quic.DialAddrEarly(ctx, m.server, m.tlsConfig.Clone(), m.quicConfig.Clone())
 	if err != nil {
 		return nil, err
 	}
-	m.current = &connection{quic: quicConn, h3: m.transport.NewClientConn(quicConn)}
-	return m.current, nil
+	*current = &connection{quic: quicConn, h3: m.transport.NewClientConn(quicConn)}
+	return *current, nil
+}
+
+func (m *manager) ensureTCPConnection(ctx context.Context) (*connection, error) {
+	return m.ensureConnection(ctx, &m.currentTCP)
+}
+
+func (m *manager) ensureUDPConnection(ctx context.Context) (*connection, error) {
+	return m.ensureConnection(ctx, &m.currentUDP)
 }
 
 func (m *manager) invalidate(value *connection) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.current == value {
+	invalidated := false
+	if m.currentTCP == value {
+		m.currentTCP = nil
+		invalidated = true
+	}
+	if m.currentUDP == value {
+		m.currentUDP = nil
+		invalidated = true
+	}
+	if invalidated {
 		_ = value.quic.CloseWithError(0, "reconnect")
-		m.current = nil
 	}
 }
 
 func (m *manager) Close() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.current != nil {
-		_ = m.current.quic.CloseWithError(0, "shutdown")
-		m.current = nil
+	if m.currentTCP != nil {
+		_ = m.currentTCP.quic.CloseWithError(0, "shutdown")
+		m.currentTCP = nil
+	}
+	if m.currentUDP != nil {
+		_ = m.currentUDP.quic.CloseWithError(0, "shutdown")
+		m.currentUDP = nil
 	}
 	_ = m.transport.Close()
 }
@@ -180,7 +268,7 @@ func (m *manager) Close() {
 func (m *manager) provision(ctx context.Context) error {
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
-		conn, err := m.ensureConnection(ctx)
+		conn, err := m.ensureTCPConnection(ctx)
 		if err != nil {
 			return err
 		}
@@ -216,11 +304,16 @@ func (m *manager) provision(ctx context.Context) error {
 
 func (m *manager) openTCP(ctx context.Context, target string) (*http3.RequestStream, *connection, error) {
 	for attempt := 0; attempt < 2; attempt++ {
-		conn, err := m.ensureConnection(ctx)
+		conn, err := m.ensureTCPConnection(ctx)
 		if err != nil {
 			return nil, nil, err
 		}
 		stream, err := conn.h3.OpenRequestStream(ctx)
+		if err == nil {
+			if deadline, ok := ctx.Deadline(); ok {
+				err = stream.SetDeadline(deadline)
+			}
+		}
 		if err == nil {
 			request, requestErr := http.NewRequestWithContext(ctx, http.MethodGet, m.requestURL, nil)
 			if requestErr != nil {
@@ -237,6 +330,10 @@ func (m *manager) openTCP(ctx context.Context, target string) (*http3.RequestStr
 		if err == nil {
 			return stream, conn, nil
 		}
+		if stream != nil {
+			stream.CancelRead(0)
+			stream.CancelWrite(0)
+		}
 		if errors.Is(err, quic.Err0RTTRejected) {
 			if clearErr := m.sessionCache.Clear(); clearErr != nil {
 				return nil, nil, clearErr
@@ -251,7 +348,7 @@ func (m *manager) openTCP(ctx context.Context, target string) (*http3.RequestStr
 }
 
 func (m *manager) openUDP(ctx context.Context) (*http3.RequestStream, *connection, error) {
-	conn, err := m.ensureConnection(ctx)
+	conn, err := m.ensureUDPConnection(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -269,6 +366,13 @@ func (m *manager) openUDP(ctx context.Context) (*http3.RequestStream, *connectio
 	stream, err := conn.h3.OpenRequestStream(ctx)
 	if err != nil {
 		return nil, conn, err
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		if err := stream.SetDeadline(deadline); err != nil {
+			stream.CancelRead(0)
+			stream.CancelWrite(0)
+			return nil, conn, err
+		}
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodConnect, m.requestURL, nil)
 	if err != nil {
@@ -301,11 +405,12 @@ func (m *manager) sign(request *http.Request, target, mode string) error {
 
 func (c *proxyClient) handleSOCKS(conn net.Conn) {
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(15 * time.Second))
+	_ = conn.SetDeadline(time.Now().Add(socksNegotiationTimeout))
 	request, err := socks5.Negotiate(conn)
 	if err != nil {
 		return
 	}
+	_ = conn.SetDeadline(time.Time{})
 	switch request.Command {
 	case socks5.CommandConnect:
 		c.handleTCP(conn, request)
@@ -314,51 +419,83 @@ func (c *proxyClient) handleSOCKS(conn net.Conn) {
 	}
 }
 
-func (c *proxyClient) handleTCP(local net.Conn, request socks5.Request) {
-	ctx, cancel := context.WithCancel(context.Background())
+func (c *proxyClient) handleTCPH3(local net.Conn, request socks5.Request) {
+	ctx, cancel := context.WithTimeout(context.Background(), carrierConnectTimeout)
 	defer cancel()
+	connectDeadline, _ := ctx.Deadline()
 	stream, h3Conn, err := c.manager.openTCP(ctx, request.Target)
 	if err != nil {
 		_ = socks5.WriteReply(local, 0x01, nil)
 		return
 	}
-	if err := socks5.WriteReply(local, 0x00, nil); err != nil {
-		return
-	}
-	_ = local.SetDeadline(time.Time{})
-	uploadDone := make(chan struct{})
+	uploadDone := make(chan error, 1)
 	go func() {
-		defer close(uploadDone)
-		_, _ = frame.CopyAsDataFrames(stream, request.Reader)
-		_ = frame.WriteFrame(stream, frame.TypeHalfClose, 0, nil)
-		_ = stream.Close()
+		uploadErr := frame.CopyAsDataFramesAndClose(stream, request.Reader)
+		if uploadErr != nil {
+			stream.CancelWrite(0)
+		} else {
+			_ = stream.Close()
+		}
+		uploadDone <- uploadErr
 	}()
 	response, err := stream.ReadResponse()
 	if err != nil {
+		stream.CancelRead(0)
+		stream.CancelWrite(0)
 		c.manager.invalidate(h3Conn)
+		_ = socks5.WriteReply(local, 0x01, nil)
 		return
 	}
 	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
+	if response.StatusCode != http.StatusOK || response.Header.Get(headerSessionOK) != "1" {
+		stream.CancelRead(0)
+		stream.CancelWrite(0)
+		_ = socks5.WriteReply(local, 0x01, nil)
+		return
+	}
+	if err := readOpenAck(stream); err != nil {
+		stream.CancelRead(0)
+		stream.CancelWrite(0)
+		c.manager.invalidate(h3Conn)
+		_ = socks5.WriteReply(local, 0x01, nil)
+		return
+	}
+	if time.Now().After(connectDeadline) {
+		stream.CancelRead(0)
+		stream.CancelWrite(0)
+		_ = socks5.WriteReply(local, 0x01, nil)
+		return
+	}
+	_ = stream.SetDeadline(time.Time{})
+	if err := socks5.WriteReply(local, 0x00, nil); err != nil {
 		return
 	}
 	state := h3Conn.quic.ConnectionState()
 	log.Printf("V2 TCP stream established: used_0rtt=%v early_accepted=%v", state.Used0RTT, response.Header.Get("X-Session-Early") == "1")
-	if err := copyFramesToLocal(stream, local); err != nil && !errors.Is(err, io.EOF) {
-		log.Printf("V2 TCP receive failed")
+	receiveErr := copyDataFramesToLocal(stream, local)
+	if receiveErr != nil {
+		if !errors.Is(receiveErr, io.EOF) {
+			log.Printf("V2 TCP receive failed")
+		}
+		stream.CancelWrite(0)
+		_ = local.Close()
+		select {
+		case <-uploadDone:
+		case <-time.After(time.Second):
+		}
+		return
+	}
+	select {
+	case <-uploadDone:
+	case <-h3Conn.quic.Context().Done():
+		_ = local.Close()
+		stream.CancelWrite(0)
+		<-uploadDone
 	}
 	_ = local.Close()
-	<-uploadDone
 }
 
-func copyFramesToLocal(stream io.Reader, local net.Conn) error {
-	header, err := frame.ReadHeader(stream)
-	if err != nil {
-		return err
-	}
-	if header.Type != frame.TypeOpenAck || header.Length != 0 {
-		return errors.New("missing OPEN_ACK")
-	}
+func copyDataFramesToLocal(stream io.Reader, local net.Conn) error {
 	for {
 		header, err := frame.ReadHeader(stream)
 		if err != nil {
@@ -387,6 +524,17 @@ func copyFramesToLocal(stream io.Reader, local net.Conn) error {
 	}
 }
 
+func readOpenAck(stream io.Reader) error {
+	header, err := frame.ReadHeader(stream)
+	if err != nil {
+		return err
+	}
+	if header.Type != frame.TypeOpenAck || header.Flags != 0 || header.Length != 0 {
+		return errors.New("missing OPEN_ACK")
+	}
+	return nil
+}
+
 func (c *proxyClient) handleUDP(control net.Conn) {
 	udpConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
@@ -394,13 +542,18 @@ func (c *proxyClient) handleUDP(control net.Conn) {
 		return
 	}
 	defer udpConn.Close()
+	if err := udpConn.SetReadBuffer(c.localUDPReadBuffer); err != nil {
+		log.Printf("set local UDP receive buffer: %v", err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	connectCtx, connectCancel := context.WithTimeout(ctx, carrierConnectTimeout)
+	defer connectCancel()
 	var stream *http3.RequestStream
 	var h3Conn *connection
 	var response *http.Response
 	for attempt := 0; attempt < 2; attempt++ {
-		stream, h3Conn, err = c.manager.openUDP(ctx)
+		stream, h3Conn, err = c.manager.openUDP(connectCtx)
 		if err == nil {
 			_ = stream.SetReadDeadline(time.Now().Add(5 * time.Second))
 			response, err = stream.ReadResponse()
@@ -431,7 +584,7 @@ func (c *proxyClient) handleUDP(control net.Conn) {
 		return
 	}
 	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
+	if response.StatusCode != http.StatusOK || response.Header.Get(headerSessionOK) != "1" {
 		log.Printf("V2 UDP association rejected: status=%d", response.StatusCode)
 		_ = socks5.WriteReply(control, 0x01, nil)
 		return
@@ -439,6 +592,8 @@ func (c *proxyClient) handleUDP(control net.Conn) {
 	if err := socks5.WriteReply(control, 0x00, udpConn.LocalAddr()); err != nil {
 		return
 	}
+	_ = stream.SetDeadline(time.Time{})
+	connectCancel()
 	log.Printf("V2 UDP association established")
 	_ = control.SetDeadline(time.Time{})
 	go func() {
@@ -449,77 +604,121 @@ func (c *proxyClient) handleUDP(control net.Conn) {
 		stream.CancelWrite(0)
 	}()
 
-	var peerMu sync.RWMutex
-	var peer *net.UDPAddr
+	var peer atomic.Pointer[net.UDPAddr]
+	packetConn := ipv4.NewPacketConn(udpConn)
 	receiveDone := make(chan struct{})
 	go func() {
 		defer close(receiveDone)
 		var replay frame.ReplayWindow
 		var decoder frame.DatagramCache
-		socksPacketBuffer := make([]byte, 64<<10)
+		var socksBuilder socks5.UDPBuilderCache
+		var packetBuffer [udpLocalBatchSize][]byte
+		var socksPacketBuffers [udpLocalBatchSize][]byte
+		var messages [udpLocalBatchSize]ipv4.Message
+		for i := range messages {
+			socksPacketBuffers[i] = make([]byte, frame.MaxDatagramSize)
+			messages[i].Buffers = make([][]byte, 1)
+		}
 		for {
-			packet, err := stream.ReceiveDatagram(ctx)
+			packets, err := receiveClientDatagramBatch(ctx, stream, packetBuffer[:])
 			if err != nil {
 				if ctx.Err() == nil {
 					log.Printf("V2 UDP receive stopped: %v", err)
 				}
 				return
 			}
-			sequence, address, payload, err := decoder.Decode(packet)
-			if err != nil || !replay.Accept(sequence) {
-				continue
-			}
-			socksPacket, err := socks5.BuildUDPPacketInto(socksPacketBuffer, address, payload)
-			if err != nil {
-				continue
-			}
-			peerMu.RLock()
-			clientAddress := peer
-			peerMu.RUnlock()
+			clientAddress := peer.Load()
+			messageCount := 0
 			if clientAddress != nil {
-				_, _ = udpConn.WriteToUDP(socksPacket, clientAddress)
+				for _, packet := range packets {
+					sequence, address, payload, err := decoder.Decode(packet)
+					if err != nil || !replay.Accept(sequence) {
+						continue
+					}
+					socksPacket, err := socksBuilder.BuildInto(socksPacketBuffers[messageCount], address, payload)
+					if err != nil {
+						continue
+					}
+					messages[messageCount].Buffers[0] = socksPacket
+					messages[messageCount].Addr = clientAddress
+					messageCount++
+				}
+			}
+			written := 0
+			if messageCount > 1 {
+				written, _ = packetConn.WriteBatch(messages[:messageCount], 0)
+				written = max(0, min(written, messageCount))
+			}
+			for i := written; i < messageCount; i++ {
+				_, _ = udpConn.WriteToUDP(messages[i].Buffers[0], clientAddress)
+			}
+			for i := range packets {
+				packetBuffer[i] = nil
+			}
+			for i := range messageCount {
+				messages[i].Buffers[0] = nil
+				messages[i].Addr = nil
 			}
 		}
 	}()
 
-	buffer := make([]byte, 64<<10)
+	var messages [udpLocalBatchSize]ipv4.Message
+	var buffers [udpLocalBatchSize][]byte
+	var datagramBuffers [udpLocalBatchSize][]byte
+	var datagrams [udpLocalBatchSize][]byte
+	for i := range messages {
+		buffers[i] = make([]byte, frame.MaxDatagramSize)
+		messages[i].Buffers = [][]byte{buffers[i]}
+		datagramBuffers[i] = make([]byte, frame.MaxDatagramSize)
+	}
 	var addressCache socks5.UDPCache
-	datagramBuffer := make([]byte, frame.MaxDatagramSize)
 	oversizeLogged := false
 	var sequence atomic.Uint64
 	for {
-		n, clientAddress, err := udpConn.ReadFromUDP(buffer)
+		count, err := packetConn.ReadBatch(messages[:], 0)
 		if err != nil {
 			break
 		}
-		peerMu.Lock()
-		if peer == nil {
-			peer = clientAddress
-		}
-		acceptedPeer := peer.IP.Equal(clientAddress.IP) && peer.Port == clientAddress.Port
-		peerMu.Unlock()
-		if !acceptedPeer {
-			continue
-		}
-		address, payload, err := addressCache.Parse(buffer[:n])
-		if err != nil {
-			continue
-		}
-		packet, err := frame.EncodeDatagramInto(datagramBuffer, sequence.Add(1), address, payload)
-		if err != nil {
-			continue
-		}
-		if err := stream.SendDatagram(packet); err != nil {
-			var tooLarge *quic.DatagramTooLargeError
-			if errors.As(err, &tooLarge) {
-				if !oversizeLogged {
-					log.Printf("V2 UDP datagram dropped: path datagram limit=%d", tooLarge.MaxDatagramPayloadSize)
-					oversizeLogged = true
-				}
+		datagramCount := 0
+		for i := range count {
+			clientAddress, ok := messages[i].Addr.(*net.UDPAddr)
+			if !ok || messages[i].N < 1 {
 				continue
 			}
+			knownPeer := peer.Load()
+			if knownPeer == nil {
+				candidate := &net.UDPAddr{IP: append(net.IP(nil), clientAddress.IP...), Port: clientAddress.Port, Zone: clientAddress.Zone}
+				if peer.CompareAndSwap(nil, candidate) {
+					knownPeer = candidate
+				} else {
+					knownPeer = peer.Load()
+				}
+			}
+			acceptedPeer := knownPeer != nil && knownPeer.IP.Equal(clientAddress.IP) && knownPeer.Port == clientAddress.Port && knownPeer.Zone == clientAddress.Zone
+			if !acceptedPeer {
+				continue
+			}
+			address, payload, err := addressCache.Parse(messages[i].Buffers[0][:messages[i].N])
+			if err != nil {
+				continue
+			}
+			packet, err := frame.EncodeDatagramInto(datagramBuffers[datagramCount], sequence.Add(1), address, payload)
+			if err != nil {
+				continue
+			}
+			datagrams[datagramCount] = packet
+			datagramCount++
+		}
+		if err := sendDatagramBatch(stream, datagrams[:datagramCount], &oversizeLogged); err != nil {
 			log.Printf("V2 UDP send stopped: %v", err)
-			break
+			cancel()
+			stream.CancelRead(0)
+			stream.CancelWrite(0)
+			<-receiveDone
+			return
+		}
+		for i := range datagramCount {
+			datagrams[i] = nil
 		}
 	}
 	cancel()
@@ -528,12 +727,70 @@ func (c *proxyClient) handleUDP(control net.Conn) {
 	<-receiveDone
 }
 
+type datagramBatchSender interface {
+	SendDatagrams([][]byte) error
+}
+
+type datagramBatchReceiver interface {
+	ReceiveDatagramsInto(context.Context, [][]byte) (int, error)
+}
+
+func receiveClientDatagramBatch(ctx context.Context, stream *http3.RequestStream, buffer [][]byte) ([][]byte, error) {
+	if receiver, ok := any(stream).(datagramBatchReceiver); ok {
+		count, err := receiver.ReceiveDatagramsInto(ctx, buffer)
+		if count < 0 || count > len(buffer) {
+			return nil, errors.New("invalid HTTP Datagram batch size")
+		}
+		return buffer[:count], err
+	}
+	packet, err := stream.ReceiveDatagram(ctx)
+	if err != nil {
+		return nil, err
+	}
+	buffer[0] = packet
+	return buffer[:1], nil
+}
+
+func sendDatagramBatch(stream *http3.RequestStream, datagrams [][]byte, oversizeLogged *bool) error {
+	if len(datagrams) == 0 {
+		return nil
+	}
+	if sender, ok := any(stream).(datagramBatchSender); ok {
+		err := sender.SendDatagrams(datagrams)
+		if err == nil {
+			return nil
+		}
+		var tooLarge *quic.DatagramTooLargeError
+		if !errors.As(err, &tooLarge) {
+			return err
+		}
+	}
+	for _, datagram := range datagrams {
+		if err := stream.SendDatagram(datagram); err != nil {
+			var tooLarge *quic.DatagramTooLargeError
+			if errors.As(err, &tooLarge) {
+				if !*oversizeLogged {
+					log.Printf("V2 UDP datagram dropped: path datagram limit=%d", tooLarge.MaxDatagramPayloadSize)
+					*oversizeLogged = true
+				}
+				continue
+			}
+			return err
+		}
+	}
+	return nil
+}
+
 func portOf(address string) string {
 	_, port, err := net.SplitHostPort(address)
 	if err != nil {
 		return "443"
 	}
 	return port
+}
+
+func validTCPTransport(value string) bool {
+	return value == tcpTransportAuto || value == tcpTransportH2 || value == tcpTransportH3
 }
 
 func loadPath(value, pathFile string) (string, error) {
