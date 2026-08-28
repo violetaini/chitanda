@@ -65,6 +65,7 @@ type Client struct {
 	nextH2Idx    atomic.Uint64
 	h3Manager    *h3TransportManager
 	sessionCache *sessioncache.Cache
+	prober       *h2Prober
 	mu           sync.Mutex
 	closed       bool
 }
@@ -124,6 +125,9 @@ func New(cfg Config) (*Client, error) {
 		h3Manager:    h3Mgr,
 		sessionCache: cache,
 	}
+	if cfg.TCPTransport == TCPTransportAuto {
+		c.prober = newH2Prober(c)
+	}
 	return c, nil
 }
 
@@ -137,15 +141,17 @@ func (c *Client) DialContext(ctx context.Context, network, address string) (net.
 	}
 	c.mu.Unlock()
 
-	if h2Cli := c.pickBestH2Client(); h2Cli != nil {
-		conn, err := h2Cli.dialH2TCP(ctx, address)
-		if err == nil {
-			return conn, nil
+	if c.cfg.TCPTransport == TCPTransportH2 || (c.cfg.TCPTransport == TCPTransportAuto && !c.prober.h2Degraded.Load()) {
+		if h2Cli := c.pickBestH2Client(); h2Cli != nil {
+			conn, err := h2Cli.dialH2TCP(ctx, address)
+			if err == nil {
+				return conn, nil
+			}
+			if c.cfg.TCPTransport == TCPTransportH2 {
+				return nil, fmt.Errorf("h2 tcp dial failed: %w", err)
+			}
+			// In auto mode, fallback to H3
 		}
-		if c.cfg.TCPTransport == TCPTransportH2 {
-			return nil, fmt.Errorf("h2 tcp dial failed: %w", err)
-		}
-		// In auto mode, fallback to H3
 	}
 	return c.h3Manager.dialH3TCP(ctx, address)
 }
@@ -201,21 +207,26 @@ func (c *Client) Prewarm(ctx context.Context) error {
 	return nil
 }
 
-// Close closes all idle connections and sessions in the pool.
-func (c *Client) Close() error {
+// Close terminates the client and all background connections.
+func (c *Client) Close() {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.closed {
-		return nil
+		c.mu.Unlock()
+		return
 	}
 	c.closed = true
+	c.mu.Unlock()
+
+	if c.prober != nil {
+		c.prober.Close()
+	}
+
 	for _, cli := range c.h2Clients {
 		cli.close()
 	}
 	if c.h3Manager != nil {
 		c.h3Manager.close()
 	}
-	return nil
 }
 
 func portOf(address string) string {
