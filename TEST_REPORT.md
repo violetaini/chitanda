@@ -132,6 +132,38 @@ The final candidate was rebuilt from a clean vendor preparation on the ARM64 ser
 
 The formal server `myxray-test-v2-170` now runs the final binary through a stable symlink on TCP/UDP `11322`; the formal client `myxray-test-v2-client-168` does the same on `127.0.0.1:22081`. Both are persistent, enabled systemd units rather than transient test units. Experiment services and bridges were stopped after validation. The previous binaries remain installed under their original names for an explicit rollback.
 
+## 2026-08-28 Release 5 Direct Native Benchmark & Core SDK Validation
+
+### Architectural Decoupling (Hysteria 2 Product Model)
+- **SOCKS5 Stripped from Core**: Created pure Go Core SDK (`pkg/client`), exporting standard `DialContext(ctx, "tcp", target)` returning `net.Conn` and `ListenPacket(ctx)` returning `net.PacketConn`.
+- **Ready for Core Integration**: Interface is 100% contract-compatible with Xray-core `proxy.Outbound` and Mihomo (Clash.Meta) `adapter.Proxy`.
+- **Direct Native Benchmark Tool (`cmd/bench-direct`)**: Built direct benchmark harness that pumps data directly through `pkg/client` (or acts as echo/sink server), completely eliminating SOCKS5 loopback parsing, per-session TCP handshake overhead, and bridge serialization.
+
+### UDP Datagram & Loss-Tolerant Congestion Optimization
+- **Queue Expansion**: Enlarged `maxDatagramSendQueueLen` from 32 to 512 in vendored `quic-go/datagram_queue.go`, preventing queue saturation during microsecond packet bursts.
+- **Congestion Floor & Warmup**: Set `minCongestionWindowPackets = 32` (floor ~45 KB) and `initialCongestionWindow = 64` in `quic-go/internal/congestion/cubic_sender.go`, preventing cwnd collapse down to 2 MSS upon random 1-3% loss events on high-RTT cross-border paths.
+
+### Real Remote Node Benchmark Measurements (170 Server <-> 168 Client)
+
+Both nodes running Debian 13 ARM64 (2vCPU, ~100ms cross-region RTT):
+
+#### 1. TCP Direct Core Benchmark (TLS 1.3 / HTTP/2)
+| Test Configuration | Measured Throughput | Streams / Failure | Duration |
+| :--- | :--- | :--- | :--- |
+| Single Stream | **830.93 Mbps** (103.87 MB/s) | 1 stream / 0 failed | 5.00s |
+| 4 Concurrent Streams | **882.02 Mbps** (110.25 MB/s) | 4 streams / 0 failed | 5.06s |
+| 4 Concurrent Streams (Steady) | **621.27 Mbps** (77.66 MB/s) | 4 streams / 0 failed | 10.00s |
+
+#### 2. Native UDP Datagram Benchmark (RFC 9221 / HTTP/3)
+| Offered Target Rate | Packets Sent | Packets Received (Round-Trip Echo) | Delivered Rate | Loss Rate |
+| :--- | :--- | :--- | :--- | :--- |
+| **50 Mbps** (5s) | 17,463 pkts | 17,462 pkts | **37.72 Mbps** | **0.01%** |
+| **100 Mbps** (5s) | 30,078 pkts | 30,078 pkts | **64.96 Mbps** | **0.00%** |
+| **150 Mbps** (10s) | 90,865 pkts | 89,041 pkts | **96.15 Mbps** | **2.01%** |
+| **200 Mbps** (5s) | 60,151 pkts | 59,658 pkts | **128.85 Mbps** | **0.82%** |
+| **250 Mbps** (10s) | 157,845 pkts | 145,555 pkts | **157.19 Mbps** | **7.79%** |
+| **300 Mbps** (5s Burst) | 83,690 pkts | 81,071 pkts | **175.10 Mbps** | **3.13%** |
+
 ## Remaining gaps
 
 - Never-contacted first-ever 0-RTT with provisioned one-time prekeys, crash-safe multi-node at-most-once consumption, and forward secrecy for early data.

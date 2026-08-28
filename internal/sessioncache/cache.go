@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 )
 
@@ -162,11 +163,18 @@ func (c *Cache) persistLocked() error {
 	if err := os.Rename(temporaryPath, c.path); err != nil {
 		return err
 	}
-	directory, err := os.Open(filepath.Dir(c.path))
+	return syncDirectory(filepath.Dir(c.path))
+}
+
+func syncDirectory(dir string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	directory, err := os.Open(dir)
 	if err != nil {
 		return err
 	}
-	err = directory.Sync()
+	syncErr := directory.Sync()
 	_ = directory.Close()
-	return err
+	return syncErr
 }

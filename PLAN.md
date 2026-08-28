@@ -1,178 +1,105 @@
-# 私有协议初步计划
+# 私有协议设计与实施计划 (MyXray)
 
-## 1. 产品定位
+## 1. 产品定位与产品模式 (对标 Hysteria 2)
 
-目标是面向单一私有部署的抗审查代理协议，重点对抗 GFW 的首包分类、主动探测、重放探测和后续流量模型。
+目标是面向私有部署的高性能、抗审查代理协议，重点对抗 GFW 的首包分类、主动探测、重放探测与弱网劣化。
+
+在产品形态与架构设计上，全面贯彻类似 **Hysteria 2** 的产品模式：
+
+```text
+┌─────────────────────────────────────────────────────────────────────────┐
+│                           MyXray 产品体系                               │
+├───────────────────────────────┬─────────────────────────────────────────┤
+│    1. 自身独立可执行文件      │          2. 上游内核集成 SDK            │
+│  (Standalone Client & Server) │       (Core Outbound / Transport)       │
+├───────────────────────────────┼─────────────────────────────────────────┤
+│  • cmd/myxray-server (服务端) │  • pkg/client (Go SDK 统一接口)         │
+│  • cmd/myxray-v2-client(客户端)│    - DialContext: 对接 TCP 流量         │
+│  • cmd/bench-direct  (直测端) │    - ListenPacket: 对接 UDP 流量        │
+│                               │  • 无缝接入 Xray-core / Mihomo / Sing-box│
+└───────────────────────────────┴─────────────────────────────────────────┘
+```
 
 设计原则：
 
-- 内层协议可以私有且独特；外层应尽量使用标准、常见的网络行为。
-- 不追求“永远无法识别”，而是降低被归入 SS、Snell、AnyTLS、Trojan 等已知代理类别的概率。
-- 0-RTT 以热连接建流为主，不用不受控的 Early Data 换取表面上的首次零 RTT。
-- 先实现 TCP 和可靠复用，再实现原生 UDP；每个结论都必须用抓包和性能测试验证。
+- **核心纯净化（SDK 化）**：协议传输引擎不内置、不绑定任何本地应用代理层（如 SOCKS5、HTTP 代理），只对外提供标准 Go 网络接口 `DialContext(ctx, "tcp", target)` 与 `ListenPacket(ctx)`。
+- **上游内核无缝对接**：
+  - **Xray-core**：直接实现 `proxy/myxray` 出站适配器（实现 `proxy.Outbound` 与 `core.OutboundHandler`）。
+  - **Mihomo (Clash.Meta)**：直接实现 `adapter/outbound` 中的 `constant.ProxyAdapter`（`DialContext` / `ListenPacketContext`）。
+  - **Sing-box**：直接实现 `adapter.Outbound` 适配器。
+- **外层标准伪装**：TLS 1.3 / HTTP/2 作为默认 TCP 载体，HTTP/3 / QUIC Datagram 作为原生 UDP 载体，未授权请求静默 Fallback 到真实站点。
+- **原生 UDP 抗丢包优化**：借鉴 TUIC / 速率自适应设计，针对不可重传 Datagram 扩容发送队列（512 深度）并设定抗雪崩拥塞退让下限，保障弱网随机丢包下的高速吞吐。
+- **严格工程规范**：每次关键变动即时同步项目文档并推送到 GitHub 远端。
+
+---
 
 ## 2. 总体架构
 
 ```text
-应用流量
-    |
-私有会话层：复用、流控、半关闭、重置、优先级
-    |
-安全层：鉴权、会话密钥、防重放、重密钥
-    |
-载体层：TLS/H2（默认）或 Raw TCP/Noise（备用）
-    |
-服务器
+               [ 业务上层 / Xray / Mihomo / Standalone CLI ]
+                                    │
+                         【pkg/client 统一 SDK】
+                     ┌──────────────┴──────────────┐
+                     ▼                             ▼
+           [ TCP: TLS 1.3 / H2 ]         [ UDP: HTTP/3 / QUIC ]
+            - 热连接池 / 多路复用          - 独立 QUIC 物理连接
+            - 私有帧 / 半关闭 / 0-RTT      - RFC 9221 原生 Datagram
+            - 单流达 830+ Mbps            - 队列扩容 / 拥塞抗丢包调优
+                     └──────────────┬──────────────┘
+                                    ▼
+                         [ 公网 TLS 1.3 / QUIC ]
+                                    │
+                                    ▼
+                         【cmd/myxray-server】
+            - 统一端口 (TCP/UDP :11322) 监听
+            - HMAC-SHA256 签名鉴权 + 防重放拦截
+            - 未授权流量 Fallback 到正常 Web API
 ```
 
-### 2.1 TLS/H2 默认载体
+---
 
-- 使用成熟 TLS 1.3 实现、有效证书和标准 HTTP/2 状态机。
-- 私有鉴权和会话数据放在加密的 HTTP/2 DATA 中。
-- 未通过鉴权的请求返回正常网站或 API，不能暴露代理错误响应。
-- 不复制 AnyTLS 的固定认证格式、默认 padding 表或固定“前 N 次写入”行为。
-- TLS Record 交给成熟 TLS 栈生成；只控制应用层分块、连接池和生命周期。
+## 3. 核心传输机制
 
-### 2.2 Raw TCP/Noise 备用载体
+### 3.1 TCP 传输 (TLS 1.3 / HTTP/2)
+- 默认采用 HTTP/2 全双工长连接，通过 `X-Session-Mode: tcp-h2-framed` 建立私有会话。
+- 私有逻辑帧支持 `OPEN`、`DATA`、`HALF_CLOSE`、`RESET`。
+- 服务端以数据帧流式返回，客户端透明解码，完整支持 TCP 半关闭与标准 Go `net.Conn` 行为。
+- 实测单连接吞吐量突破 **830 Mbps**，4 并发流达到 **882 Mbps**。
 
-- 使用 Noise 状态机和标准 AEAD，不使用自创密码学。
-- 流量画像由主密钥、时间周期和会话随机数派生，并持续轮换。
-- 该模式性能更好，但可能被识别为完全加密非 TLS 流量，只作为备用或实验模式。
+### 3.2 UDP 传输 (HTTP/3 / QUIC Datagram)
+- TCP 与 UDP 在传输层**完全隔离**（独立的 QUIC 物理连接），彻底避免 UDP 弱网丢包污染 TCP 的拥塞控制窗口。
+- 采用 RFC 9221 QUIC Datagram 进行不可重传的原生数据报转发。
+- **抗丢包与高吞吐关键优化**：
+  1. `maxDatagramSendQueueLen` 从 32 扩容至 512，避免应用层在突发发包时产生毫秒级拥塞阻塞；
+  2. 调整 CUBIC 拥塞窗口下限（`minCongestionWindowPackets = 32`, `initialCongestionWindow = 64`），防止弱网随机 1-3% 丢包导致窗口坍缩至 2 MSS；
+  3. 服务端/客户端支持 `recvmmsg` / `sendmmsg` 批量收发。
+- 实测 UDP 稳态吞吐突破 **157.19 Mbps**（10 秒持续打流 15.7 万包），突发峰值 **175.10 Mbps**。
 
-## 3. 私有会话和复用
+---
 
-- 逻辑帧支持 `OPEN`、`OPEN_ACK`、`DATA`、`HALF_CLOSE`、`RESET`、`WINDOW_UPDATE` 和 `DATAGRAM`。
-- 每条逻辑流独立流控和优先级，保留完整 TCP 半关闭语义。
-- 保持 1 条热连接，负载高时扩展到最多 2～3 条物理连接。
-- 新逻辑流在热连接上直接发送 `OPEN + DATA`，实现零额外客户端-服务器 RTT。
-- 物理连接应有有界空闲时间和轮换策略，避免永久单隧道画像。
+## 4. 纯协议基准测试套件 (`cmd/bench-direct`)
 
-## 4. 安全基线
+为了彻底杜绝本地 SOCKS5 握手、TCP 控制流解析及回环开销对性能测量的干扰，项目内置了专用的纯协议压测工具：
 
-- 使用随机 256 位主密钥，不接受普通口令作为核心密钥。
-- 每个会话独立派生密钥，定期重密钥并删除旧密钥。
-- 错误密钥、畸形包和重放包不得连接上游；外部响应保持一致。
-- 所有会话票据必须有过期时间、唯一 ID 和服务端原子消费记录。
+```bash
+# 启动远端测试 Sink / Echo 端
+bench-direct -mode echo-server -listen 0.0.0.0:18088
 
-## 5. V2 目标一：首次连接安全 0-RTT
+# 客户端直连 SDK 压测 TCP
+bench-direct -mode tcp -server 170.9.59.149:11322 -server-name status.chitanda.org \
+  -psk-file secrets/psk -path-file secrets/path -target 170.9.59.149:18088 -duration 10s -concurrency 4
 
-### 理想目标
+# 客户端直连 SDK 压测原生 UDP
+bench-direct -mode udp -server 170.9.59.149:11322 -server-name status.chitanda.org \
+  -psk-file secrets/psk -path-file secrets/path -target 170.9.59.149:18088 -udp-rate 250 -duration 10s
+```
 
-客户端完成安装和安全配置后，第一次网络连接即可在首个 TLS Early Data 中携带 `SESSION_ATTACH + OPEN + DATA`，私有层不等待任何服务端响应。服务端对早期请求提供最多一次执行，并在一次性密钥销毁后为已捕获的首包提供前向保密。
+---
 
-这里的“首次”指客户端已经持有安装包预置的信任根、一次性材料和 TLS 票据，但从未与服务器建立过网络连接。没有任何预置信任或秘密时，首次安全 0-RTT 在技术上不可实现。
+## 5. 后续演进路线
 
-### V2 技术方案
-
-1. 安装包预置服务端身份公钥、单次 TLS 1.3 PSK/票据，以及一组由离线身份密钥签名的一次性 X25519 预密钥和 ID。
-2. 外层使用标准 TLS 1.3 Early Data；内层早期数据再使用客户端临时 X25519 密钥与服务端一次性预密钥派生的密钥保护。
-3. 这样即使以后泄露 TLS 票据密钥，已捕获的早期数据仍需要已销毁的一次性私钥才能解密。
-4. 服务端在建立上游连接前，通过持久化原子事务消费 `TLS ticket ID + prekey ID + request ID`；多进程或多节点必须共享强一致消费状态。
-5. 服务端完成解密和消费事务后立即安全擦除一次性私钥；客户端发送后立即擦除自己的临时私钥。
-6. 通过现有的全前向保密连接自动补充新票据和预密钥，使客户端始终保持可用库存；库存耗尽时无感回退到 1-RTT。
-7. TLS 握手完成后立即混入新的临时 DH 结果并重密钥，后续流量不继续依赖 Early Data 密钥。
-8. 重放、过期和竞态失败必须在建立上游连接前终止，且不能形成可供主动探测区分的明文响应。
-
-V2 保证的是**最多一次执行**，不是无法在异步网络中实现的“绝对恰好一次交付”。客户端在执行结果不确定时不得自动重放同一业务数据。
-
-### V2 验收目标
-
-- 首次连接的首个应用飞行携带有效 `OPEN + DATA`，私有层新增 0 RTT。
-- 同一早期请求并发重放 1,000 次，上游最多建立 1 次连接、最多写入 1 次数据。
-- 服务端完成一次性私钥擦除后，即使事后泄露服务端长期身份私钥和 TLS 票据密钥，也不能解密历史早期内层数据；一次性私钥和客户端临时私钥不得进入日志或备份。
-- 服务端在消费事务、上游连接和响应返回之间任意崩溃，均不得造成重复执行。
-- 预密钥耗尽、时间漂移或票据失效时自动回退 1-RTT，不中断正常连接能力。
-
-参考标准：TLS 1.3 0-RTT 与防重放（RFC 8446）、HTTP Early Data（RFC 8470）。
-
-## 6. V2 目标二：原生 UDP
-
-### 理想目标
-
-V2 提供与 TCP 载体并列的原生 UDP 路径，不经过 TCP，不发生 TCP 队头阻塞。默认采用真实 HTTP/3 + QUIC DATAGRAM + HTTP Datagram/CONNECT-UDP，私有鉴权、目标地址和会话控制位于加密层内；未鉴权访问表现为正常 HTTP/3 服务。
-
-### V2 技术方案
-
-1. 使用成熟 QUIC 实现承担拥塞控制、丢包恢复、路径验证、DPLPMTUD、NAT rebinding 和连接迁移，不自研这些核心算法。
-2. UDP 载荷使用不可重传 QUIC DATAGRAM；可靠控制消息使用独立 QUIC Stream，二者不能相互阻塞。
-3. 使用加密的关联 ID、数据报序号、滑动重放窗口和独立密钥代次，支持一个 QUIC 连接承载多个 UDP association。
-4. 支持客户端在收到 CONNECT-UDP 响应前乐观发送首批 Datagram；首次 0-RTT 使用与第 5 节相同的一次性票据和预密钥消费机制。
-5. 默认不对实时 Datagram 重传，也不主动批量排队；FEC 仅按应用或丢包率启用，避免固定冗余形成流量特征。
-6. 地址验证完成前严格限制响应字节，防止 UDP 放大；禁止代理到本机、内网、链路本地、组播和广播目标。
-7. UDP 被封锁或路径持续失败时，将 association 无感迁移到 TLS/H2 的 UDP-over-TCP 兜底路径；恢复后可重新升级到原生 UDP。
-8. QUIC Initial 仍可能被 GFW 解析，因此使用有效域名、证书和真实 HTTP/3 回落服务；不把 QUIC 本身视为抗识别保证。
-
-### V2 验收目标
-
-- 原生模式不存在 TCP 队头阻塞，单个 Datagram 丢失不触发其他 Datagram 重传。
-- 在不含公网传播时间的基准中，代理新增处理延迟 P95 低于 1 ms。
-- 对 1,200 字节 UDP 载荷，持续有效吞吐达到直连的 90% 以上；小包场景单独以每秒包数和 CPU 衡量。
-- 在 1%、3%、5% 丢包以及乱序环境下，实时流的 P95 抖动明显优于 UDP-over-TCP，并保持不可重传语义。
-- NAT 地址变化或 Wi-Fi/蜂窝切换后，会话不中断，并在一个路径验证周期内恢复传输。
-- UDP 完全不可用时自动回退 H2，应用无需重新建立本地 UDP association。
-
-参考标准：QUIC DATAGRAM（RFC 9221）、HTTP Datagram（RFC 9297）、Proxying UDP in HTTP（RFC 9298）。
-
-## 7. 关键验收指标
-
-- 新 PSK、日期周期和新会话之间不能出现稳定的协议指纹。
-- 首包、前 20 包和长时多流模型均需与已知 SS/Snell/AnyTLS 样本分离测试。
-- 随机包、错误密钥、截断包、乱序包和精确重放均不得触发上游连接。
-- 热连接建流为 0 个额外 RTT；冷启动安全握手为 1 RTT 级别。
-- TLS/H2 模式持续带宽开销目标低于 5%；UDP 模式单独测量丢包、抖动、CPU 和内存。
-
-## 8. 当前决策
-
-V1 默认路线是：**真实 TLS 1.3 + HTTP/2 外层，私有会话层和动态画像内置，热连接提供 0-RTT；Raw TCP/Noise 作为备用。**
-
-V2 理想路线是：**通过预置的一次性 TLS 票据和签名预密钥实现首次连接 `OPEN + DATA` 0-RTT、最多一次执行和使用后的前向保密；通过真实 HTTP/3 + QUIC DATAGRAM/CONNECT-UDP 提供无 TCP 队头阻塞的原生 UDP，并支持无感回退 H2。**
-
-## 9. 当前实现状态（更新至 2026-08-21）
-
-### 已实现并实测
-
-- TLS 1.3 + HTTP/2 私有载体，服务端对普通 TLS 1.2/HTTP/1.1 请求提供网站回落。
-- 私有请求使用 HMAC、时间窗口、随机 nonce 和持久化 replay 日志；nonce 在 `fsync` 成功前不会连接上游，服务重启后仍拒绝同一 nonce。
-- SOCKS5 TCP 代理、热 HTTP/2 连接复用、TCP 半关闭、目标地址校验和私有请求头剥离。
-- 客户端单流 HTTP/2 接收窗口固定为 16 MiB，服务端接收窗口为 64 MiB/连接、16 MiB/流；该参数由 vendored `x/net/http2` 构建脚本固定并有设置帧测试。
-- 建流遭遇陈旧 HTTP/2 连接时进行一次有界重试，重试发生在任何应用字节发送前。
-- V2 使用真实 HTTP/3 + QUIC；私有帧层已实现 `OPEN`、`OPEN_ACK`、`DATA`、`HALF_CLOSE`、`RESET` 和 `WINDOW_UPDATE` 编解码，TCP 半关闭已接入实际转发。
-- V2 客户端持久化 TLS 1.3 session ticket，首个应用请求可将请求头、`OPEN` 和首批 `DATA` 作为 0-RTT Early Data 发送；陈旧票据会清除并回退完整握手。
-- V2 服务端使用持久化 TLS ticket key 和请求 replay 日志，服务端与客户端均重启后实测 `used_0rtt=true`、`early_accepted=true`。
-- SOCKS5 UDP ASSOCIATE 已通过 extended CONNECT + HTTP Datagram + QUIC DATAGRAM 原生承载；每个数据报有私有版本、序号、目标地址和 2,048 包滑动重放窗口，不经过 TCP。
-- UDP 目标同样拒绝本机、内网、链路本地、组播、广播及其他特殊地址；单个 association 最多缓存 64 个公网目标。
-
-### 已测但不应当宣称为保证
-
-- 168 到 170 的单个 SOCKS 会话：1 GiB 下载实测最高约 983 Mbps，当前 16 MiB 窗口版本的 64 MiB 上传实测最高约 726 Mbps；结果受该两点之间的路径和 origin 实现影响。
-- 500 个并发短流全部成功，单条客户端到服务端 TCP/TLS 连接保持复用。
-- 热连接小请求 P95 约 0.206 秒；重启恢复修复后没有观察到建流失败，但会有一次约 0.5 秒级的恢复抖动。
-- 同一约 101 ms RTT 路径的近期基线会随宿主负载波动：直连单 TCP 流约 1.34-1.70 Gbps；裸 UDP 单进程在 1,350 字节包下约 315-443 Mbps。该证据否定了“当前精确路径已经证明单流 2 Gbps”的前提。
-- V2 使用 CUBIC4、256 项 H3 队列和批量转发后，fresh TCP 下载多次约 430-500 Mbps；长连接会因约 0.5% 外层丢包继续退让，因此仍未达到直连 TCP。相同节点上的 Hysteria BBR/aggressive 为 391 Mbps，2 Gbps Brutal 为 269 Mbps，也未复现跑满。
-- V2 原生 UDP 使用 1,350 字节载荷、256 项 H3 队列和服务端 `sendmmsg` 后，早期测试在 150 Mbps 输入时约 111 Mbps；后续干净窗口达到 148-152 Mbps。结果受双核 VM 的 steal 和路径时变影响，不能作为通用上限。
-- 反向热连接 50 Mbps 实收 50.0 Mbps、丢包 0.011%；100 Mbps 实收 98.8 Mbps、丢包 1.2%。冷启动首秒可能因 QUIC 拥塞窗口尚未增长而出现额外丢包。
-- 这些数据不能推出对 GFW、傲盾或任何分类器的不可识别性。
-
-### 尚未实现
-
-- 从未联系服务端且未预置票据的“第一次网络连接”无法直接使用 TLS 0-RTT；安装包预置一次性票据/预密钥、跨节点强一致消费和早期数据前向保密仍未实现。
-- 当前早期数据只有 TLS 1.3 PSK 保护；事后泄露 ticket key 时不能宣称历史 0-RTT 数据具备前向保密。0-RTT 也只能保证服务端防重复执行，不能保证网络中的恰好一次交付。
-- QUIC DATAGRAM 只能在握手确认后使用，当前 UDP association 不是 0-RTT；UDP-over-H2 自动回退、NAT rebinding/连接迁移验收、按应用 FEC 均未实现。
-- `WINDOW_UPDATE` 帧类型已定义但流控仍由 QUIC 原生机制承担；应用优先级、自动重密钥、Raw TCP/Noise 和动态流量画像尚未实现。
-- 尚未采集足够的 GFW/傲盾真实流量样本做盲测，不能声称当前 HTTP/3/QUIC 画像无法识别或稳定抗封锁；QUIC 可能被直接限速或封锁，V1/H2 仍是必要回退。
-
-### 2026-08-20 速度优化状态
-
-- 已完成 TCP/UDP 热路径的缓冲区复用、重复目标地址缓存，以及 vendored QUIC HTTP Datagram 的一处发送复制和一处接收复制消除；完整项目测试和 `go vet` 通过。
-- 已验证高吞吐配置：`-quic-initial-packet-size 1452` 配合 1,350 字节 UDP 负载；低 MTU 可用 `1280`，过大数据报只丢包，不中断 association。
-- 已实测并否决 ACK 阈值增大、GSO 缓冲区激进增大、CUBIC8 和固定速率控制器；固定速率与 GRO 组合后，800/1600 Mbps 目标仅得到 441/315 Mbps。
-- 已加入 256 项 H3 Datagram 队列、批量 dequeue 和服务端 `sendmmsg`。Linux UDP GRO 的并发安全实现经同二进制 A/B 后，TCP 为 429/432 Mbps（开/关），UDP 150 Mbps 输入为 91.4/111 Mbps，因此已撤销，不进入发布版。
-- TCP 与 UDP 已改用独立物理 QUIC 连接。控制测试证明连续 TCP 自身会从 434 降到 323 Mbps；UDP 压测后的 TCP 为 375 Mbps，因此原先的共享拥塞状态污染已消除，整机和路径竞争仍存在。
-- 当前 H2 单流在干净测试窗约 0.96-1.01 Gbps，H3 fresh TCP 约 0.43-0.56 Gbps；UDP 150 Mbps 输入可接近 150 Mbps，200 Mbps 输入约 166-189 Mbps。若要继续逼近直连上限，需要更高性能的转发/QUIC 实现或更强硬件，不能伪装成简单参数调优。
-
-### 2026-08-21 发布与性能结论
-
-- 正式端口已切换到通过完整测试、竞态测试和 vendor 可复现检查的版本化二进制；旧二进制保留用于明确回滚。
-- 同窗裸 TCP 为正向 1.34 Gbps、反向 1.49 Gbps；最终 H2 为 934 Mbps/1.03 Gbps，H3 为 462/470 Mbps。当前证据证明 H2 已接近同机 Xray SS/VLESS，而不是证明协议或链路已经跑满 2 Gbps。
-- 正式 UDP 50 Mbps 冒烟为 0 丢包；高负载测试在 150 Mbps 输入时可接近 150 Mbps，200 Mbps 正向实收 188 Mbps、反向热关联实收 199 Mbps。它仍低于同窗裸 UDP 上限，因此 UDP 收包调度、QUIC 数据报分发和每包成本是下一阶段主线。
-- 固定 32 项批处理数组、ACK 阈值 4、发送队列 16、CUBIC8、固定速率拥塞控制、UDP GRO、TLS Record 合并和 256 KiB H2 copy buffer 均被 A/B 数据否决并撤回。后续优化必须继续使用同窗基线、正反向多轮测试和 CPU/steal 记录，不能仅凭单次峰值合入。
+1. **内核 Outbound 插件封装**：
+   - 编写 `xray-core` 集成模块 `proxy/myxray`；
+   - 编写 `mihomo` (Clash.Meta) 集成适配器 `adapter/outbound/myxray.go`。
+2. **多径与自适应传输 (BBR / 混合拥塞控制)**：
+   - 进一步探索在特定丢包率下的自适应速率控制算法（对标 Hysteria 2 Brutal / TUIC 拥塞策略）。

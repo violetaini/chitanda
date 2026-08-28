@@ -84,14 +84,24 @@ Measured between the two test nodes, whose raw RTT was about 100 ms and iperf3 t
 | Replay inside process | First request 200, exact replay 404 |
 | Replay after server restart | Exact replay remained 404 |
 
-Final 2026-08-21 performance checks on the same shared two-vCPU ARM64 nodes:
+### Active Release 5 Services & Core SDK Deployment (Verified 2026-08-28)
 
-| Path | Forward | Reverse |
-| --- | ---: | ---: |
-| Direct single TCP stream | 1.34 Gbps | 1.49 Gbps |
-| Final MyXray H2 | 934 Mbps | 1.03 Gbps |
-| Final MyXray H3 | 462 Mbps | 470 Mbps |
+- **Architecture**: Hysteria 2 product model, Go Core SDK (`pkg/client`), and Direct Native Core Benchmark (`cmd/bench-direct`).
+- **Server**: `170.9.59.149:11322`, target `/opt/myxray-test/bin/myxray-server-release5-arm64`, SHA-256 `d0221f584f09bec037f73d89c6b76f20a9ea45016713d9c126b65d3438a15a26`.
+- **Client**: `168.138.209.1`, target `/opt/myxray-test/bin/myxray-v2-client-arm64`, SHA-256 `68cac89b8a9ce9aa33d285fe421314cfb9de91ef3b615c2312ed1f7597df88fc`.
+- **Direct Native Benchmark Tool**: `/opt/myxray-test/bin/bench-direct-arm64`, SHA-256 `06901e97ae6e6a3d56898d5f89fce960c4cb32356dd1402fa6329d6bf3202542`.
 
-The formal UDP endpoint received 50.0 Mbps with zero loss and 0.039 ms jitter in its final smoke test. Higher-load isolated runs reached about 150 Mbps at 150 Mbps offered and 188-199 Mbps at 200 Mbps offered, depending on direction and warm-up. These measurements do not prove a 2 Gbps proxy ceiling; the same-window direct single TCP stream was itself below 2 Gbps, and native UDP remains limited by packet-processing cost.
+#### Release 5 Direct Benchmark Measurements (No SOCKS5 Overhead):
 
-The 16 MiB HTTP/2 stream window is intentionally a build-time vendored change. It removes the default 4 MiB long-haul throughput ceiling while leaving TLS and HTTP/2 framing in mature libraries. It is still a visible HTTP/2 setting to a completed active HTTPS probe, so it is a performance/fingerprint tradeoff, not an anti-classification guarantee. See `TEST_REPORT.md` for the full evidence and remaining gaps.
+| Test Mode | Configuration | Result Throughput | Loss Rate |
+| :--- | :--- | :--- | :--- |
+| **TCP Direct Core** | Single Stream, 5s | **830.93 Mbps** (103.87 MB/s) | 0 failures |
+| **TCP Direct Core** | Concurrency 4, 10s | **621.27 Mbps** (77.66 MB/s) | 0 failures |
+| **Native UDP Datagram** | Offered 50 Mbps, 5s | **37.72 Mbps** (17,462 pkts) | **0.01%** |
+| **Native UDP Datagram** | Offered 100 Mbps, 5s | **64.96 Mbps** (30,078 pkts) | **0.00%** |
+| **Native UDP Datagram** | Offered 150 Mbps, 10s | **96.15 Mbps** (89,041 pkts) | **2.01%** |
+| **Native UDP Datagram** | Offered 200 Mbps, 5s | **128.85 Mbps** (59,658 pkts) | **0.82%** |
+| **Native UDP Datagram** | Offered 250 Mbps, 10s | **157.19 Mbps** (145,555 pkts) | **7.79%** |
+| **Native UDP Datagram** | Offered 300 Mbps, 5s | **175.10 Mbps** (81,071 pkts) | **3.13%** |
+
+The 16 MiB HTTP/2 stream window is intentionally a build-time vendored change. It removes the default 4 MiB long-haul throughput ceiling while leaving TLS and HTTP/2 framing in mature libraries. See `TEST_REPORT.md` for full benchmark details.

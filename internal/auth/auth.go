@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -71,14 +72,7 @@ func OpenReplayCache(path string, now time.Time) (*ReplayCache, error) {
 		return nil, err
 	}
 	if created {
-		directory, openErr := os.Open(filepath.Dir(path))
-		if openErr != nil {
-			_ = file.Close()
-			return nil, openErr
-		}
-		syncErr := directory.Sync()
-		_ = directory.Close()
-		if syncErr != nil {
+		if syncErr := syncDirectory(filepath.Dir(path)); syncErr != nil {
 			_ = file.Close()
 			return nil, syncErr
 		}
@@ -206,16 +200,24 @@ func (c *ReplayCache) compact() error {
 	if err != nil {
 		return err
 	}
-	directory, err := os.Open(filepath.Dir(c.path))
-	if err == nil {
-		err = directory.Sync()
-		_ = directory.Close()
-	}
-	if err != nil {
+	if err := syncDirectory(filepath.Dir(c.path)); err != nil {
 		return err
 	}
 	c.writesSince = 0
 	return nil
+}
+
+func syncDirectory(dir string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	directory, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	syncErr := directory.Sync()
+	_ = directory.Close()
+	return syncErr
 }
 
 func (c *ReplayCache) Close() error {

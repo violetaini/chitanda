@@ -45,9 +45,10 @@ const (
 	modeTCPH2Framed   = "tcp-h2-framed"
 	udpAuthName       = "udp-association"
 	udpLocalBatchSize = 32
-	tcpTransportAuto  = "auto"
-	tcpTransportH2    = "h2"
-	tcpTransportH3    = "h3"
+	tcpTransportAuto    = "auto"
+	tcpTransportH2      = "h2"
+	tcpTransportH3      = "h3"
+	defaultTCPTransport = tcpTransportH2
 
 	socksNegotiationTimeout = 15 * time.Second
 	autoH2ConnectTimeout    = 4 * time.Second
@@ -93,7 +94,7 @@ func main() {
 	sessionCacheFile := flag.String("session-cache-file", "", "persistent TLS session cache file")
 	provisionOnly := flag.Bool("provision-only", false, "obtain a resumable HTTP/3 ticket and exit")
 	cpuProfile := flag.String("cpu-profile", "", "optional CPU profile output file")
-	tcpTransport := flag.String("tcp-transport", tcpTransportAuto, "TCP carrier: auto, h2 or h3")
+	tcpTransport := flag.String("tcp-transport", defaultTCPTransport, "TCP carrier: h2 (default), auto or h3")
 	quicInitialPacketSize := flag.Uint("quic-initial-packet-size", quicconfig.DefaultInitialPacketSize, "QUIC initial packet size (1200-1452)")
 	localUDPReadBuffer := flag.Int("udp-local-read-buffer", 4<<20, "local SOCKS UDP receive buffer in bytes")
 	flag.Parse()

@@ -115,6 +115,12 @@ func TestValidTCPTransport(t *testing.T) {
 	}
 }
 
+func TestDefaultTCPTransportUsesH2(t *testing.T) {
+	if defaultTCPTransport != tcpTransportH2 {
+		t.Fatalf("default TCP transport = %q, want %q", defaultTCPTransport, tcpTransportH2)
+	}
+}
+
 func TestH2OpenTCPHonorsCanceledContext(t *testing.T) {
 	client := &h2Client{
 		psk:        []byte("0123456789abcdef0123456789abcdef"),
