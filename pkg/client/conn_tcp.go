@@ -1,7 +1,6 @@
 package client
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -9,13 +8,10 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"sync"
 	"sync/atomic"
 	"time"
 
 	"golang.org/x/net/http2"
-
-	"myxray/internal/frame"
 )
 
 type h2TransportClient struct {
@@ -53,6 +49,7 @@ func newH2TransportClient(server, serverName, rootURL, requestURL, path string, 
 	}
 	h2Transport.ReadIdleTimeout = 45 * time.Second
 	h2Transport.PingTimeout = 15 * time.Second
+	h2Transport.MaxReadFrameSize = 1 << 20
 
 	return &h2TransportClient{
 		server:     server,
@@ -111,7 +108,7 @@ func (c *h2TransportClient) dialH2TCPOnce(ctx context.Context, target string) (n
 		return nil, fmt.Errorf("create h2 request: %w", err)
 	}
 
-	if err := signRequest(request, c.psk, c.path, target, ModeTCPH2Framed); err != nil {
+	if err := signRequest(request, c.psk, c.path, target, ModeTCPv2); err != nil {
 		cancel()
 		_ = pipeReader.Close()
 		_ = pipeWriter.Close()
@@ -141,29 +138,25 @@ func (c *h2TransportClient) dialH2TCPOnce(ctx context.Context, target string) (n
 	}
 
 	c.activeStreams.Add(1)
-	return newH2FramedConn(target, response.Body, pipeWriter, cancel, c), nil
+	return newRawH2Conn(target, response.Body, pipeWriter, cancel, c), nil
 }
 
 func (c *h2TransportClient) close() {
 	c.transport.CloseIdleConnections()
 }
 
-// framedConn wraps HTTP/2 full duplex stream with private frame protocol into net.Conn.
-type framedConn struct {
+// rawH2Conn wraps HTTP/2 full duplex stream directly into net.Conn without custom framing.
+type rawH2Conn struct {
 	target     string
 	body       io.ReadCloser
 	pipeWriter *io.PipeWriter
 	cancel     context.CancelFunc
 	h2Client   *h2TransportClient
-
-	readMx     sync.Mutex
-	readBuf    bytes.Buffer
 	closed     atomic.Bool
-	readClosed bool
 }
 
-func newH2FramedConn(target string, body io.ReadCloser, pipeWriter *io.PipeWriter, cancel context.CancelFunc, h2Client *h2TransportClient) *framedConn {
-	return &framedConn{
+func newRawH2Conn(target string, body io.ReadCloser, pipeWriter *io.PipeWriter, cancel context.CancelFunc, h2Client *h2TransportClient) *rawH2Conn {
+	return &rawH2Conn{
 		target:     target,
 		body:       body,
 		pipeWriter: pipeWriter,
@@ -172,84 +165,28 @@ func newH2FramedConn(target string, body io.ReadCloser, pipeWriter *io.PipeWrite
 	}
 }
 
-func (c *framedConn) Read(b []byte) (int, error) {
+func (c *rawH2Conn) Read(b []byte) (int, error) {
 	if c.closed.Load() {
 		return 0, io.EOF
 	}
-
-	c.readMx.Lock()
-	defer c.readMx.Unlock()
-
-	if c.readBuf.Len() > 0 {
-		return c.readBuf.Read(b)
-	}
-	if c.readClosed || c.closed.Load() {
-		return 0, io.EOF
-	}
-
-	for {
-		hdr, err := frame.ReadHeader(c.body)
-		if err != nil {
-			if errors.Is(err, io.EOF) || c.closed.Load() {
-				c.readClosed = true
-				return 0, io.EOF
-			}
-			return 0, err
-		}
-		switch hdr.Type {
-		case frame.TypeData:
-			if hdr.Length == 0 {
-				continue
-			}
-			if len(b) >= int(hdr.Length) {
-				// Direct in-place zero-allocation read
-				if _, err := io.ReadFull(c.body, b[:hdr.Length]); err != nil {
-					return 0, err
-				}
-				return int(hdr.Length), nil
-			}
-			payload, err := frame.ReadPayload(c.body, hdr.Length)
-			if err != nil {
-				return 0, err
-			}
-			n := copy(b, payload)
-			if n < len(payload) {
-				c.readBuf.Write(payload[n:])
-			}
-			return n, nil
-		case frame.TypeHalfClose:
-			c.readClosed = true
-			return 0, io.EOF
-		case frame.TypeReset:
-			c.readClosed = true
-			return 0, errors.New("stream reset by peer")
-		default:
-			// Discard unknown frame payloads
-			if hdr.Length > 0 {
-				if _, err := io.CopyN(io.Discard, c.body, int64(hdr.Length)); err != nil {
-					return 0, err
-				}
-			}
-		}
-	}
+	return c.body.Read(b)
 }
 
-func (c *framedConn) Write(b []byte) (int, error) {
+func (c *rawH2Conn) Write(b []byte) (int, error) {
 	if len(b) == 0 {
 		return 0, nil
 	}
 	if c.closed.Load() {
 		return 0, errors.New("use of closed connection")
 	}
-
 	return c.pipeWriter.Write(b)
 }
 
-func (c *framedConn) CloseWrite() error {
+func (c *rawH2Conn) CloseWrite() error {
 	return c.pipeWriter.Close()
 }
 
-func (c *framedConn) Close() error {
+func (c *rawH2Conn) Close() error {
 	if c.closed.Swap(true) {
 		return nil
 	}
@@ -263,11 +200,11 @@ func (c *framedConn) Close() error {
 	return c.body.Close()
 }
 
-func (c *framedConn) LocalAddr() net.Addr {
+func (c *rawH2Conn) LocalAddr() net.Addr {
 	return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0}
 }
 
-func (c *framedConn) RemoteAddr() net.Addr {
+func (c *rawH2Conn) RemoteAddr() net.Addr {
 	host, portStr, err := net.SplitHostPort(c.target)
 	if err == nil {
 		var port int
@@ -277,6 +214,6 @@ func (c *framedConn) RemoteAddr() net.Addr {
 	return &net.TCPAddr{IP: net.IPv4(0, 0, 0, 0), Port: 0}
 }
 
-func (c *framedConn) SetDeadline(t time.Time) error      { return nil }
-func (c *framedConn) SetReadDeadline(t time.Time) error  { return nil }
-func (c *framedConn) SetWriteDeadline(t time.Time) error { return nil }
+func (c *rawH2Conn) SetDeadline(t time.Time) error      { return nil }
+func (c *rawH2Conn) SetReadDeadline(t time.Time) error  { return nil }
+func (c *rawH2Conn) SetWriteDeadline(t time.Time) error { return nil }

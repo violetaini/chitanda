@@ -36,8 +36,8 @@ const (
 	headerSessionOK = "X-Session-OK"
 	headerFraming   = "X-Session-Framing"
 
-	h2ConnectionReceiveWindow = 64 << 20
-	h2StreamReceiveWindow     = 16 << 20
+	h2ConnectionReceiveWindow = 256 << 20
+	h2StreamReceiveWindow     = 64 << 20
 )
 
 type server struct {
@@ -106,6 +106,7 @@ func main() {
 	if err := http2.ConfigureServer(public, &http2.Server{
 		MaxUploadBufferPerConnection: h2ConnectionReceiveWindow,
 		MaxUploadBufferPerStream:     h2StreamReceiveWindow,
+		MaxReadFrameSize:             1 << 20,
 		IdleTimeout:                  3 * time.Minute,
 	}); err != nil {
 		log.Fatalf("configure HTTP/2 server: %v", err)
@@ -212,7 +213,8 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	uploadDone := make(chan error, 1)
 	go func() {
-		_, uploadErr := io.Copy(upstream, r.Body)
+		buf := make([]byte, 1<<20)
+		_, uploadErr := io.CopyBuffer(upstream, r.Body, buf)
 		if uploadErr == nil {
 			if tcp, ok := upstream.(*net.TCPConn); ok {
 				uploadErr = tcp.CloseWrite()
@@ -226,7 +228,8 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if framedResponse {
 		downloadErr = frame.CopyAsDataFramesAndClose(flushWriter{w: w}, upstream)
 	} else {
-		_, downloadErr = io.Copy(flushWriter{w: w}, upstream)
+		buf := make([]byte, 1<<20)
+		_, downloadErr = io.CopyBuffer(flushWriter{w: w}, upstream, buf)
 	}
 	if downloadErr != nil {
 		_ = upstream.Close()

@@ -142,7 +142,7 @@ func runEchoServer(listenAddr string) {
 				_ = tcp.SetReadBuffer(4 << 20)
 				_ = tcp.SetWriteBuffer(4 << 20)
 			}
-			buf := make([]byte, 128<<10)
+			buf := make([]byte, 1<<20)
 			_, _ = io.CopyBuffer(c, c, buf)
 		}(conn)
 	}
@@ -236,7 +236,7 @@ func runTCPBenchmark(cli *client.Client, target string, duration time.Duration, 
 		wg.Add(1)
 		go func(workerID int) {
 			defer wg.Done()
-			buf := make([]byte, 128<<10)
+			buf := make([]byte, 1<<20)
 			_, _ = rand.Read(buf)
 
 			conn, err := cli.DialContext(ctx, "tcp", target)
@@ -250,7 +250,8 @@ func runTCPBenchmark(cli *client.Client, target string, duration time.Duration, 
 
 			// Concurrently drain any response so echo servers don't stall flow control
 			go func() {
-				_, _ = io.Copy(io.Discard, conn)
+				discardBuf := make([]byte, 1<<20)
+				_, _ = io.CopyBuffer(io.Discard, conn, discardBuf)
 			}()
 
 			timer := time.AfterFunc(duration, func() {
