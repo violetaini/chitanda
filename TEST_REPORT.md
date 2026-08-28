@@ -158,14 +158,14 @@ Both nodes running Debian 13 ARM64 (2vCPU, ~100ms cross-region RTT):
 | 32 Concurrent Streams (Pool: 12 Carriers) | **1139.02 Mbps** (142.38 MB/s) | 32 streams / 0 failed | 10.16s |
 
 #### 2. Native UDP Datagram Benchmark (RFC 9221 / HTTP/3)
-| Offered Target Rate | Packets Sent | Packets Received (Round-Trip Echo) | Delivered Rate | Loss Rate |
-| :--- | :--- | :--- | :--- | :--- |
-| **50 Mbps** (5s) | 17,463 pkts | 17,462 pkts | **37.72 Mbps** | **0.01%** |
-| **100 Mbps** (5s) | 30,078 pkts | 30,078 pkts | **64.96 Mbps** | **0.00%** |
-| **150 Mbps** (10s) | 90,865 pkts | 89,041 pkts | **96.15 Mbps** | **2.01%** |
-| **200 Mbps** (5s) | 60,151 pkts | 59,658 pkts | **128.85 Mbps** | **0.82%** |
-| **250 Mbps** (10s) | 157,845 pkts | 145,555 pkts | **157.19 Mbps** | **7.79%** |
-| **300 Mbps** (5s Burst) | 83,690 pkts | 81,071 pkts | **175.10 Mbps** | **3.13%** |
+| Offered Target Rate | Packets Sent | Packets Received | Delivered Rate | Loss Rate | Mode |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **100 Mbps** (5s) | 44,435 pkts | 44,435 pkts | **95.97 Mbps** | **0.00%** | Round-Trip Echo |
+| **150 Mbps** (5s) | 65,097 pkts | 64,979 pkts | **140.31 Mbps** | **0.18%** | Round-Trip Echo |
+| **200 Mbps** (5s) | 80,703 pkts | 69,786 pkts | **150.71 Mbps** | **13.53%** | Round-Trip Echo |
+| **200 Mbps** (5s) | 85,555 pkts | 85,549 pkts | **196.19 Mbps** | **0.007%** | Direct Sink Delivery |
+| **300 Mbps** (5s) | 126,944 pkts | 114,453 pkts | **264.16 Mbps** | **9.84%** | Direct Sink Delivery |
+| **400 Mbps** (5s) | 132,148 pkts | 123,881 pkts | **295.66 Mbps** | **6.26%** | Direct Sink Delivery |
 
 ## Remaining gaps
 

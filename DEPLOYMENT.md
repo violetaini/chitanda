@@ -100,11 +100,11 @@ Measured between the two test nodes, whose raw RTT was about 100 ms and iperf3 t
 | **TCP Direct Core (Pool: 8)** | Concurrency 8, 5s | **1050.44 Mbps** (131.31 MB/s) | 0 failures |
 | **TCP Direct Core (Pool: 8)** | Concurrency 16, 10s | **1079.57 Mbps** (134.95 MB/s) | 0 failures |
 | **TCP Direct Core (Pool: 12)** | Concurrency 32, 10s | **1139.02 Mbps** (142.38 MB/s) | 0 failures |
-| **Native UDP Datagram** | Offered 50 Mbps, 5s | **37.72 Mbps** (17,462 pkts) | **0.01%** |
-| **Native UDP Datagram** | Offered 100 Mbps, 5s | **64.96 Mbps** (30,078 pkts) | **0.00%** |
-| **Native UDP Datagram** | Offered 150 Mbps, 10s | **96.15 Mbps** (89,041 pkts) | **2.01%** |
-| **Native UDP Datagram** | Offered 200 Mbps, 5s | **128.85 Mbps** (59,658 pkts) | **0.82%** |
-| **Native UDP Datagram** | Offered 250 Mbps, 10s | **157.19 Mbps** (145,555 pkts) | **7.79%** |
-| **Native UDP Datagram** | Offered 300 Mbps, 5s | **175.10 Mbps** (81,071 pkts) | **3.13%** |
+| **Native UDP Datagram (Echo)** | Offered 100 Mbps, 5s | **95.97 Mbps** (44,435 pkts) | **0.00%** |
+| **Native UDP Datagram (Echo)** | Offered 150 Mbps, 5s | **140.31 Mbps** (64,979 pkts) | **0.18%** |
+| **Native UDP Datagram (Echo)** | Offered 200 Mbps, 5s | **150.71 Mbps** (69,786 pkts) | **13.53%** |
+| **Native UDP Datagram (Sink Delivery)** | Offered 200 Mbps, 5s | **196.19 Mbps** (85,549 pkts) | **0.007%** |
+| **Native UDP Datagram (Sink Delivery)** | Offered 300 Mbps, 5s | **264.16 Mbps** (114,453 pkts) | **9.84%** |
+| **Native UDP Datagram (Sink Delivery)** | Offered 400 Mbps, 5s | **295.66 Mbps** (123,881 pkts) | **6.26%** |
 
 The 16 MiB HTTP/2 stream window is intentionally a build-time vendored change. It removes the default 4 MiB long-haul throughput ceiling while leaving TLS and HTTP/2 framing in mature libraries. See `TEST_REPORT.md` for full benchmark details.

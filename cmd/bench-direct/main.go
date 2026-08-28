@@ -165,10 +165,34 @@ func runSinkServer(listenAddr string) {
 
 	go func() {
 		buf := make([]byte, 64<<10)
+		var udpBytes atomic.Uint64
+		var udpPackets atomic.Uint64
+		go func() {
+			ticker := time.NewTicker(2 * time.Second)
+			defer ticker.Stop()
+			lastBytes := uint64(0)
+			lastPkts := uint64(0)
+			for range ticker.C {
+				curBytes := udpBytes.Load()
+				curPkts := udpPackets.Load()
+				diffBytes := curBytes - lastBytes
+				diffPkts := curPkts - lastPkts
+				lastBytes = curBytes
+				lastPkts = curPkts
+				if diffBytes > 0 {
+					mbps := float64(diffBytes*8) / 2.0 / 1e6
+					log.Printf("[Sink UDP] Rate: %.2f Mbps (%d pkts/s) | Total: %d pkts", mbps, diffPkts/2, curPkts)
+				}
+			}
+		}()
 		for {
-			_, _, err := uconn.ReadFromUDP(buf)
+			n, _, err := uconn.ReadFromUDP(buf)
 			if err != nil {
 				return
+			}
+			if n > 0 {
+				udpBytes.Add(uint64(n))
+				udpPackets.Add(1)
 			}
 		}
 	}()
@@ -298,30 +322,37 @@ func runUDPBenchmark(cli *client.Client, target string, duration time.Duration, 
 		}
 	}()
 
-	// Paced sender loop
+	// Paced sender with millisecond burst bucket:
+	// Every 1ms tick, calculate accumulated token budget and send burst of packets
+	tickInterval := time.Millisecond
+	ticker := time.NewTicker(tickInterval)
+	defer ticker.Stop()
+
 	bytesPerSec := float64(targetRateMbps) * 1e6 / 8.0
-	packetsPerSec := bytesPerSec / float64(packetSize)
-	interval := time.Duration(float64(time.Second) / packetsPerSec)
+	bytesPerTick := bytesPerSec * tickInterval.Seconds()
 
 	payload := make([]byte, packetSize)
 	_, _ = rand.Read(payload[12:]) // random payload, first 12 bytes for seq + timestamp
 
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-
 	seq := uint64(0)
+	var tokenBudget float64
+
 	for time.Now().Before(deadline) {
 		<-ticker.C
-		seq++
-		binary.BigEndian.PutUint64(payload[0:8], seq)
-		binary.BigEndian.PutUint32(payload[8:12], uint32(time.Since(start).Milliseconds()))
+		tokenBudget += bytesPerTick
+		for tokenBudget >= float64(packetSize) {
+			tokenBudget -= float64(packetSize)
+			seq++
+			binary.BigEndian.PutUint64(payload[0:8], seq)
+			binary.BigEndian.PutUint32(payload[8:12], uint32(time.Since(start).Milliseconds()))
 
-		_, err := pconn.WriteTo(payload, targetUDPAddr)
-		if err != nil {
-			continue
+			_, err := pconn.WriteTo(payload, targetUDPAddr)
+			if err != nil {
+				continue
+			}
+			sentPackets.Add(1)
+			sentBytes.Add(uint64(len(payload)))
 		}
-		sentPackets.Add(1)
-		sentBytes.Add(uint64(len(payload)))
 	}
 
 	time.Sleep(500 * time.Millisecond)
