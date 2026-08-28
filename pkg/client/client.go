@@ -138,9 +138,7 @@ func (c *Client) DialContext(ctx context.Context, network, address string) (net.
 	}
 	c.mu.Unlock()
 
-	if len(c.h2Clients) > 0 {
-		idx := c.nextH2Idx.Add(1) % uint64(len(c.h2Clients))
-		h2Cli := c.h2Clients[idx]
+	if h2Cli := c.pickBestH2Client(); h2Cli != nil {
 		conn, err := h2Cli.dialH2TCP(ctx, address)
 		if err == nil {
 			return conn, nil
@@ -151,6 +149,27 @@ func (c *Client) DialContext(ctx context.Context, network, address string) (net.
 		// In auto mode, fallback to H3
 	}
 	return c.h3Manager.dialH3TCP(ctx, address)
+}
+
+func (c *Client) pickBestH2Client() *h2TransportClient {
+	if len(c.h2Clients) == 0 {
+		return nil
+	}
+	if len(c.h2Clients) == 1 {
+		return c.h2Clients[0]
+	}
+
+	best := c.h2Clients[0]
+	minActive := best.activeStreams.Load()
+
+	for _, cli := range c.h2Clients[1:] {
+		active := cli.activeStreams.Load()
+		if active < minActive {
+			minActive = active
+			best = cli
+		}
+	}
+	return best
 }
 
 // ListenPacket creates a net.PacketConn for native UDP proxying over QUIC Datagrams.

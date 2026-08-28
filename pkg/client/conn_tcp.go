@@ -19,14 +19,15 @@ import (
 )
 
 type h2TransportClient struct {
-	server     string
-	serverName string
-	rootURL    string
-	requestURL string
-	path       string
-	psk        []byte
-	client     *http.Client
-	transport  *http.Transport
+	server        string
+	serverName    string
+	rootURL       string
+	requestURL    string
+	path          string
+	psk           []byte
+	client        *http.Client
+	transport     *http.Transport
+	activeStreams atomic.Int64
 }
 
 func newH2TransportClient(server, serverName, rootURL, requestURL, path string, psk []byte) (*h2TransportClient, error) {
@@ -99,37 +100,48 @@ func (c *h2TransportClient) dialH2TCP(ctx context.Context, target string) (net.C
 }
 
 func (c *h2TransportClient) dialH2TCPOnce(ctx context.Context, target string) (net.Conn, error) {
-	streamCtx, streamCancel := context.WithCancel(context.Background())
-	reader, writer := io.Pipe()
-	request, err := http.NewRequestWithContext(streamCtx, http.MethodPost, c.requestURL, reader)
+	streamCtx, cancel := context.WithCancel(context.Background())
+	pipeReader, pipeWriter := io.Pipe()
+
+	request, err := http.NewRequestWithContext(streamCtx, http.MethodPost, c.requestURL, pipeReader)
 	if err != nil {
-		streamCancel()
-		_ = writer.CloseWithError(err)
-		return nil, err
+		cancel()
+		_ = pipeReader.Close()
+		_ = pipeWriter.Close()
+		return nil, fmt.Errorf("create h2 request: %w", err)
 	}
+
 	if err := signRequest(request, c.psk, c.path, target, ModeTCPH2Framed); err != nil {
-		streamCancel()
-		_ = writer.CloseWithError(err)
+		cancel()
+		_ = pipeReader.Close()
+		_ = pipeWriter.Close()
 		return nil, err
 	}
 
 	response, err := c.client.Do(request)
 	if err != nil {
-		streamCancel()
-		_ = writer.CloseWithError(err)
-		return nil, err
-	}
-	if response.StatusCode != http.StatusOK ||
-		response.Header.Get(HeaderSessionOK) != "1" ||
-		response.Header.Get(HeaderFraming) != "1" {
-		_ = response.Body.Close()
-		streamCancel()
-		err = errors.New("HTTP/2 carrier rejected session")
-		_ = writer.CloseWithError(err)
-		return nil, err
+		cancel()
+		_ = pipeReader.Close()
+		_ = pipeWriter.Close()
+		return nil, fmt.Errorf("h2 do request: %w", err)
 	}
 
-	return newH2FramedConn(target, response.Body, writer, streamCancel), nil
+	if response.StatusCode != http.StatusOK {
+		cancel()
+		_ = response.Body.Close()
+		_ = pipeWriter.Close()
+		return nil, fmt.Errorf("unexpected status %d from %s", response.StatusCode, c.requestURL)
+	}
+
+	if response.Header.Get(HeaderSessionOK) != "1" {
+		cancel()
+		_ = response.Body.Close()
+		_ = pipeWriter.Close()
+		return nil, errors.New("missing session confirmation header")
+	}
+
+	c.activeStreams.Add(1)
+	return newH2FramedConn(target, response.Body, pipeWriter, cancel, c), nil
 }
 
 func (c *h2TransportClient) close() {
@@ -142,6 +154,7 @@ type framedConn struct {
 	body       io.ReadCloser
 	pipeWriter *io.PipeWriter
 	cancel     context.CancelFunc
+	h2Client   *h2TransportClient
 
 	readMx     sync.Mutex
 	readBuf    bytes.Buffer
@@ -149,12 +162,13 @@ type framedConn struct {
 	readClosed bool
 }
 
-func newH2FramedConn(target string, body io.ReadCloser, pipeWriter *io.PipeWriter, cancel context.CancelFunc) *framedConn {
+func newH2FramedConn(target string, body io.ReadCloser, pipeWriter *io.PipeWriter, cancel context.CancelFunc, h2Client *h2TransportClient) *framedConn {
 	return &framedConn{
 		target:     target,
 		body:       body,
 		pipeWriter: pipeWriter,
 		cancel:     cancel,
+		h2Client:   h2Client,
 	}
 }
 
@@ -186,6 +200,13 @@ func (c *framedConn) Read(b []byte) (int, error) {
 		case frame.TypeData:
 			if hdr.Length == 0 {
 				continue
+			}
+			if len(b) >= int(hdr.Length) {
+				// Direct in-place zero-allocation read
+				if _, err := io.ReadFull(c.body, b[:hdr.Length]); err != nil {
+					return 0, err
+				}
+				return int(hdr.Length), nil
 			}
 			payload, err := frame.ReadPayload(c.body, hdr.Length)
 			if err != nil {
@@ -231,6 +252,9 @@ func (c *framedConn) CloseWrite() error {
 func (c *framedConn) Close() error {
 	if c.closed.Swap(true) {
 		return nil
+	}
+	if c.h2Client != nil {
+		c.h2Client.activeStreams.Add(-1)
 	}
 	if c.cancel != nil {
 		c.cancel()

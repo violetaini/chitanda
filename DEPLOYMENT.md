@@ -100,6 +100,7 @@ Measured between the two test nodes, whose raw RTT was about 100 ms and iperf3 t
 | **TCP Direct Core (Pool: 8)** | Concurrency 8, 5s | **1050.44 Mbps** (131.31 MB/s) | 0 failures |
 | **TCP Direct Core (Pool: 8)** | Concurrency 16, 10s | **1079.57 Mbps** (134.95 MB/s) | 0 failures |
 | **TCP Direct Core (Pool: 12)** | Concurrency 32, 10s | **1139.02 Mbps** (142.38 MB/s) | 0 failures |
+| **TCP Direct Core (Pool: 16)** | Concurrency 64, 10s | **961.20 Mbps** (120.15 MB/s) | 0 failures |
 | **Native UDP Datagram (Echo)** | Offered 100 Mbps, 5s | **95.97 Mbps** (44,435 pkts) | **0.00%** |
 | **Native UDP Datagram (Echo)** | Offered 150 Mbps, 5s | **140.31 Mbps** (64,979 pkts) | **0.18%** |
 | **Native UDP Datagram (Echo)** | Offered 200 Mbps, 5s | **150.71 Mbps** (69,786 pkts) | **13.53%** |

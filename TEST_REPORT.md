@@ -156,6 +156,7 @@ Both nodes running Debian 13 ARM64 (2vCPU, ~100ms cross-region RTT):
 | 8 Concurrent Streams (Pool: 8 Carriers) | **1050.44 Mbps** (131.31 MB/s) | 8 streams / 0 failed | 5.12s |
 | 16 Concurrent Streams (Pool: 8 Carriers) | **1079.57 Mbps** (134.95 MB/s) | 16 streams / 0 failed | 10.13s |
 | 32 Concurrent Streams (Pool: 12 Carriers) | **1139.02 Mbps** (142.38 MB/s) | 32 streams / 0 failed | 10.16s |
+| 64 Concurrent Streams (Pool: 16 Carriers) | **961.20 Mbps** (120.15 MB/s) | 64 streams / 0 failed | 10.25s |
 
 #### 2. Native UDP Datagram Benchmark (RFC 9221 / HTTP/3)
 | Offered Target Rate | Packets Sent | Packets Received | Delivered Rate | Loss Rate | Mode |
