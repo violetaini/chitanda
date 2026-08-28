@@ -96,7 +96,10 @@ Measured between the two test nodes, whose raw RTT was about 100 ms and iperf3 t
 | Test Mode | Configuration | Result Throughput | Loss Rate |
 | :--- | :--- | :--- | :--- |
 | **TCP Direct Core** | Single Stream, 5s | **830.93 Mbps** (103.87 MB/s) | 0 failures |
-| **TCP Direct Core** | Concurrency 4, 10s | **621.27 Mbps** (77.66 MB/s) | 0 failures |
+| **TCP Direct Core (Pool: 4)** | Concurrency 4, 5s | **996.47 Mbps** (124.56 MB/s) | 0 failures |
+| **TCP Direct Core (Pool: 8)** | Concurrency 8, 5s | **1050.44 Mbps** (131.31 MB/s) | 0 failures |
+| **TCP Direct Core (Pool: 8)** | Concurrency 16, 10s | **1079.57 Mbps** (134.95 MB/s) | 0 failures |
+| **TCP Direct Core (Pool: 12)** | Concurrency 32, 10s | **1139.02 Mbps** (142.38 MB/s) | 0 failures |
 | **Native UDP Datagram** | Offered 50 Mbps, 5s | **37.72 Mbps** (17,462 pkts) | **0.01%** |
 | **Native UDP Datagram** | Offered 100 Mbps, 5s | **64.96 Mbps** (30,078 pkts) | **0.00%** |
 | **Native UDP Datagram** | Offered 150 Mbps, 10s | **96.15 Mbps** (89,041 pkts) | **2.01%** |

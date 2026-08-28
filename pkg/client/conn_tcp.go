@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/net/http2"
@@ -142,9 +143,9 @@ type framedConn struct {
 	pipeWriter *io.PipeWriter
 	cancel     context.CancelFunc
 
+	readMx     sync.Mutex
 	readBuf    bytes.Buffer
-	mu         sync.Mutex
-	closed     bool
+	closed     atomic.Bool
 	readClosed bool
 }
 
@@ -158,21 +159,26 @@ func newH2FramedConn(target string, body io.ReadCloser, pipeWriter *io.PipeWrite
 }
 
 func (c *framedConn) Read(b []byte) (int, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	if c.closed.Load() {
+		return 0, io.EOF
+	}
+
+	c.readMx.Lock()
+	defer c.readMx.Unlock()
 
 	if c.readBuf.Len() > 0 {
 		return c.readBuf.Read(b)
 	}
-	if c.readClosed || c.closed {
+	if c.readClosed || c.closed.Load() {
 		return 0, io.EOF
 	}
 
 	for {
 		hdr, err := frame.ReadHeader(c.body)
 		if err != nil {
-			if errors.Is(err, io.EOF) {
+			if errors.Is(err, io.EOF) || c.closed.Load() {
 				c.readClosed = true
+				return 0, io.EOF
 			}
 			return 0, err
 		}
@@ -211,12 +217,9 @@ func (c *framedConn) Write(b []byte) (int, error) {
 	if len(b) == 0 {
 		return 0, nil
 	}
-	c.mu.Lock()
-	if c.closed {
-		c.mu.Unlock()
+	if c.closed.Load() {
 		return 0, errors.New("use of closed connection")
 	}
-	c.mu.Unlock()
 
 	return c.pipeWriter.Write(b)
 }
@@ -226,16 +229,13 @@ func (c *framedConn) CloseWrite() error {
 }
 
 func (c *framedConn) Close() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.closed {
+	if c.closed.Swap(true) {
 		return nil
 	}
-	c.closed = true
 	if c.cancel != nil {
 		c.cancel()
 	}
-	_ = c.pipeWriter.Close()
+	_ = c.pipeWriter.CloseWithError(errors.New("use of closed network connection"))
 	return c.body.Close()
 }
 

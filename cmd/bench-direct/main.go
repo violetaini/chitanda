@@ -34,6 +34,7 @@ func main() {
 	rateMbps := flag.Int("udp-rate", 150, "UDP target send rate in Mbps")
 	packetSize := flag.Int("packet-size", 1350, "UDP payload size in bytes")
 	concurrency := flag.Int("concurrency", 1, "TCP concurrency")
+	poolSize := flag.Int("pool-size", 4, "TCP physical carrier connection pool size")
 	sessionCacheFile := flag.String("session-cache-file", "", "optional persistent session cache")
 	flag.Parse()
 
@@ -72,6 +73,7 @@ func main() {
 		PSK:              psk,
 		Path:             p,
 		TCPTransport:     *tcpTransport,
+		TCPPoolSize:      *poolSize,
 		SessionCacheFile: *sessionCacheFile,
 	})
 	if err != nil {
@@ -79,9 +81,11 @@ func main() {
 	}
 	defer cli.Close()
 
+	_ = cli.Prewarm(context.Background())
+
 	log.Printf("=== MyXray Direct Native Core Benchmark ===")
 	log.Printf("Server: %s (%s)", *server, *serverName)
-	log.Printf("Target: %s | TCP Carrier: %s | Duration: %s", *target, *tcpTransport, *duration)
+	log.Printf("Target: %s | TCP Carrier: %s (Pool: %d) | Duration: %s", *target, *tcpTransport, *poolSize, *duration)
 
 	if *mode == "tcp" || *mode == "all" {
 		runTCPBenchmark(cli, *target, *duration, *concurrency)
@@ -202,7 +206,6 @@ func runTCPBenchmark(cli *client.Client, target string, duration time.Duration, 
 	defer cancel()
 
 	start := time.Now()
-	deadline := start.Add(duration)
 
 	var wg sync.WaitGroup
 	for i := 0; i < concurrency; i++ {
@@ -226,12 +229,12 @@ func runTCPBenchmark(cli *client.Client, target string, duration time.Duration, 
 				_, _ = io.Copy(io.Discard, conn)
 			}()
 
-			timer := time.AfterFunc(time.Until(deadline), func() {
+			timer := time.AfterFunc(duration, func() {
 				_ = conn.Close()
 			})
 			defer timer.Stop()
 
-			for time.Now().Before(deadline) {
+			for {
 				n, writeErr := conn.Write(buf)
 				if writeErr != nil {
 					break

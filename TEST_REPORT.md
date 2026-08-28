@@ -150,9 +150,12 @@ Both nodes running Debian 13 ARM64 (2vCPU, ~100ms cross-region RTT):
 #### 1. TCP Direct Core Benchmark (TLS 1.3 / HTTP/2)
 | Test Configuration | Measured Throughput | Streams / Failure | Duration |
 | :--- | :--- | :--- | :--- |
-| Single Stream | **830.93 Mbps** (103.87 MB/s) | 1 stream / 0 failed | 5.00s |
-| 4 Concurrent Streams | **882.02 Mbps** (110.25 MB/s) | 4 streams / 0 failed | 5.06s |
-| 4 Concurrent Streams (Steady) | **621.27 Mbps** (77.66 MB/s) | 4 streams / 0 failed | 10.00s |
+| Single Stream (Single Carrier) | **830.93 Mbps** (103.87 MB/s) | 1 stream / 0 failed | 5.00s |
+| 4 Concurrent Streams (Single Carrier) | **882.02 Mbps** (110.25 MB/s) | 4 streams / 0 failed | 5.06s |
+| 4 Concurrent Streams (Pool: 4 Carriers) | **996.47 Mbps** (124.56 MB/s) | 4 streams / 0 failed | 5.11s |
+| 8 Concurrent Streams (Pool: 8 Carriers) | **1050.44 Mbps** (131.31 MB/s) | 8 streams / 0 failed | 5.12s |
+| 16 Concurrent Streams (Pool: 8 Carriers) | **1079.57 Mbps** (134.95 MB/s) | 16 streams / 0 failed | 10.13s |
+| 32 Concurrent Streams (Pool: 12 Carriers) | **1139.02 Mbps** (142.38 MB/s) | 32 streams / 0 failed | 10.16s |
 
 #### 2. Native UDP Datagram Benchmark (RFC 9221 / HTTP/3)
 | Offered Target Rate | Packets Sent | Packets Received (Round-Trip Echo) | Delivered Rate | Loss Rate |

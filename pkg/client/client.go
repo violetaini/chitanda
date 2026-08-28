@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"myxray/internal/auth"
@@ -38,6 +39,7 @@ const (
 	TCPTransportH2      = "h2"
 	TCPTransportH3      = "h3"
 	DefaultTCPTransport = TCPTransportH2
+	DefaultTCPPoolSize  = 4
 
 	defaultCarrierTimeout = 15 * time.Second
 	autoH2ConnectTimeout  = 4 * time.Second
@@ -50,6 +52,7 @@ type Config struct {
 	PSK                   []byte // 32+ bytes PSK
 	Path                  string // e.g. "/your-private-path"
 	TCPTransport          string // "h2" (default), "auto", or "h3"
+	TCPPoolSize           int    // Number of independent physical TLS/H2 carriers (default 4)
 	SessionCacheFile      string // optional persistent session cache path
 	QUICInitialPacketSize uint16 // 1200 - 1452, default 1452
 }
@@ -59,7 +62,8 @@ type Client struct {
 	cfg          Config
 	rootURL      string
 	requestURL   string
-	h2Client     *h2TransportClient
+	h2Clients    []*h2TransportClient
+	nextH2Idx    atomic.Uint64
 	h3Manager    *h3TransportManager
 	sessionCache *sessioncache.Cache
 	mu           sync.Mutex
@@ -76,6 +80,12 @@ func New(cfg Config) (*Client, error) {
 	}
 	if cfg.TCPTransport != TCPTransportH2 && cfg.TCPTransport != TCPTransportAuto && cfg.TCPTransport != TCPTransportH3 {
 		return nil, fmt.Errorf("invalid tcp transport %q: must be h2, auto or h3", cfg.TCPTransport)
+	}
+	if cfg.TCPPoolSize <= 0 {
+		cfg.TCPPoolSize = DefaultTCPPoolSize
+	}
+	if cfg.TCPPoolSize > 16 {
+		cfg.TCPPoolSize = 16
 	}
 	if cfg.QUICInitialPacketSize == 0 {
 		cfg.QUICInitialPacketSize = quicconfig.DefaultInitialPacketSize
@@ -96,12 +106,14 @@ func New(cfg Config) (*Client, error) {
 
 	h3Mgr := newH3TransportManager(cfg.Server, cfg.ServerName, rootURL, requestURL, cfg.Path, cfg.PSK, cache, cfg.QUICInitialPacketSize)
 
-	var h2Cli *h2TransportClient
+	var h2Clients []*h2TransportClient
 	if cfg.TCPTransport != TCPTransportH3 {
-		var err error
-		h2Cli, err = newH2TransportClient(cfg.Server, cfg.ServerName, rootURL, requestURL, cfg.Path, cfg.PSK)
-		if err != nil {
-			return nil, fmt.Errorf("init h2 client: %w", err)
+		for i := 0; i < cfg.TCPPoolSize; i++ {
+			h2Cli, err := newH2TransportClient(cfg.Server, cfg.ServerName, rootURL, requestURL, cfg.Path, cfg.PSK)
+			if err != nil {
+				return nil, fmt.Errorf("init h2 client %d: %w", i, err)
+			}
+			h2Clients = append(h2Clients, h2Cli)
 		}
 	}
 
@@ -109,7 +121,7 @@ func New(cfg Config) (*Client, error) {
 		cfg:          cfg,
 		rootURL:      rootURL,
 		requestURL:   requestURL,
-		h2Client:     h2Cli,
+		h2Clients:    h2Clients,
 		h3Manager:    h3Mgr,
 		sessionCache: cache,
 	}
@@ -126,8 +138,10 @@ func (c *Client) DialContext(ctx context.Context, network, address string) (net.
 	}
 	c.mu.Unlock()
 
-	if c.h2Client != nil {
-		conn, err := c.h2Client.dialH2TCP(ctx, address)
+	if len(c.h2Clients) > 0 {
+		idx := c.nextH2Idx.Add(1) % uint64(len(c.h2Clients))
+		h2Cli := c.h2Clients[idx]
+		conn, err := h2Cli.dialH2TCP(ctx, address)
 		if err == nil {
 			return conn, nil
 		}
@@ -152,15 +166,24 @@ func (c *Client) ListenPacket(ctx context.Context) (net.PacketConn, error) {
 	return c.h3Manager.createPacketConn(ctx)
 }
 
-// Prewarm optionally warms the H2 TLS connection in advance.
+// Prewarm optionally warms the H2 TLS connections in the pool concurrently.
 func (c *Client) Prewarm(ctx context.Context) error {
-	if c.h2Client != nil {
-		return c.h2Client.prewarm(ctx)
+	prewarmCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	for _, cli := range c.h2Clients {
+		wg.Add(1)
+		go func(h *h2TransportClient) {
+			defer wg.Done()
+			_ = h.prewarm(prewarmCtx)
+		}(cli)
 	}
+	wg.Wait()
 	return nil
 }
 
-// Close closes all idle connections and sessions.
+// Close closes all idle connections and sessions in the pool.
 func (c *Client) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -168,8 +191,8 @@ func (c *Client) Close() error {
 		return nil
 	}
 	c.closed = true
-	if c.h2Client != nil {
-		c.h2Client.close()
+	for _, cli := range c.h2Clients {
+		cli.close()
 	}
 	if c.h3Manager != nil {
 		c.h3Manager.close()
