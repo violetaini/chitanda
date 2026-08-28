@@ -32,7 +32,6 @@ const (
 	HeaderMode           = "X-Session-Mode"
 	ModeTCPv2            = "tcp-v2"
 	ModeUDPv2            = "udp-v2"
-	ModeTCPH2Framed      = "tcp-h2-framed"
 	UDPAssociationTarget = "udp-association"
 
 	TCPTransportAuto    = "auto"
@@ -242,3 +241,4 @@ func signRequest(request *http.Request, psk []byte, path, target, mode string) e
 	request.Header.Set(HeaderSignature, auth.Signature(psk, request.Method, path, target, timestamp, nonce))
 	return nil
 }
+

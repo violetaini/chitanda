@@ -23,7 +23,6 @@ import (
 	"golang.org/x/net/http2"
 
 	"myxray/internal/auth"
-	"myxray/internal/frame"
 	"myxray/internal/quicconfig"
 	"myxray/internal/target"
 )
@@ -202,10 +201,6 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set(headerSessionOK, "1")
-	framedResponse := r.Header.Get(headerMode) == modeTCPH2Framed
-	if framedResponse {
-		w.Header().Set(headerFraming, "1")
-	}
 	w.WriteHeader(http.StatusOK)
 	if flusher, ok := w.(http.Flusher); ok {
 		flusher.Flush()
@@ -225,12 +220,8 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		uploadDone <- uploadErr
 	}()
 	var downloadErr error
-	if framedResponse {
-		downloadErr = frame.CopyAsDataFramesAndClose(flushWriter{w: w}, upstream)
-	} else {
-		buf := make([]byte, 1<<20)
-		_, downloadErr = io.CopyBuffer(flushWriter{w: w}, upstream, buf)
-	}
+	buf := make([]byte, 1<<20)
+	_, downloadErr = io.CopyBuffer(flushWriter{w: w}, upstream, buf)
 	if downloadErr != nil {
 		_ = upstream.Close()
 		return
@@ -357,3 +348,5 @@ func init() {
 	log.SetFlags(log.Ldate | log.Ltime | log.LUTC | log.Lmsgprefix)
 	log.SetPrefix("myxray-server: ")
 }
+
+

@@ -1,15 +1,12 @@
 package client
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -154,12 +151,6 @@ func (m *h3TransportManager) dialH3TCPOnce(ctx context.Context, target string) (
 		m.invalidate(h3Conn)
 		return nil, err
 	}
-	if err := frame.WriteFrame(stream, frame.TypeOpen, 0, []byte(target)); err != nil {
-		stream.CancelRead(0)
-		stream.CancelWrite(0)
-		m.invalidate(h3Conn)
-		return nil, err
-	}
 
 	response, err := stream.ReadResponse()
 	if err != nil {
@@ -175,16 +166,7 @@ func (m *h3TransportManager) dialH3TCPOnce(ctx context.Context, target string) (
 		return nil, fmt.Errorf("server rejected H3 TCP session with status %d", response.StatusCode)
 	}
 
-	// Read OPEN_ACK
-	hdr, err := frame.ReadHeader(stream)
-	if err != nil || hdr.Type != frame.TypeOpenAck {
-		stream.CancelRead(0)
-		stream.CancelWrite(0)
-		m.invalidate(h3Conn)
-		return nil, errors.New("missing OPEN_ACK")
-	}
-
-	return newH3FramedConn(target, stream), nil
+	return newRawH3Conn(target, stream), nil
 }
 
 func (m *h3TransportManager) createPacketConn(ctx context.Context) (net.PacketConn, error) {
@@ -284,130 +266,64 @@ func (m *h3TransportManager) close() {
 	_ = m.transport.Close()
 }
 
-// h3FramedConn wraps an HTTP/3 request stream into a net.Conn.
-type h3FramedConn struct {
-	target     string
-	stream     *http3.RequestStream
-	readBuf    bytes.Buffer
-	mu         sync.Mutex
-	closed     bool
-	readClosed bool
+// rawH3Conn wraps an HTTP/3 request stream directly into a net.Conn.
+type rawH3Conn struct {
+	target string
+	stream *http3.RequestStream
+	closed bool
+	mu     sync.Mutex
 }
 
-func newH3FramedConn(target string, stream *http3.RequestStream) *h3FramedConn {
-	return &h3FramedConn{
+func newRawH3Conn(target string, stream *http3.RequestStream) *rawH3Conn {
+	return &rawH3Conn{
 		target: target,
 		stream: stream,
 	}
 }
 
-func (c *h3FramedConn) Read(b []byte) (int, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if c.readBuf.Len() > 0 {
-		return c.readBuf.Read(b)
-	}
-	if c.readClosed || c.closed {
-		return 0, io.EOF
-	}
-
-	for {
-		hdr, err := frame.ReadHeader(c.stream)
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				c.readClosed = true
-			}
-			return 0, err
-		}
-		switch hdr.Type {
-		case frame.TypeData:
-			if hdr.Length == 0 {
-				continue
-			}
-			payload, err := frame.ReadPayload(c.stream, hdr.Length)
-			if err != nil {
-				return 0, err
-			}
-			n := copy(b, payload)
-			if n < len(payload) {
-				c.readBuf.Write(payload[n:])
-			}
-			return n, nil
-		case frame.TypeHalfClose:
-			c.readClosed = true
-			return 0, io.EOF
-		case frame.TypeReset:
-			c.readClosed = true
-			return 0, errors.New("stream reset by peer")
-		default:
-			if hdr.Length > 0 {
-				if _, err := io.CopyN(io.Discard, c.stream, int64(hdr.Length)); err != nil {
-					return 0, err
-				}
-			}
-		}
-	}
+func (c *rawH3Conn) Read(b []byte) (int, error) {
+	return c.stream.Read(b)
 }
 
-func (c *h3FramedConn) Write(b []byte) (int, error) {
-	if len(b) == 0 {
-		return 0, nil
-	}
+func (c *rawH3Conn) Write(b []byte) (int, error) {
+	return c.stream.Write(b)
+}
+
+func (c *rawH3Conn) CloseWrite() error {
+	c.stream.CancelWrite(0)
+	return nil
+}
+
+func (c *rawH3Conn) Close() error {
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
-		return 0, errors.New("use of closed connection")
-	}
-	c.mu.Unlock()
-
-	written := 0
-	for written < len(b) {
-		chunkSize := min(len(b)-written, frame.DataChunkSize)
-		chunk := b[written : written+chunkSize]
-		if err := frame.WriteFrame(c.stream, frame.TypeData, 0, chunk); err != nil {
-			return written, err
-		}
-		written += len(chunk)
-	}
-	return written, nil
-}
-
-func (c *h3FramedConn) CloseWrite() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	_ = frame.WriteFrame(c.stream, frame.TypeHalfClose, 0, nil)
-	return c.stream.Close()
-}
-
-func (c *h3FramedConn) Close() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.closed {
 		return nil
 	}
 	c.closed = true
+	c.mu.Unlock()
 	c.stream.CancelRead(0)
 	c.stream.CancelWrite(0)
 	return c.stream.Close()
 }
 
-func (c *h3FramedConn) LocalAddr() net.Addr {
+func (c *rawH3Conn) LocalAddr() net.Addr {
 	return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0}
 }
 
-func (c *h3FramedConn) RemoteAddr() net.Addr {
+func (c *rawH3Conn) RemoteAddr() net.Addr {
 	host, portStr, err := net.SplitHostPort(c.target)
 	if err == nil {
-		port, _ := strconv.Atoi(portStr)
+		var port int
+		_, _ = fmt.Sscanf(portStr, "%d", &port)
 		return &net.TCPAddr{IP: net.ParseIP(host), Port: port}
 	}
 	return &net.TCPAddr{IP: net.IPv4(0, 0, 0, 0), Port: 0}
 }
 
-func (c *h3FramedConn) SetDeadline(t time.Time) error      { return c.stream.SetDeadline(t) }
-func (c *h3FramedConn) SetReadDeadline(t time.Time) error  { return c.stream.SetReadDeadline(t) }
-func (c *h3FramedConn) SetWriteDeadline(t time.Time) error { return c.stream.SetWriteDeadline(t) }
+func (c *rawH3Conn) SetDeadline(t time.Time) error      { return nil }
+func (c *rawH3Conn) SetReadDeadline(t time.Time) error  { return nil }
+func (c *rawH3Conn) SetWriteDeadline(t time.Time) error { return nil }
 
 // quicPacketConn wraps HTTP/3 extended CONNECT-UDP + Datagrams into standard net.PacketConn.
 type quicPacketConn struct {

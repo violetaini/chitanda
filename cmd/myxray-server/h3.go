@@ -26,7 +26,6 @@ const (
 	headerMode         = "X-Session-Mode"
 	modeTCPv2          = "tcp-v2"
 	modeUDPv2          = "udp-v2"
-	modeTCPH2Framed    = "tcp-h2-framed"
 	udpAuthName        = "udp-association"
 	privateOpenTimeout = 15 * time.Second
 )
@@ -92,9 +91,6 @@ func (s *server) serveHTTP3TCP(w http.ResponseWriter, r *http.Request, targetAdd
 	if err := controller.SetReadDeadline(time.Now().Add(privateOpenTimeout)); err != nil {
 		return
 	}
-	if err := readOpenFrame(r.Body, targetAddress); err != nil {
-		return
-	}
 	if err := controller.SetReadDeadline(time.Time{}); err != nil {
 		return
 	}
@@ -124,18 +120,17 @@ func (s *server) serveHTTP3TCP(w http.ResponseWriter, r *http.Request, targetAdd
 		stream.CancelRead(0)
 		_ = stream.Close()
 	}()
-	if err := frame.WriteFrame(stream, frame.TypeOpenAck, 0, nil); err != nil {
-		return
-	}
 	uploadDone := make(chan error, 1)
 	go func() {
-		uploadErr := copyDataFramesToTCP(stream, upstream)
+		buf := make([]byte, 1<<20)
+		_, uploadErr := io.CopyBuffer(upstream, stream, buf)
 		if uploadErr != nil {
 			_ = upstream.Close()
 		}
 		uploadDone <- uploadErr
 	}()
-	if err := frame.CopyAsDataFramesAndClose(stream, upstream); err != nil {
+	buf := make([]byte, 1<<20)
+	if _, err := io.CopyBuffer(stream, upstream, buf); err != nil {
 		stream.CancelWrite(0)
 		return
 	}
@@ -145,26 +140,7 @@ func (s *server) serveHTTP3TCP(w http.ResponseWriter, r *http.Request, targetAdd
 	}
 }
 
-func readOpenFrame(stream io.Reader, targetAddress string) error {
-	header, err := frame.ReadHeader(stream)
-	if err != nil {
-		return err
-	}
-	if header.Type != frame.TypeOpen || header.Flags != 0 {
-		return errors.New("first private frame is not OPEN")
-	}
-	if uint64(header.Length) != uint64(len(targetAddress)) {
-		return errors.New("OPEN target length mismatch")
-	}
-	payload, err := frame.ReadPayload(stream, header.Length)
-	if err != nil {
-		return err
-	}
-	if string(payload) != targetAddress {
-		return errors.New("OPEN target mismatch")
-	}
-	return nil
-}
+
 
 func copyDataFramesToTCP(stream io.Reader, upstream net.Conn) error {
 	for {
@@ -551,3 +527,5 @@ func (r *udpRelay) Close() {
 	r.mu.Unlock()
 	r.waitGroup.Wait()
 }
+
+
