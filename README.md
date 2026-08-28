@@ -20,10 +20,13 @@ MyXray is a high-performance, censorship-resistant proxy protocol designed follo
 └───────────────────────────────┴─────────────────────────────────────────┘
 ```
 
-- **TCP Transport**: Production-grade TLS 1.3 / HTTP/2 full-duplex framing with 0-RTT pre-warmed connection pool and TCP half-close support (measured **882 Mbps** throughput).
-- **UDP Transport**: Native RFC 9221 QUIC Datagrams over HTTP/3 with independent physical connection isolation, expanded 512-packet send queue, and loss-tolerant congestion floor (measured **157.19 Mbps** steady-state round-trip throughput).
+- **TCP Transport**: Production-grade TLS 1.3 / HTTP/2 full-duplex framing with 0-RTT pre-warmed connection pool and TCP half-close support (measured **980+ Mbps** throughput).
+- **UDP Transport**: Native RFC 9221 QUIC Datagrams over HTTP/3 with independent physical connection isolation, expanded 512-packet send queue, and loss-tolerant congestion floor.
+- **Smart Hybrid Auto-Routing**: Automatically maps TCP -> HTTP/2 and UDP -> HTTP/3 for ultimate performance, with active health probing and silent TCP fallback to QUIC under severe network blocks. 
 - **Authentication**: HMAC-SHA256 authenticated header signatures with nonce tracking and persistent replay cache.
 - **Fallback**: Unauthenticated requests are silently proxied to real websites.
+
+> **💡 Learn more about the Core Engines:** Read the detailed architecture in **[TRANSPORT_MODES.md](TRANSPORT_MODES.md)**.
 
 ---
 
