@@ -1,105 +1,127 @@
-# 私有协议设计与实施计划 (MyXray)
+# MyXray 设计状态与演进计划
 
-## 1. 产品定位与产品模式 (对标 Hysteria 2)
+本文区分当前已经存在的实现、仍需验证的工程假设和后续路线。协议总览见 [README.md](README.md)，三种 TCP 路由模式的精确定义见 [TRANSPORT_MODES.md](TRANSPORT_MODES.md)。
 
-目标是面向私有部署的高性能、抗审查代理协议，重点对抗 GFW 的首包分类、主动探测、重放探测与弱网劣化。
+## 1. 产品定位
 
-在产品形态与架构设计上，全面贯彻类似 **Hysteria 2** 的产品模式：
+MyXray 面向自有服务器与自有客户端部署，目标是在统一服务端上提供：
 
-```text
-┌─────────────────────────────────────────────────────────────────────────┐
-│                           MyXray 产品体系                               │
-├───────────────────────────────┬─────────────────────────────────────────┤
-│    1. 自身独立可执行文件      │          2. 上游内核集成 SDK            │
-│  (Standalone Client & Server) │       (Core Outbound / Transport)       │
-├───────────────────────────────┼─────────────────────────────────────────┤
-│  • cmd/myxray-server (服务端) │  • pkg/client (Go SDK 统一接口)         │
-│  • cmd/myxray-v2-client(客户端)│    - DialContext: 对接 TCP 流量         │
-│  • cmd/bench-direct  (直测端) │    - ListenPacket: 对接 UDP 流量        │
-│                               │  • 无缝接入 Xray-core / Mihomo / Sing-box│
-└───────────────────────────────┴─────────────────────────────────────────┘
-```
+- TLS/HTTP/2 承载的 TCP 代理路径；
+- QUIC/HTTP/3 承载的 TCP 代理路径；
+- HTTP/3 Extended CONNECT 与 QUIC Datagram 承载的 UDP 代理路径；
+- 不绑定 SOCKS5 的 Go 客户端 SDK；
+- 未授权请求到真实 HTTPS 站点的 fallback。
 
-设计原则：
+“抗审查”是需要在明确威胁模型下测试的目标，不是当前实现可以保证的属性。项目不声称不可检测，也不把特定节点上的吞吐测量外推为普遍性能承诺。
 
-- **核心纯净化（SDK 化）**：协议传输引擎不内置、不绑定任何本地应用代理层（如 SOCKS5、HTTP 代理），只对外提供标准 Go 网络接口 `DialContext(ctx, "tcp", target)` 与 `ListenPacket(ctx)`。
-- **上游内核无缝对接**：
-  - **Xray-core**：直接实现 `proxy/myxray` 出站适配器（实现 `proxy.Outbound` 与 `core.OutboundHandler`）。
-  - **Mihomo (Clash.Meta)**：直接实现 `adapter/outbound` 中的 `constant.ProxyAdapter`（`DialContext` / `ListenPacketContext`）。
-  - **Sing-box**：直接实现 `adapter.Outbound` 适配器。
-- **外层标准伪装**：TLS 1.3 / HTTP/2 作为默认 TCP 载体，HTTP/3 / QUIC Datagram 作为原生 UDP 载体，未授权请求静默 Fallback 到真实站点。
-- **原生 UDP 抗丢包优化**：借鉴 TUIC / 速率自适应设计，针对不可重传 Datagram 扩容发送队列（512 深度）并设定抗雪崩拥塞退让下限，保障弱网随机丢包下的高速吞吐。
-- **严格工程规范**：每次关键变动即时同步项目文档并推送到 GitHub 远端。
-
----
-
-## 2. 总体架构
+## 2. 当前主线架构
 
 ```text
-               [ 业务上层 / Xray / Mihomo / Standalone CLI ]
-                                    │
-                         【pkg/client 统一 SDK】
-                     ┌──────────────┴──────────────┐
-                     ▼                             ▼
-           [ TCP: TLS 1.3 / H2 ]         [ UDP: HTTP/3 / QUIC ]
-            - 热连接池 / 多路复用          - 独立 QUIC 物理连接
-            - 私有帧 / 半关闭 / 0-RTT      - RFC 9221 原生 Datagram
-            - 单流达 830+ Mbps            - 队列扩容 / 拥塞抗丢包调优
-                     └──────────────┬──────────────┘
-                                    ▼
-                         [ 公网 TLS 1.3 / QUIC ]
-                                    │
-                                    ▼
-                         【cmd/myxray-server】
-            - 统一端口 (TCP/UDP :11322) 监听
-            - HMAC-SHA256 签名鉴权 + 防重放拦截
-            - 未授权流量 Fallback 到正常 Web API
+          [上层调用方 / bench-direct / 后续 outbound adapter]
+                               |
+                        [pkg/client SDK]
+                               |
+             +-----------------+-----------------+
+             |                                   |
+     TCPTransport: h2/h3/auto           UDP: 始终使用 H3
+             |                                   |
+     H2 request body 或 H3 stream       Extended CONNECT + Datagram
+             +-----------------+-----------------+
+                               |
+                    [cmd/myxray-server]
+                TCP/H2 + UDP/H3 同一端口号
 ```
 
----
+当前协议权威实现是 `pkg/client` 与 `cmd/myxray-server`。`cmd/myxray-v2-client` 仍复制了一套旧 TCP 帧实现，与当前 raw-stream 服务端尚未重新同步，不能作为三种模式已经端到端通过的证据。
 
-## 3. 核心传输机制
+## 3. 当前三种 TCP 模式
 
-### 3.1 TCP 传输 (TLS 1.3 / HTTP/2)
-- 默认采用 HTTP/2 全双工长连接，通过 `X-Session-Mode: tcp-h2-framed` 建立私有会话。
-- 私有逻辑帧支持 `OPEN`、`DATA`、`HALF_CLOSE`、`RESET`。
-- 服务端以数据帧流式返回，客户端透明解码，完整支持 TCP 半关闭与标准 Go `net.Conn` 行为。
-- 实测单连接吞吐量突破 **830 Mbps**，4 并发流达到 **882 Mbps**。
+| 模式 | TCP 行为 | UDP 行为 |
+| --- | --- | --- |
+| `h2` | 固定 TLS/H2 | 固定 H3 Datagram |
+| `h3` | 固定 QUIC/H3 stream | 固定 H3 Datagram，且与 H3/TCP 使用独立 QUIC 连接 |
+| `auto` | H2 优先，建连失败或健康状态降级时为新连接选择 H3 | 固定 H3 Datagram |
 
-### 3.2 UDP 传输 (HTTP/3 / QUIC Datagram)
-- TCP 与 UDP 在传输层**完全隔离**（独立的 QUIC 物理连接），彻底避免 UDP 弱网丢包污染 TCP 的拥塞控制窗口。
-- 采用 RFC 9221 QUIC Datagram 进行不可重传的原生数据报转发。
-- **抗丢包与高吞吐关键优化**：
-  1. `maxDatagramSendQueueLen` 从 32 扩容至 512，避免应用层在突发发包时产生毫秒级拥塞阻塞；
-  2. 调整 CUBIC 拥塞窗口下限（`minCongestionWindowPackets = 32`, `initialCongestionWindow = 64`），防止弱网随机 1-3% 丢包导致窗口坍缩至 2 MSS；
-  3. 服务端/客户端支持 `recvmmsg` / `sendmmsg` 批量收发。
-- 实测 UDP 稳态吞吐突破 **157.19 Mbps**（10 秒持续打流 15.7 万包），突发峰值 **175.10 Mbps**。
+`TCPTransport` 不控制 UDP。目前没有 UDP-over-H2，也没有在 H2 与 H3 之间迁移已经建立的 TCP 流。
 
----
+## 4. 已实现机制
 
-## 4. 纯协议基准测试套件 (`cmd/bench-direct`)
+### 4.1 TCP
 
-为了彻底杜绝本地 SOCKS5 握手、TCP 控制流解析及回环开销对性能测量的干扰，项目内置了专用的纯协议压测工具：
+- H2 使用 `POST` 私有路径，请求体与响应体直接映射 TCP 字节流。
+- H3 使用 HTTP/3 request stream 直接映射 TCP 字节流。
+- H2 SDK 支持多 transport pool，并按活跃流数量选择 carrier。
+- `auto` 支持单次 H2 建连失败后的 H3 尝试，以及后台 H2 健康状态切换。
 
-```bash
-# 启动远端测试 Sink / Echo 端
-bench-direct -mode echo-server -listen 0.0.0.0:18088
+当前主线已经移除 TCP 数据上的 `OPEN`、`DATA`、`HALF_CLOSE` 等自定义双重帧。相关类型仍用于历史客户端代码和 UDP 数据报之外的遗留测试，后续应清理或重新定义边界。
 
-# 客户端直连 SDK 压测 TCP
-bench-direct -mode tcp -server 170.9.59.149:11322 -server-name status.chitanda.org \
-  -psk-file secrets/psk -path-file secrets/path -target 170.9.59.149:18088 -duration 10s -concurrency 4
+### 4.2 UDP
 
-# 客户端直连 SDK 压测原生 UDP
-bench-direct -mode udp -server 170.9.59.149:11322 -server-name status.chitanda.org \
-  -psk-file secrets/psk -path-file secrets/path -target 170.9.59.149:18088 -udp-rate 250 -duration 10s
-```
+- 使用 H3 Extended CONNECT 建立 association。
+- 使用 HTTP Datagram（RFC 9297）承载于 QUIC DATAGRAM（RFC 9221），发送不可重传数据报。
+- 私有 envelope 包含版本、序号、目标地址与载荷。
+- 使用 2048 项序号窗口过滤重复及过旧数据报。
+- vendored quic-go 当前发送队列为 512，接收队列为 2048。
+- vendored CUBIC 当前最小拥塞窗口为 64 包，初始拥塞窗口为 128 包。
 
----
+### 4.3 鉴权与 fallback
 
-## 5. 后续演进路线
+- HMAC-SHA256 覆盖 method、path、target、timestamp 与 nonce。
+- 时间窗口为正负 90 秒。
+- 服务端在授权上游副作用前持久化 nonce；持久 replay cache 失败时 fail closed。
+- 未授权请求移除私有头后转发到真实 HTTPS fallback。
+- 上游目标只允许公网单播地址。
 
-1. **内核 Outbound 插件封装**：
-   - 编写 `xray-core` 集成模块 `proxy/myxray`；
-   - 编写 `mihomo` (Clash.Meta) 集成适配器 `adapter/outbound/myxray.go`。
-2. **多径与自适应传输 (BBR / 混合拥塞控制)**：
-   - 进一步探索在特定丢包率下的自适应速率控制算法（对标 Hysteria 2 Brutal / TUIC 拥塞策略）。
+### 4.4 H3 会话恢复
+
+- 客户端可选持久 TLS session cache。
+- 服务端允许 QUIC 0-RTT，并使用持久 ticket key。
+- 只有已取得有效票据的后续连接才可能使用 0-RTT。
+- 从未连接过的首次 0-RTT、0-RTT UDP、一次性预密钥和多节点强一致 nonce 消费尚未实现。
+
+## 5. 当前成熟度
+
+| 能力 | 状态 |
+| --- | --- |
+| 服务端 H2/H3 监听 | 已实现 |
+| `pkg/client` 的 H2/H3/auto 路由 | 已实现，缺少完整端到端回归 |
+| H3 Datagram UDP | 已实现，性能与弱网结论依赖部署条件 |
+| 独立 SOCKS5 客户端与当前服务端兼容 | 未完成协议同步 |
+| 完整 `net.Conn` deadline/half-close 语义 | 未完成 |
+| Xray-core adapter | 未实现 |
+| Mihomo adapter | 未实现 |
+| sing-box adapter | 未实现 |
+| 自动化 CI 发布门禁 | 未实现，当前依赖手工脚本 |
+
+## 6. 后续优先级
+
+### P0：恢复单一协议事实源
+
+1. 让 `cmd/myxray-v2-client` 直接复用 `pkg/client`，或同步移除其旧 TCP 帧协议。
+2. 删除或改写引用已删除符号的陈旧测试。
+3. 为 `server + SDK` 增加 H2、H3、auto 的端到端测试。
+4. 修正 H2 建连使用后台 context 的问题，确保调用方取消与 deadline 能中断建连。
+5. 覆盖 TCP 双向 EOF、半关闭、取消、deadline、服务端重启和 application bytes 不重放。
+6. 覆盖 UDP association 生命周期、重放窗口、MTU 边界和连接关闭唤醒。
+
+验收标准：三个模式的行为矩阵均由自动测试证明，`scripts/verify-release.sh` 在干净 checkout 上通过。
+
+### P1：补全 SDK 契约与上游适配
+
+1. 明确并实现 `DialContext` 对 `network` 参数的校验。
+2. 为 H2/H3 `net.Conn` 和 UDP `net.PacketConn` 实现可观察的 deadline 行为。
+3. 修正 H3 `CloseWrite`，区分优雅 FIN 与流中止。
+4. 将 module path 调整为可由外部仓库正常引用的路径。
+5. 在 SDK 契约稳定后分别实现 Xray-core、Mihomo 和 sing-box adapter。
+
+验收标准：通过各上游的真实接口测试，而不只做 Go 编译期类型断言。
+
+### P2：部署与传输增强
+
+1. 建立 Linux/ARM64 与常用 amd64 平台的 CI 测试、race、vet 和交叉编译。
+2. 验证 NAT rebinding 与 QUIC connection migration。
+3. 评估 UDP-over-H2 是否值得作为可选 fallback，并量化 TCP 队头阻塞代价。
+4. 在明确业务模型后评估 FEC、应用优先级和其他拥塞控制策略。
+5. 建立包含 RTT、MTU、随机丢包、突发丢包、CPU steal 和长时间稳定性的基准矩阵。
+
+验收标准：所有性能结论都能由版本化脚本复现，并同时报告吞吐、丢包、延迟、CPU、内存和失败率。

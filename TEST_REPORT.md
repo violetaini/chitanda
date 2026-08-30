@@ -136,12 +136,12 @@ The formal server `myxray-test-v2-170` now runs the final binary through a stabl
 
 ### Architectural Decoupling (Hysteria 2 Product Model)
 - **SOCKS5 Stripped from Core**: Created pure Go Core SDK (`pkg/client`), exporting standard `DialContext(ctx, "tcp", target)` returning `net.Conn` and `ListenPacket(ctx)` returning `net.PacketConn`.
-- **Ready for Core Integration**: Interface is 100% contract-compatible with Xray-core `proxy.Outbound` and Mihomo (Clash.Meta) `adapter.Proxy`.
+- **Core Integration Surface**: The SDK exposes `DialContext` and `ListenPacket` as adapter building blocks. Xray-core, Mihomo, and sing-box adapters are not yet implemented, and full `net.Conn` deadline semantics still require work.
 - **Direct Native Benchmark Tool (`cmd/bench-direct`)**: Built direct benchmark harness that pumps data directly through `pkg/client` (or acts as echo/sink server), completely eliminating SOCKS5 loopback parsing, per-session TCP handshake overhead, and bridge serialization.
 
 ### UDP Datagram & Loss-Tolerant Congestion Optimization
 - **Queue Expansion**: Enlarged `maxDatagramSendQueueLen` from 32 to 512 in vendored `quic-go/datagram_queue.go`, preventing queue saturation during microsecond packet bursts.
-- **Congestion Floor & Warmup**: Set `minCongestionWindowPackets = 32` (floor ~45 KB) and `initialCongestionWindow = 64` in `quic-go/internal/congestion/cubic_sender.go`, preventing cwnd collapse down to 2 MSS upon random 1-3% loss events on high-RTT cross-border paths.
+- **Congestion Floor & Warmup**: Set `minCongestionWindowPackets = 64` and `initialCongestionWindow = 128` in `quic-go/internal/congestion/cubic_sender.go`. These are aggressive project-specific defaults and must be evaluated against fairness, queueing delay, and loss on each deployment path.
 
 ### Real Remote Node Benchmark Measurements (170 Server <-> 168 Client)
 

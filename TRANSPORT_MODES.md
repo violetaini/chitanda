@@ -1,59 +1,151 @@
-# MyXray 底层传输协议模式详解 (Transport Modes)
+# MyXray 三种传输模式
 
-经过对物理链路与协议层的重构，MyXray `pkg/client` 和 `pkg/server` 目前原生支持三种不同的底层传输模式。在接入 `Mihomo (Clash.Meta)` 或 `Xray-core` 框架时，开发者与用户可通过 `TCPTransport` 参数进行指定，以适配不同的网络拓扑与业务需求。
+MyXray 当前通过 `TCPTransport` 提供 `h2`、`h3`、`auto` 三种 TCP 路由模式。该配置只决定 TCP 代理连接使用哪一种 carrier；UDP 在三种模式下都固定使用 HTTP/3 Extended CONNECT 和 QUIC Datagram。
 
----
+本文以 `pkg/client` 的当前实现为准。命令行使用 `-tcp-transport`，SDK 使用 `client.Config.TCPTransport`。
 
-## 1. 单一 HTTP/2 模式 (`h2`) —— 高吞吐量导向
+## 1. 行为总表
 
-此模式以最大化物理层网络吞吐量（Max Throughput）为核心设计目标。
+| 配置值 | TCP 新连接 | UDP association | 自动切换 | 默认值 |
+| --- | --- | --- | --- | --- |
+| `h2` | TLS 1.3 / HTTP/2 | H3 / QUIC Datagram | 否 | 是 |
+| `h3` | TLS 1.3 / QUIC Stream / HTTP/3 | H3 / QUIC Datagram | 否 | 否 |
+| `auto` | H2 优先，按状态回退 H3 | H3 / QUIC Datagram | 仅针对新建 TCP 连接 | 否 |
 
-* **配置标识**: `-tcp-transport h2` (对应 SDK 参数 `client.TCPTransportH2`)
-* **底层承载**: 物理 TCP + TLS 1.3
-* **TCP 代理机制**: 原生 TCP over HTTP/2 Stream。
-* **UDP 代理机制**: UDP over HTTP/2 (实质为 UDP over TCP)。
-* **技术特征**:
-  * **大缓冲区内存池**：移除了传统代理协议中的冗余封装，直接使用 1MB 的 `io.CopyBuffer` 映射流数据。
-  * **内核级网络加速**：依赖 Linux 操作系统的 TCP 栈与网卡硬件卸载（TSO/GRO），最小化用户态 CPU 负载。在 2.0GHz ARM 环境压测中，可满载单核达成 1 Gbps 吞吐量。
-* **适用场景**:
-  * 专线、内网穿透、IPTV 等链路质量极佳、无丢包的场景。
-* **架构局限**:
-  * 由于 UDP 数据包在此模式下被强制封装于 TCP 报文中，若物理链路发生丢包，将引发严重的 TCP 队头阻塞（TCP Meltdown），从而导致实时流媒体或游戏业务延迟骤增。
+无论选择哪种模式，UDP 都要求客户端到服务端的 UDP/H3 端口可达。当前没有 UDP-over-H2 fallback。
 
----
+## 2. `h2`：固定 HTTP/2 TCP carrier
 
-## 2. 单一 HTTP/3 模式 (`h3`) —— 弱网与高连通性导向
+配置方式：
 
-此模式针对跨国链路丢包率高、TCP 协议遭遇 QoS 限制或深度报文检测（DPI）干扰的场景设计。
+```go
+TCPTransport: client.TCPTransportH2
+```
 
-* **配置标识**: `-tcp-transport h3` (对应 SDK 参数 `client.TCPTransportH3`)
-* **底层承载**: 物理 UDP + QUIC (全用户态协议栈)
-* **TCP 代理机制**: TCP over QUIC Stream。
-* **UDP 代理机制**: UDP over QUIC Datagrams (严格遵循 RFC 9221)。
-* **技术特征**:
-  * **原生无序传输**：UDP 流量通过 Datagrams 通道直接传输，不保证送达顺序且不触发重传，从物理层面根除队头阻塞问题。
-  * **高可用拥塞控制**：利用 QUIC 协议特性，在物理链路发生 10%~20% 丢包时，仍能维持平稳的应用层吞吐。
-  * **系统调用优化**：通过开启 GSO (Generic Segmentation Offload) 批量收发，单次 Syscall 最大处理 20 倍 MTU 数据，降低内核交互开销。
-* **适用场景**:
-  * 实时音视频（WebRTC）、电子竞技，或存在严重 TCP 干扰的劣质网络环境。
-* **性能瓶颈**:
-  * 由于 `quic-go` 运行于 Go 用户态，需对每个 UDP 分片进行独立的 AES-GCM 加密与 MAC 校验。在缺乏内核旁路支持下，CPU 算力消耗较大（同等环境极限吞吐约为 500 Mbps）。
+```text
+TCP application
+      |
+raw byte stream in HTTP request/response body
+      |
+HTTP/2 + TLS 1.3 + TCP
+```
 
----
+当前行为：
 
-## 3. 智能混合路由模式 (`auto`) —— 生产环境推荐配置
+- TCP 会话使用 HTTP/2 `POST` 请求建立，鉴权后直接传输原始 TCP 字节流。
+- SDK 默认创建 4 个 H2 transport，`TCPPoolSize` 最大限制为 16。
+- 新连接选择当前活跃流数量最少的 transport。
+- `Prewarm` 会并发发起普通 `HEAD /` 请求，使 TLS/H2 连接提前建立；这不是 TLS 0-RTT。
+- H2 内部最多尝试两次；仍然失败时向调用方返回错误，不自动改走 H3。
+- UDP 仍由独立的 H3 manager 建立 QUIC Datagram association。
 
-该模式结合了 TCP 的高吞吐优势与 QUIC 的抗丢包特性，为复杂的生产环境提供动态协议适应能力。
+适用条件：
 
-* **配置标识**: `-tcp-transport auto` (对应 SDK 参数 `client.TCPTransportAuto`)
-* **底层承载**: 客户端在后台并发维持 HTTP/2(TCP) 与 HTTP/3(UDP) 连接池，并共享 0-RTT 状态。
-* **核心机制**:
-  1. **协议自适应分流**：
-     * **TCP 请求** ➔ 默认路由至 `HTTP/2` 连接池，获取最优下载吞吐量。
-     * **UDP 请求** ➔ 强制路由至 `HTTP/3 Datagrams` 连接池，确保实时性业务无丢包阻塞。
-  2. **主动健康探测 (Active Probing)**：
-     * 客户端按 3 秒周期复用现存的 H2 连接池，向远端发起轻量级无验证的 `GET /` 请求，流量特征与正常网页访问完全一致。
-  3. **连接灾备与平滑降级 (Graceful Degradation)**：
-     * 当探测器监测到 TCP(H2) 连接超时或 RTT 异常波动（>500ms）时，系统判定 TCP 链路受阻。此时，新的 TCP 请求将被自动重定向至 HTTP/3 (QUIC) 备用通道传输。直至 TCP 链路恢复稳定，系统方执行自动回切。
-* **适用场景**:
-  * 推荐作为默认策略部署。在保证高速率的同时，提供跨层级的网络连通性保障，为 Mihomo 与 Xray 的上层应用提供坚实的路由底座。
+- TCP/H2 路径稳定且未被明显限速或阻断。
+- 更重视成熟内核 TCP 栈、硬件卸载能力和较低的用户态 QUIC CPU 开销。
+
+需要验证的风险：
+
+- 物理 TCP 丢包会影响同一 H2 carrier 上的多个流。
+- 多 carrier 能分散流量，但会增加连接数、TLS 握手和服务端状态。
+- 选择 `h2` 不会为 UDP 提供 TCP fallback。
+
+## 3. `h3`：固定 HTTP/3 TCP carrier
+
+配置方式：
+
+```go
+TCPTransport: client.TCPTransportH3
+```
+
+```text
+TCP application                 UDP application
+      |                               |
+HTTP/3 request stream          HTTP/3 Extended CONNECT
+      |                               |
+QUIC connection A              QUIC connection B + Datagram
+```
+
+当前行为：
+
+- TCP 字节流直接承载于 HTTP/3 request stream，不叠加项目自定义 TCP 数据帧。
+- TCP 与 UDP 使用不同的 QUIC 物理连接，避免两类流量直接共享同一个拥塞窗口。
+- TLS session cache 可选；只有已经取得并持久化有效会话票据后，后续 H3 连接才可能使用 0-RTT。
+- UDP 使用 HTTP Datagram（RFC 9297）承载于 QUIC DATAGRAM（RFC 9221），不提供可靠性、顺序保证或重传。
+- H3 内部最多尝试两次；仍然失败时向调用方返回错误，不回退 H2。
+
+适用条件：
+
+- TCP 路径受到限制，而 UDP/QUIC 路径可用。
+- 可以接受 quic-go 用户态协议栈带来的额外 CPU 和每包处理成本。
+
+需要验证的风险：
+
+- UDP 被网络完全阻断时，TCP 和 UDP 代理能力都会失败。
+- QUIC 的实际吞吐受 CPU、RTT、丢包、MTU、GSO 支持和宿主机调度影响，不能用固定数值概括。
+- 0-RTT 不是首次连接能力，也不代表多节点环境已经具备强一致防重放。
+
+## 4. `auto`：H2 优先、H3 回退
+
+配置方式：
+
+```go
+TCPTransport: client.TCPTransportAuto
+```
+
+`auto` 的决策单位是“新建 TCP 连接”，不是单个数据包，也不是已经建立的 TCP 流。
+
+### 建连路径
+
+1. H2 未被标记为降级时，从 H2 pool 选择活跃流最少的 transport。
+2. 如果该次 H2 建连成功，返回 H2 `net.Conn`。
+3. 如果 H2 的内部重试仍然失败，在任何应用数据交付前尝试 H3。
+4. H2 已被标记为降级时，新建 TCP 连接直接使用 H3。
+5. 已建立连接不会在 H2 与 H3 之间迁移；连接中途失败仍由上层处理。
+
+### 后台健康探测
+
+- 探测周期为 3 秒。
+- 探测请求复用 H2 transport，访问普通 `GET /` 并读取完整响应体。
+- 单次错误或响应耗时超过 500 ms 计为失败。
+- HTTP 状态码本身不参与健康判断。
+- 连续 2 次失败后将 H2 标记为降级。
+- 连续 10 次成功后恢复 H2。
+
+探测访问的是 fallback 根页面，因此结果同时包含 H2 链路、TLS 连接和 fallback origin 的处理时间。fallback 站点变慢也可能触发 H3 回退；它不是只测网络层 RTT 的纯探针。
+
+### UDP 行为
+
+`auto` 不对 UDP 做协议选择。`ListenPacket` 始终建立 H3/QUIC Datagram association，也不会在 UDP/H3 不可用时改走 H2。
+
+## 5. 选择建议
+
+| 网络条件 | 建议起点 | 必须验证 |
+| --- | --- | --- |
+| TCP 与 UDP 都稳定，TCP 吞吐优先 | `h2` | H2 多流丢包影响、UDP/H3 可达性 |
+| TCP 明显受限，UDP/QUIC 稳定 | `h3` | CPU、MTU、UDP QoS 和 QUIC 封锁 |
+| TCP 状态会变化且 UDP/H3 可作为备用 | `auto` | 探测阈值、fallback origin 延迟和切换频率 |
+
+项目默认值仍是 `h2`。是否使用 `auto` 应由部署链路的可重复测试决定，而不是把它直接视为所有环境的生产默认值。
+
+SDK 的 `auto` 没有固定 4 秒内完成回退的保证；代码中的 `autoH2ConnectTimeout` 当前未参与 SDK 路由。H2 建连阶段对调用方 context 的继承也不完整，这两项应在依赖严格超时语义前修复。
+
+## 6. 可证伪的模式验证
+
+建议至少进行以下测试：
+
+1. `h2`：阻断客户端到服务端的 TCP 端口，确认 TCP 建连失败而不是隐式切换 H3。
+2. `h3`：阻断 UDP 端口，确认 TCP/H3 与 UDP association 均失败。
+3. `auto`：保持 UDP 可用、阻断 TCP，确认新 TCP 连接回退 H3；恢复 TCP 后观察连续健康探测带来的回切。
+4. 所有模式：分别验证 TCP 双向 EOF/半关闭、超时、服务端重启和连接取消行为。
+5. UDP：在不同 MTU、RTT、随机丢包和突发速率下分别记录 delivered rate、loss、jitter、CPU 与队列丢弃。
+
+性能和弱网结论应附带测试节点、CPU、内核、RTT、MTU、负载模型与统计区间。单次峰值不能证明某种模式在其他网络中更优。
+
+## 7. 不随模式变化的协议属性
+
+- 私有请求使用 HMAC-SHA256、时间戳和随机 nonce 鉴权。
+- 服务端使用持久 replay cache，持久化失败时拒绝继续授权。
+- 未授权请求进入真实 HTTPS fallback，私有请求头在转发前被移除。
+- 目标地址经过公网单播过滤。
+- 三种模式都不提供“不可检测”保证。
