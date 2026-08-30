@@ -52,8 +52,9 @@ MyXray 是一个面向自有节点部署的 Go 代理传输协议原型。项目
 ### TCP over H3
 
 - TCP 字节流承载于 HTTP/3 request stream。
+- `TCPPoolSize` 同样控制 H3/TCP 物理连接池；SDK 默认最多按 4 个 carrier 分担新建 TCP stream，并优先选择活跃 stream 最少的 carrier。
 - 配置持久 TLS session cache 后，可在已有会话票据的后续连接上尝试 QUIC 0-RTT。
-- H3/TCP 与 H3/UDP 使用不同的 QUIC 物理连接，避免 UDP 流量直接共享 TCP 代理流的拥塞状态。
+- H3/TCP pool 与 H3/UDP association 使用不同的 QUIC 物理连接，避免 UDP 流量直接共享 TCP 代理流的拥塞状态。
 
 ### UDP over H3
 
@@ -103,6 +104,8 @@ if err == nil {
 
 SDK 提供了便于上游适配的 `net.Conn` 与 `net.PacketConn` 类型接口，但仓库当前还没有 Xray-core、Mihomo 或 sing-box 的正式 outbound adapter。当前 module path 也是仓库内部名称 `myxray`，对外部模块发布前需要调整。现有包装器的 deadline 语义也尚未完整实现，因此“可以编写适配器”不应表述为“已经无缝集成”。
 
+`TCPPoolSize` 对 H2 和 H3 都生效，范围为 1 到 16。更大的 H3 pool 可以让多条 TCP 流分布到不同 QUIC 连接和 CPU 核心，但会增加握手、连接状态和拥塞竞争；应按目标机器与链路实测，不应默认取最大值。
+
 ## 6. 构建与验证
 
 项目声明使用 Go 1.26 工具链，并依赖仓库内经过性能修改的 `vendor`：
@@ -129,6 +132,7 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
 - H2 建连阶段当前没有完整继承 `DialContext` 的调用方 context，取消和超时语义需要修正。
 - 从未连接过的首次 0-RTT、0-RTT UDP、一次性预密钥和多节点强一致防重放尚未实现。
 - NAT rebinding、连接迁移、FEC 和不同审查环境下的分类结果尚缺少系统验证。
+- H3 的每字节 CPU 成本仍高于当前 H2 路径；连接池能提高多流聚合吞吐，但不会让单条 QUIC 连接自动跨核扩展。
 - 性能数据只代表特定硬件、RTT、MTU、丢包和宿主机负载条件，不能视为普遍吞吐保证。
 
 部署记录和历史测量见 [DEPLOYMENT.md](DEPLOYMENT.md) 与 [TEST_REPORT.md](TEST_REPORT.md)。

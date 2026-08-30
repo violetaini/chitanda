@@ -25,17 +25,18 @@ type h3Connection struct {
 }
 
 type h3TransportManager struct {
-	mu           sync.Mutex
-	server       string
-	serverName   string
-	rootURL      string
-	requestURL   string
-	path         string
-	psk          []byte
-	tlsConfig    *tls.Config
-	quicConfig   *quic.Config
-	transport    *http3.Transport
-	sessionCache *sessioncache.Cache
+	mu            sync.Mutex
+	server        string
+	serverName    string
+	rootURL       string
+	requestURL    string
+	path          string
+	psk           []byte
+	tlsConfig     *tls.Config
+	quicConfig    *quic.Config
+	transport     *http3.Transport
+	sessionCache  *sessioncache.Cache
+	activeStreams atomic.Int64
 
 	// Separate physical connections for TCP and UDP
 	currentTCP *h3Connection
@@ -166,7 +167,7 @@ func (m *h3TransportManager) dialH3TCPOnce(ctx context.Context, target string) (
 		return nil, fmt.Errorf("server rejected H3 TCP session with status %d", response.StatusCode)
 	}
 
-	return newRawH3Conn(target, stream), nil
+	return newRawH3Conn(target, stream, m), nil
 }
 
 func (m *h3TransportManager) createPacketConn(ctx context.Context) (net.PacketConn, error) {
@@ -268,16 +269,18 @@ func (m *h3TransportManager) close() {
 
 // rawH3Conn wraps an HTTP/3 request stream directly into a net.Conn.
 type rawH3Conn struct {
-	target string
-	stream *http3.RequestStream
-	closed bool
-	mu     sync.Mutex
+	target  string
+	stream  *http3.RequestStream
+	manager *h3TransportManager
+	closed  bool
+	mu      sync.Mutex
 }
 
-func newRawH3Conn(target string, stream *http3.RequestStream) *rawH3Conn {
+func newRawH3Conn(target string, stream *http3.RequestStream, manager *h3TransportManager) *rawH3Conn {
 	return &rawH3Conn{
-		target: target,
-		stream: stream,
+		target:  target,
+		stream:  stream,
+		manager: manager,
 	}
 }
 
@@ -302,6 +305,9 @@ func (c *rawH3Conn) Close() error {
 	}
 	c.closed = true
 	c.mu.Unlock()
+	if c.manager != nil {
+		c.manager.activeStreams.Add(-1)
+	}
 	c.stream.CancelRead(0)
 	c.stream.CancelWrite(0)
 	return c.stream.Close()

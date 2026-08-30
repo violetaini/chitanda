@@ -11,6 +11,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"runtime/pprof"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -36,7 +37,23 @@ func main() {
 	concurrency := flag.Int("concurrency", 1, "TCP concurrency")
 	poolSize := flag.Int("pool-size", 4, "TCP physical carrier connection pool size")
 	sessionCacheFile := flag.String("session-cache-file", "", "optional persistent session cache")
+	cpuProfile := flag.String("cpu-profile", "", "optional CPU profile output path")
 	flag.Parse()
+
+	if *cpuProfile != "" {
+		profileFile, err := os.Create(*cpuProfile)
+		if err != nil {
+			log.Fatalf("create CPU profile: %v", err)
+		}
+		if err := pprof.StartCPUProfile(profileFile); err != nil {
+			_ = profileFile.Close()
+			log.Fatalf("start CPU profile: %v", err)
+		}
+		defer func() {
+			pprof.StopCPUProfile()
+			_ = profileFile.Close()
+		}()
+	}
 
 	if *mode == "echo-server" {
 		runEchoServer(*listen)

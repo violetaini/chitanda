@@ -1,11 +1,8 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/binary"
 	"net"
-	"strings"
 	"testing"
 	"time"
 
@@ -17,31 +14,6 @@ import (
 type discardDatagramStream struct{}
 
 func (discardDatagramStream) SendDatagram([]byte) error { return nil }
-
-func TestCopyFramesToTCPRejectsOpenMetadataBeforePayload(t *testing.T) {
-	targetAddress := "1.1.1.1:443"
-	for _, test := range []struct {
-		name   string
-		flags  uint16
-		length uint32
-		want   string
-	}{
-		{name: "flags", flags: 1, length: uint32(len(targetAddress)), want: "not OPEN"},
-		{name: "length", length: uint32(len(targetAddress) + 1), want: "length mismatch"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			var header [frame.HeaderSize]byte
-			header[0] = frame.Version
-			header[1] = byte(frame.TypeOpen)
-			binary.BigEndian.PutUint16(header[2:4], test.flags)
-			binary.BigEndian.PutUint32(header[4:8], test.length)
-			err := readOpenFrame(bytes.NewReader(header[:]), targetAddress)
-			if err == nil || !strings.Contains(err.Error(), test.want) {
-				t.Fatalf("error = %v, want substring %q", err, test.want)
-			}
-		})
-	}
-}
 
 func TestUDPRelayForwardBatch(t *testing.T) {
 	receiver, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})

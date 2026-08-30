@@ -51,6 +51,7 @@ MyXray 面向自有服务器与自有客户端部署，目标是在统一服务�
 - H2 使用 `POST` 私有路径，请求体与响应体直接映射 TCP 字节流。
 - H3 使用 HTTP/3 request stream 直接映射 TCP 字节流。
 - H2 SDK 支持多 transport pool，并按活跃流数量选择 carrier。
+- H3 SDK 支持多 QUIC connection pool，并在拨号阶段预占活跃流计数，避免并发请求集中到第一个 carrier。
 - `auto` 支持单次 H2 建连失败后的 H3 尝试，以及后台 H2 健康状态切换。
 
 当前主线已经移除 TCP 数据上的 `OPEN`、`DATA`、`HALF_CLOSE` 等自定义双重帧。相关类型仍用于历史客户端代码和 UDP 数据报之外的遗留测试，后续应清理或重新定义边界。
@@ -84,7 +85,7 @@ MyXray 面向自有服务器与自有客户端部署，目标是在统一服务�
 | 能力 | 状态 |
 | --- | --- |
 | 服务端 H2/H3 监听 | 已实现 |
-| `pkg/client` 的 H2/H3/auto 路由 | 已实现，缺少完整端到端回归 |
+| `pkg/client` 的 H2/H3/auto 路由 | 已实现，H2/H3 均支持 TCP carrier pool，缺少完整端到端回归 |
 | H3 Datagram UDP | 已实现，性能与弱网结论依赖部署条件 |
 | 独立 SOCKS5 客户端与当前服务端兼容 | 未完成协议同步 |
 | 完整 `net.Conn` deadline/half-close 语义 | 未完成 |
@@ -123,5 +124,6 @@ MyXray 面向自有服务器与自有客户端部署，目标是在统一服务�
 3. 评估 UDP-over-H2 是否值得作为可选 fallback，并量化 TCP 队头阻塞代价。
 4. 在明确业务模型后评估 FEC、应用优先级和其他拥塞控制策略。
 5. 建立包含 RTT、MTU、随机丢包、突发丢包、CPU steal 和长时间稳定性的基准矩阵。
+6. 只有替代 QUIC/H3 底层在同机、同链路、同协议语义的 A/B 中同时改善吞吐与 CPU/GB，才考虑引入 Rust/C FFI 或 sidecar；不得以其他项目的峰值替代本项目验证。
 
 验收标准：所有性能结论都能由版本化脚本复现，并同时报告吞吐、丢包、延迟、CPU、内存和失败率。

@@ -168,6 +168,32 @@ Both nodes running Debian 13 ARM64 (2vCPU, ~100ms cross-region RTT):
 | **300 Mbps** (5s) | 126,944 pkts | 114,453 pkts | **264.16 Mbps** | **9.84%** | Direct Sink Delivery |
 | **400 Mbps** (5s) | 132,148 pkts | 123,881 pkts | **295.66 Mbps** | **6.26%** | Direct Sink Delivery |
 
+## 2026-08-31 H3 TCP carrier pool and CPU profile
+
+The current `pkg/client` raw-stream path was rebuilt from commit `40059aa` with Go 1.26.0 and quic-go 0.61.0. The client node was `168.138.209.1` and the server node was `170.9.59.149`; both were two-vCPU ARM64 Neoverse-N1 guests on Debian 13 with Linux 6.12. RTT was about 100.5 ms. The active server and benchmark echo origin were not replaced.
+
+The first installed `bench-direct-arm64` was stale and expected the removed `OPEN_ACK` framing. Its H3 failure was rejected as an invalid measurement. A clean benchmark binary from the current source was used for all results below.
+
+| Path | Configuration | Throughput | Additional observation |
+| :--- | :--- | :--- | :--- |
+| Raw TCP | iperf3, one stream, 10s | 1.77 Gbps | 13,852 retransmissions; path is variable |
+| Raw UDP | iperf3, two 250 Mbps flows | 499 Mbps received | 0.11% loss |
+| H2 TCP | pool 1, one stream | 505 Mbps | server used about 8.50 CPU-seconds |
+| H2 TCP | pool 1, eight streams | 753 Mbps | server used about 8.91 CPU-seconds |
+| H3 TCP, private vendor | pool 1, one stream with profile | 333 Mbps | one connection approaches a single-core limit |
+| H3 TCP, private vendor | pool 1, eight streams | 282 Mbps | multi-streaming one QUIC connection did not scale |
+| H3 TCP, private vendor | pool 2, eight streams | 422 Mbps | about 50% above pool 1 in the same run series |
+| H3 TCP, private vendor | pool 4, eight streams | 539 Mbps | server used about 14.06 CPU-seconds |
+| H3 TCP, private vendor | pool 8, eight streams with profile | 618 Mbps | about 119% above pool 1; client sampled 121% CPU |
+| H3 TCP, client GSO disabled | pool 1, one stream | 163 Mbps | disabling GSO reduced throughput and increased syscall cost |
+| H3 TCP, official client dependency | pool 1 / pool 8 | 115 / 477 Mbps | official quic-go client against the same private-vendor server |
+
+The official-dependency comparison changed only the client build from the repository's vendored quic-go to the unmodified v0.61.0 module. It is not a full upstream-client/upstream-server comparison. It nevertheless shows that removing the project's batching, GSO, and congestion-window changes is a regression on this path.
+
+Client CPU profiles attributed roughly 42-45% of samples to Linux UDP syscalls, 15-17% cumulatively to QUIC packet packing, about 9% to AES-GCM encryption/decryption, and 4-5% to memory moves. The syscall tree confirmed both `sendmmsg` batching and GSO `sendmsg` paths were active. A native Rust/C QUIC backend might reduce some user-space overhead, but it cannot be assumed to remove the dominant kernel UDP cost. Any replacement therefore needs an in-project A/B with identical HTTP/3 request-stream, Extended CONNECT, HTTP Datagram, authentication, and fallback semantics.
+
+The accepted implementation change makes `TCPPoolSize` apply to H3 and `auto` H3 fallback as well as H2. H3 dial attempts reserve a least-active carrier under a short client lock before the network operation, which prevents concurrent dials from collapsing onto the first idle manager. UDP continues to use a separate H3 connection.
+
 ## Remaining gaps
 
 - Never-contacted first-ever 0-RTT with provisioned one-time prekeys, crash-safe multi-node at-most-once consumption, and forward secrecy for early data.

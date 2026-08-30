@@ -59,17 +59,18 @@ TCPTransport: client.TCPTransportH3
 ```
 
 ```text
-TCP application                 UDP application
-      |                               |
-HTTP/3 request stream          HTTP/3 Extended CONNECT
-      |                               |
-QUIC connection A              QUIC connection B + Datagram
+TCP applications                         UDP application
+       |                                       |
+HTTP/3 request streams              HTTP/3 Extended CONNECT
+       |                                       |
+QUIC TCP pool A1...An              QUIC connection B + Datagram
 ```
 
 当前行为：
 
 - TCP 字节流直接承载于 HTTP/3 request stream，不叠加项目自定义 TCP 数据帧。
-- TCP 与 UDP 使用不同的 QUIC 物理连接，避免两类流量直接共享同一个拥塞窗口。
+- `TCPPoolSize` 控制 H3/TCP 物理连接数，默认 4、最大 16；新建 stream 选择活跃 stream 最少的 carrier。
+- H3/TCP pool 与 UDP 使用不同的 QUIC 物理连接，避免两类流量直接共享同一个拥塞窗口。
 - TLS session cache 可选；只有已经取得并持久化有效会话票据后，后续 H3 连接才可能使用 0-RTT。
 - UDP 使用 HTTP Datagram（RFC 9297）承载于 QUIC DATAGRAM（RFC 9221），不提供可靠性、顺序保证或重传。
 - H3 内部最多尝试两次；仍然失败时向调用方返回错误，不回退 H2。
@@ -99,8 +100,8 @@ TCPTransport: client.TCPTransportAuto
 
 1. H2 未被标记为降级时，从 H2 pool 选择活跃流最少的 transport。
 2. 如果该次 H2 建连成功，返回 H2 `net.Conn`。
-3. 如果 H2 的内部重试仍然失败，在任何应用数据交付前尝试 H3。
-4. H2 已被标记为降级时，新建 TCP 连接直接使用 H3。
+3. 如果 H2 的内部重试仍然失败，在任何应用数据交付前从 H3 pool 选择 carrier。
+4. H2 已被标记为降级时，新建 TCP 连接直接使用 H3 pool。
 5. 已建立连接不会在 H2 与 H3 之间迁移；连接中途失败仍由上层处理。
 
 ### 后台健康探测
@@ -141,6 +142,8 @@ SDK 的 `auto` 没有固定 4 秒内完成回退的保证；代码中的 `autoH2
 5. UDP：在不同 MTU、RTT、随机丢包和突发速率下分别记录 delivered rate、loss、jitter、CPU 与队列丢弃。
 
 性能和弱网结论应附带测试节点、CPU、内核、RTT、MTU、负载模型与统计区间。单次峰值不能证明某种模式在其他网络中更优。
+
+在 2026-08-31 的两核 ARM64、约 100 ms RTT 节点测试中，8 条 TCP stream 的 H3 聚合吞吐从 pool 1 的约 282 Mbps 提升到 pool 4 的约 539 Mbps、pool 8 的约 618 Mbps。该结果证明连接池能缓解当前单连接/单核瓶颈，不证明其他硬件、网络或负载会得到相同比例；完整条件见 [TEST_REPORT.md](TEST_REPORT.md)。
 
 ## 7. 不随模式变化的协议属性
 

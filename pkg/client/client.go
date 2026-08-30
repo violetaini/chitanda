@@ -51,7 +51,7 @@ type Config struct {
 	PSK                   []byte // 32+ bytes PSK
 	Path                  string // e.g. "/your-private-path"
 	TCPTransport          string // "h2" (default), "auto", or "h3"
-	TCPPoolSize           int    // Number of independent physical TLS/H2 carriers (default 4)
+	TCPPoolSize           int    // Number of independent physical TCP carriers (H2 or H3, default 4)
 	SessionCacheFile      string // optional persistent session cache path
 	QUICInitialPacketSize uint16 // 1200 - 1452, default 1452
 }
@@ -63,7 +63,7 @@ type Client struct {
 	requestURL   string
 	h2Clients    []*h2TransportClient
 	nextH2Idx    atomic.Uint64
-	h3Manager    *h3TransportManager
+	h3Managers   []*h3TransportManager
 	sessionCache *sessioncache.Cache
 	prober       *h2Prober
 	mu           sync.Mutex
@@ -104,7 +104,16 @@ func New(cfg Config) (*Client, error) {
 		cache = c
 	}
 
-	h3Mgr := newH3TransportManager(cfg.Server, cfg.ServerName, rootURL, requestURL, cfg.Path, cfg.PSK, cache, cfg.QUICInitialPacketSize)
+	h3PoolSize := 1
+	if cfg.TCPTransport != TCPTransportH2 {
+		h3PoolSize = cfg.TCPPoolSize
+	}
+	h3Managers := make([]*h3TransportManager, 0, h3PoolSize)
+	for i := 0; i < h3PoolSize; i++ {
+		h3Managers = append(h3Managers, newH3TransportManager(
+			cfg.Server, cfg.ServerName, rootURL, requestURL, cfg.Path, cfg.PSK, cache, cfg.QUICInitialPacketSize,
+		))
+	}
 
 	var h2Clients []*h2TransportClient
 	if cfg.TCPTransport != TCPTransportH3 {
@@ -122,7 +131,7 @@ func New(cfg Config) (*Client, error) {
 		rootURL:      rootURL,
 		requestURL:   requestURL,
 		h2Clients:    h2Clients,
-		h3Manager:    h3Mgr,
+		h3Managers:   h3Managers,
 		sessionCache: cache,
 	}
 	if cfg.TCPTransport == TCPTransportAuto {
@@ -153,7 +162,16 @@ func (c *Client) DialContext(ctx context.Context, network, address string) (net.
 			// In auto mode, fallback to H3
 		}
 	}
-	return c.h3Manager.dialH3TCP(ctx, address)
+	h3Mgr := c.reserveH3Manager()
+	if h3Mgr == nil {
+		return nil, errors.New("no H3 transport available")
+	}
+	conn, err := h3Mgr.dialH3TCP(ctx, address)
+	if err != nil {
+		h3Mgr.activeStreams.Add(-1)
+		return nil, err
+	}
+	return conn, nil
 }
 
 func (c *Client) pickBestH2Client() *h2TransportClient {
@@ -177,6 +195,35 @@ func (c *Client) pickBestH2Client() *h2TransportClient {
 	return best
 }
 
+func (c *Client) pickBestH3Manager() *h3TransportManager {
+	if len(c.h3Managers) == 0 {
+		return nil
+	}
+	best := c.h3Managers[0]
+	minActive := best.activeStreams.Load()
+	for _, manager := range c.h3Managers[1:] {
+		active := manager.activeStreams.Load()
+		if active < minActive {
+			minActive = active
+			best = manager
+		}
+	}
+	return best
+}
+
+func (c *Client) reserveH3Manager() *h3TransportManager {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return nil
+	}
+	manager := c.pickBestH3Manager()
+	if manager != nil {
+		manager.activeStreams.Add(1)
+	}
+	return manager
+}
+
 // ListenPacket creates a net.PacketConn for native UDP proxying over QUIC Datagrams.
 // Returns a net.PacketConn that can be directly used by Xray or Mihomo for UDP associate / datagram dispatch.
 func (c *Client) ListenPacket(ctx context.Context) (net.PacketConn, error) {
@@ -187,7 +234,10 @@ func (c *Client) ListenPacket(ctx context.Context) (net.PacketConn, error) {
 	}
 	c.mu.Unlock()
 
-	return c.h3Manager.createPacketConn(ctx)
+	if len(c.h3Managers) == 0 {
+		return nil, errors.New("no H3 transport available")
+	}
+	return c.h3Managers[0].createPacketConn(ctx)
 }
 
 // Prewarm optionally warms the H2 TLS connections in the pool concurrently.
@@ -224,8 +274,8 @@ func (c *Client) Close() {
 	for _, cli := range c.h2Clients {
 		cli.close()
 	}
-	if c.h3Manager != nil {
-		c.h3Manager.close()
+	for _, manager := range c.h3Managers {
+		manager.close()
 	}
 }
 
@@ -252,4 +302,3 @@ func signRequest(request *http.Request, psk []byte, path, target, mode string) e
 	request.Header.Set(HeaderSignature, auth.Signature(psk, request.Method, path, target, timestamp, nonce))
 	return nil
 }
-
