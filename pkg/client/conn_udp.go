@@ -20,8 +20,9 @@ import (
 )
 
 type h3Connection struct {
-	quic *quic.Conn
-	h3   *http3.ClientConn
+	quic  *quic.Conn
+	h3    *http3.ClientConn
+	pconn net.PacketConn
 }
 
 type h3TransportManager struct {
@@ -77,11 +78,23 @@ func (m *h3TransportManager) ensureConnection(ctx context.Context, current **h3C
 	if *current != nil && (*current).quic.Context().Err() == nil {
 		return *current, nil
 	}
-	quicConn, err := quic.DialAddrEarly(ctx, m.server, m.tlsConfig.Clone(), m.quicConfig.Clone())
+	udpAddr, err := net.ResolveUDPAddr("udp", m.server)
 	if err != nil {
 		return nil, err
 	}
-	*current = &h3Connection{quic: quicConn, h3: m.transport.NewClientConn(quicConn)}
+	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	if err != nil {
+		return nil, err
+	}
+	_ = udpConn.SetReadBuffer(8 << 20)
+	_ = udpConn.SetWriteBuffer(8 << 20)
+	
+	quicConn, err := quic.DialEarly(ctx, udpConn, udpAddr, m.tlsConfig.Clone(), m.quicConfig.Clone())
+	if err != nil {
+		_ = udpConn.Close()
+		return nil, err
+	}
+	*current = &h3Connection{quic: quicConn, h3: m.transport.NewClientConn(quicConn), pconn: udpConn}
 	return *current, nil
 }
 
@@ -99,10 +112,16 @@ func (m *h3TransportManager) invalidate(c *h3Connection) {
 	if m.currentTCP == c {
 		m.currentTCP = nil
 		_ = c.quic.CloseWithError(0, "reconnect")
+		if c.pconn != nil {
+			_ = c.pconn.Close()
+		}
 	}
 	if m.currentUDP == c {
 		m.currentUDP = nil
 		_ = c.quic.CloseWithError(0, "reconnect")
+		if c.pconn != nil {
+			_ = c.pconn.Close()
+		}
 	}
 }
 
@@ -258,10 +277,16 @@ func (m *h3TransportManager) close() {
 	defer m.mu.Unlock()
 	if m.currentTCP != nil {
 		_ = m.currentTCP.quic.CloseWithError(0, "shutdown")
+		if m.currentTCP.pconn != nil {
+			_ = m.currentTCP.pconn.Close()
+		}
 		m.currentTCP = nil
 	}
 	if m.currentUDP != nil {
 		_ = m.currentUDP.quic.CloseWithError(0, "shutdown")
+		if m.currentUDP.pconn != nil {
+			_ = m.currentUDP.pconn.Close()
+		}
 		m.currentUDP = nil
 	}
 	_ = m.transport.Close()

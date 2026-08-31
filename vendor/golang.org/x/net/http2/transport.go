@@ -45,7 +45,7 @@ const (
 	// transportDefaultStreamFlow is how many stream-level flow
 	// control tokens we announce to the peer, and how many bytes
 	// we buffer per stream.
-	transportDefaultStreamFlow = 16 << 20
+	transportDefaultStreamFlow = 64 << 20
 
 	defaultUserAgent = "Go-http-client/2.0"
 

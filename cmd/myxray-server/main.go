@@ -62,7 +62,7 @@ func main() {
 	ticketKeyFile := flag.String("ticket-key-file", "", "32-byte hex or base64url HTTP/3 ticket key")
 	fallbackURL := flag.String("fallback", "https://127.0.0.1:443", "normal HTTPS fallback")
 	fallbackServerName := flag.String("fallback-server-name", "probe.chitanda.org", "fallback TLS server name")
-	udpTargetBuffer := flag.Int("udp-target-buffer", 4<<20, "UDP target socket buffer in bytes")
+	udpTargetBuffer := flag.Int("udp-target-buffer", 8<<20, "UDP target socket buffer in bytes")
 	flag.Parse()
 	stopCPUProfile, err := startCPUProfile(*cpuProfile)
 	if err != nil {
@@ -130,7 +130,17 @@ func main() {
 	if h3Server != nil {
 		go func() {
 			log.Printf("public HTTP/3 listener started on %s", *quicListen)
-			if err := h3Server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			udpAddr, err := net.ResolveUDPAddr("udp", *quicListen)
+			if err != nil {
+				log.Fatalf("resolve HTTP/3 addr: %v", err)
+			}
+			udpConn, err := net.ListenUDP("udp", udpAddr)
+			if err != nil {
+				log.Fatalf("listen HTTP/3: %v", err)
+			}
+			_ = udpConn.SetReadBuffer(8 << 20)
+			_ = udpConn.SetWriteBuffer(8 << 20)
+			if err := h3Server.Serve(udpConn); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				log.Fatalf("HTTP/3 server: %v", err)
 			}
 		}()
