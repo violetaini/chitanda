@@ -140,14 +140,14 @@ type erpPageData struct {
 func (h *erpFallbackHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	randomBytes := make([]byte, 8)
 	_, _ = rand.Read(randomBytes)
-	traceID := "hs-trace-" + hex.EncodeToString(randomBytes)
+	traceID := "vg-trace-" + hex.EncodeToString(randomBytes)
 
 	syncBytes := make([]byte, 4)
 	_, _ = rand.Read(syncBytes)
 	syncID := strings.ToUpper(hex.EncodeToString(syncBytes))
 
 	clusterNum := (int(randomBytes[0]) % 8) + 1
-	clusterID := fmt.Sprintf("hs-cluster-prod-0%d", clusterNum)
+	clusterID := fmt.Sprintf("vg-cluster-prod-0%d", clusterNum)
 
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
@@ -159,9 +159,9 @@ func (h *erpFallbackHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"code":         200,
 			"status":       "UP",
-			"organization": "华晟国际实业集团 (Huasheng International Group)",
-			"service":      "企业数字化运营与供应链管理系统 (HS-ERP-Core)",
-			"vendor":       "融智数联信息技术(北京)有限公司",
+			"organization": "Vanguard Global Industrial Group, Ltd.",
+			"service":      "Enterprise Operations & SCM Microservices Gateway (VG-ERP-Core)",
+			"vendor":       "SoftLink Information Systems Corp.",
 			"version":      "4.22.0-RELEASE",
 			"cluster":      clusterID,
 			"trace_id":     traceID,
@@ -179,17 +179,17 @@ func (h *erpFallbackHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ClusterID:     clusterID,
 		TraceID:       traceID,
 		RequestSyncID: syncID,
-		Timestamp:     time.Now().Format("2006-01-02 15:04:05 MST"),
+		Timestamp:     time.Now().UTC().Format("2006-01-02 15:04:05 UTC"),
 	}
 	_ = h.tmpl.Execute(w, data)
 }
 
 const erpHtmlTemplate = `<!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>华晟集团 - 企业综合运营与供应链数字化管理系统</title>
+    <title>Vanguard Global - Enterprise Resource & SCM Operations Gateway</title>
     <style>
         :root {
             --primary: #1e3a8a;
@@ -316,65 +316,65 @@ const erpHtmlTemplate = `<!DOCTYPE html>
         <div class="card">
             <div class="header">
                 <div class="brand">
-                    <div class="logo-icon">HS</div>
+                    <div class="logo-icon">VG</div>
                     <div>
-                        <div class="title">华晟国际实业集团 &bull; 数字化运营中台</div>
-                        <div class="subtitle">企业级综合资源管理与供应链 ERP 网关 v4.2</div>
+                        <div class="title">Vanguard Global Industrial &bull; Operations Hub</div>
+                        <div class="subtitle">Enterprise Resource Planning & SCM Gateway v4.2</div>
                     </div>
                 </div>
                 <div class="badge">
                     <div class="badge-dot"></div>
-                    <span>系统运行正常 (Operational)</span>
+                    <span>Cluster Operational</span>
                 </div>
             </div>
 
             <div class="grid">
                 <div class="stat-box">
-                    <div class="stat-label">运行状态 / Status</div>
-                    <div class="stat-val">RUNNING (STANDBY)</div>
+                    <div class="stat-label">Service Status</div>
+                    <div class="stat-val">RUNNING (STANDBY-READY)</div>
                 </div>
                 <div class="stat-box">
-                    <div class="stat-label">安全验证 / Security</div>
-                    <div class="stat-val">mTLS 1.3 / OAuth 2.0</div>
+                    <div class="stat-label">Access Protocol</div>
+                    <div class="stat-val">mTLS 1.3 / OAuth 2.0 PKCE</div>
                 </div>
                 <div class="stat-box">
-                    <div class="stat-label">生产集群节点 / Node</div>
+                    <div class="stat-label">Production Cluster Node</div>
                     <div class="stat-val">{{.ClusterID}}</div>
                 </div>
                 <div class="stat-box">
-                    <div class="stat-label">审计链路 / Trace ID</div>
+                    <div class="stat-label">Audit Trace ID</div>
                     <div class="stat-val">{{.TraceID}}</div>
                 </div>
             </div>
 
-            <div class="section-title">核心业务子系统状态 (Subsystems)</div>
+            <div class="section-title">Core Subsystem Status</div>
             <div class="modules-list">
                 <div class="module-item">
-                    <span>SCM 供应链管理</span>
-                    <span class="module-status">&bull; 正常</span>
+                    <span>SCM Supply Chain Engine</span>
+                    <span class="module-status">&bull; Operational</span>
                 </div>
                 <div class="module-item">
-                    <span>CRM 客户与营销</span>
-                    <span class="module-status">&bull; 正常</span>
+                    <span>CRM & Client Portal</span>
+                    <span class="module-status">&bull; Operational</span>
                 </div>
                 <div class="module-item">
-                    <span>FIN 财务结算总账</span>
-                    <span class="module-status">&bull; 正常</span>
+                    <span>FIN General Ledger</span>
+                    <span class="module-status">&bull; Operational</span>
                 </div>
                 <div class="module-item">
-                    <span>WMS 智能仓储物流</span>
-                    <span class="module-status">&bull; 正常</span>
+                    <span>WMS Smart Warehousing</span>
+                    <span class="module-status">&bull; Operational</span>
                 </div>
             </div>
 
             <div class="notice">
-                <strong>企业专线访问控制声明</strong>：本网关为华晟集团生产业务核心接口接入点，仅接受携带企业专网身份令牌 (SSO Token / Client Cert) 的内部微服务系统调用。未授权的公网请求将被自动记录审计日志并实施访问受限。
+                <strong>Corporate Security Policy</strong>: This access gateway serves as an internal API endpoint for Vanguard Global production services. Access is restricted to authorized corporate networks and authenticated microservices with valid TLS client credentials or access tokens. Unauthorized requests are logged and rejected.
             </div>
         </div>
 
         <div class="footer">
-            <div>&copy; 2024-2026 华晟国际实业集团有限公司 (Huasheng International Group) 版权所有</div>
-            <div class="footer-vendor">技术支持与基础设施运维由 <strong>融智数联(北京)信息技术有限公司</strong> 提供 &bull; 节点同步 ID: {{.RequestSyncID}}</div>
+            <div>&copy; 2024-2026 Vanguard Global Industrial Group, Ltd. All rights reserved.</div>
+            <div class="footer-vendor">Infrastructure & Systems Management powered by <strong>SoftLink Information Systems Corp.</strong> &bull; Node Sync ID: {{.RequestSyncID}}</div>
         </div>
     </div>
 </body>

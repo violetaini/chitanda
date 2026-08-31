@@ -123,8 +123,8 @@ func TestNewFallback(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200 OK for ERP fallback, got %d", w.Code)
 	}
-	if !strings.Contains(w.Body.String(), "华晟国际实业集团") {
-		t.Fatalf("expected Huasheng group title in response body")
+	if !strings.Contains(w.Body.String(), "Vanguard Global") {
+		t.Fatalf("expected Vanguard Global title in response body")
 	}
 
 	// 2. Built-in ERP JSON response
@@ -135,7 +135,7 @@ func TestNewFallback(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200 OK for ERP API JSON, got %d", w.Code)
 	}
-	if !strings.Contains(w.Body.String(), "华晟国际实业集团") {
+	if !strings.Contains(w.Body.String(), "Vanguard Global") {
 		t.Fatalf("expected JSON body to contain organization name")
 	}
 
