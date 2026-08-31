@@ -123,8 +123,8 @@ func TestNewFallback(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200 OK for ERP fallback, got %d", w.Code)
 	}
-	if !strings.Contains(w.Body.String(), "Enterprise Business Gateway") {
-		t.Fatalf("expected ERP title in response body")
+	if !strings.Contains(w.Body.String(), "华晟国际实业集团") {
+		t.Fatalf("expected Huasheng group title in response body")
 	}
 
 	// 2. Built-in ERP JSON response
@@ -135,8 +135,8 @@ func TestNewFallback(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200 OK for ERP API JSON, got %d", w.Code)
 	}
-	if !strings.Contains(w.Body.String(), "Enterprise Resource Planning") {
-		t.Fatalf("expected JSON body to contain ERP service name")
+	if !strings.Contains(w.Body.String(), "华晟国际实业集团") {
+		t.Fatalf("expected JSON body to contain organization name")
 	}
 
 	// 3. UDS target parsing
