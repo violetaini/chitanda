@@ -213,7 +213,7 @@ const erpHtmlTemplate = `<!DOCTYPE html>
             justify-content: space-between;
             padding: 36px 16px;
         }
-        .container { max-width: 820px; margin: 0 auto; width: 100%; }
+        .container { max-width: 860px; margin: 0 auto; width: 100%; }
         .card {
             background: var(--surface);
             border: 1px solid var(--border);
@@ -257,13 +257,17 @@ const erpHtmlTemplate = `<!DOCTYPE html>
             display: inline-flex;
             align-items: center;
             gap: 6px;
+            white-space: nowrap;
         }
-        .badge-dot { width: 6px; height: 6px; background: var(--success); border-radius: 50%; }
+        .badge-dot { width: 6px; height: 6px; background: var(--success); border-radius: 50%; display: inline-block; }
         .grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            grid-template-columns: repeat(2, 1fr);
             gap: 16px;
             margin-bottom: 24px;
+        }
+        @media (max-width: 640px) {
+            .grid { grid-template-columns: 1fr; }
         }
         .stat-box {
             background: rgba(15, 23, 42, 0.6);
@@ -276,21 +280,45 @@ const erpHtmlTemplate = `<!DOCTYPE html>
         .section-title { font-size: 13px; font-weight: 600; color: var(--text-muted); margin-bottom: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
         .modules-list {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
-            gap: 10px;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 12px;
             margin-bottom: 24px;
+        }
+        @media (max-width: 640px) {
+            .modules-list { grid-template-columns: 1fr; }
         }
         .module-item {
             background: rgba(15, 23, 42, 0.4);
             border: 1px solid var(--border);
             border-radius: 6px;
-            padding: 10px 12px;
+            padding: 12px 16px;
             font-size: 13px;
             display: flex;
             align-items: center;
             justify-content: space-between;
+            gap: 12px;
         }
-        .module-status { font-size: 11px; color: var(--success); }
+        .module-name {
+            font-weight: 500;
+            color: #e2e8f0;
+            white-space: nowrap;
+        }
+        .module-status {
+            font-size: 12px;
+            color: var(--success);
+            white-space: nowrap;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            flex-shrink: 0;
+        }
+        .status-dot {
+            width: 6px;
+            height: 6px;
+            background: var(--success);
+            border-radius: 50%;
+            display: inline-block;
+        }
         .notice {
             background: rgba(37, 99, 235, 0.08);
             border-left: 3px solid var(--primary-light);
@@ -323,7 +351,7 @@ const erpHtmlTemplate = `<!DOCTYPE html>
                     </div>
                 </div>
                 <div class="badge">
-                    <div class="badge-dot"></div>
+                    <span class="badge-dot"></span>
                     <span>Cluster Operational</span>
                 </div>
             </div>
@@ -350,20 +378,20 @@ const erpHtmlTemplate = `<!DOCTYPE html>
             <div class="section-title">Core Subsystem Status</div>
             <div class="modules-list">
                 <div class="module-item">
-                    <span>SCM Supply Chain Engine</span>
-                    <span class="module-status">&bull; Operational</span>
+                    <span class="module-name">SCM Supply Chain Engine</span>
+                    <span class="module-status"><span class="status-dot"></span>Operational</span>
                 </div>
                 <div class="module-item">
-                    <span>CRM & Client Portal</span>
-                    <span class="module-status">&bull; Operational</span>
+                    <span class="module-name">CRM & Client Portal</span>
+                    <span class="module-status"><span class="status-dot"></span>Operational</span>
                 </div>
                 <div class="module-item">
-                    <span>FIN General Ledger</span>
-                    <span class="module-status">&bull; Operational</span>
+                    <span class="module-name">FIN General Ledger</span>
+                    <span class="module-status"><span class="status-dot"></span>Operational</span>
                 </div>
                 <div class="module-item">
-                    <span>WMS Smart Warehousing</span>
-                    <span class="module-status">&bull; Operational</span>
+                    <span class="module-name">WMS Smart Warehousing</span>
+                    <span class="module-status"><span class="status-dot"></span>Operational</span>
                 </div>
             </div>
 
