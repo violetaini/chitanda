@@ -37,6 +37,8 @@ const (
 	TCPTransportAuto    = "auto"
 	TCPTransportH2      = "h2"
 	TCPTransportH3      = "h3"
+	TCPTransportPlainH1 = "plain-h1"
+	TCPTransportH1      = "h1"
 	DefaultTCPTransport = TCPTransportH2
 	DefaultTCPPoolSize  = 4
 
@@ -50,7 +52,7 @@ type Config struct {
 	ServerName            string // e.g. "status.chitanda.org"
 	PSK                   []byte // 32+ bytes PSK
 	Path                  string // e.g. "/your-private-path"
-	TCPTransport          string // "h2" (default), "auto", or "h3"
+	TCPTransport          string // "h2" (default), "auto", "h3", or "plain-h1"
 	TCPPoolSize           int    // Number of independent physical TCP carriers (H2 or H3, default 4)
 	SessionCacheFile      string // optional persistent session cache path
 	QUICInitialPacketSize uint16 // 1200 - 1452, default 1452
@@ -72,14 +74,23 @@ type Client struct {
 
 // New creates and initializes a new MyXray Client.
 func New(cfg Config) (*Client, error) {
-	if cfg.Server == "" || cfg.ServerName == "" || len(cfg.PSK) < 32 || cfg.Path == "" {
-		return nil, errors.New("server, serverName, path, and valid PSK (>=32 bytes) are required")
+	if cfg.TCPTransport == TCPTransportPlainH1 || cfg.TCPTransport == TCPTransportH1 {
+		if cfg.Server == "" || len(cfg.PSK) < 32 || cfg.Path == "" {
+			return nil, errors.New("server, path, and valid PSK (>=32 bytes) are required for plain-h1")
+		}
+		if cfg.ServerName == "" {
+			cfg.ServerName = cfg.Server
+		}
+	} else {
+		if cfg.Server == "" || cfg.ServerName == "" || len(cfg.PSK) < 32 || cfg.Path == "" {
+			return nil, errors.New("server, serverName, path, and valid PSK (>=32 bytes) are required")
+		}
 	}
 	if cfg.TCPTransport == "" {
 		cfg.TCPTransport = DefaultTCPTransport
 	}
-	if cfg.TCPTransport != TCPTransportH2 && cfg.TCPTransport != TCPTransportAuto && cfg.TCPTransport != TCPTransportH3 {
-		return nil, fmt.Errorf("invalid tcp transport %q: must be h2, auto or h3", cfg.TCPTransport)
+	if cfg.TCPTransport != TCPTransportH2 && cfg.TCPTransport != TCPTransportAuto && cfg.TCPTransport != TCPTransportH3 && cfg.TCPTransport != TCPTransportPlainH1 && cfg.TCPTransport != TCPTransportH1 {
+		return nil, fmt.Errorf("invalid tcp transport %q: must be h2, auto, h3, or plain-h1", cfg.TCPTransport)
 	}
 	if cfg.TCPPoolSize <= 0 {
 		cfg.TCPPoolSize = DefaultTCPPoolSize
@@ -92,37 +103,48 @@ func New(cfg Config) (*Client, error) {
 	}
 
 	port := portOf(cfg.Server)
-	rootURL := "https://" + net.JoinHostPort(cfg.ServerName, port) + "/"
+	scheme := "https://"
+	if cfg.TCPTransport == TCPTransportPlainH1 || cfg.TCPTransport == TCPTransportH1 {
+		scheme = "http://"
+	}
+	rootURL := scheme + net.JoinHostPort(cfg.ServerName, port) + "/"
 	requestURL := strings.TrimSuffix(rootURL, "/") + cfg.Path
 
 	var cache *sessioncache.Cache
 	if cfg.SessionCacheFile != "" {
 		c, err := sessioncache.Open(cfg.SessionCacheFile)
-		if err != nil {
-			return nil, fmt.Errorf("open session cache: %w", err)
+		if err == nil {
+			cache = c
 		}
-		cache = c
-	}
-
-	h3PoolSize := 1
-	if cfg.TCPTransport != TCPTransportH2 {
-		h3PoolSize = cfg.TCPPoolSize
-	}
-	h3Managers := make([]*h3TransportManager, 0, h3PoolSize)
-	for i := 0; i < h3PoolSize; i++ {
-		h3Managers = append(h3Managers, newH3TransportManager(
-			cfg.Server, cfg.ServerName, rootURL, requestURL, cfg.Path, cfg.PSK, cache, cfg.QUICInitialPacketSize,
-		))
 	}
 
 	var h2Clients []*h2TransportClient
-	if cfg.TCPTransport != TCPTransportH3 {
-		for i := 0; i < cfg.TCPPoolSize; i++ {
+	var h3Managers []*h3TransportManager
+
+	if cfg.TCPTransport != TCPTransportPlainH1 && cfg.TCPTransport != TCPTransportH1 {
+		// H2 / H3 initialization
+		h2Count := cfg.TCPPoolSize
+		if cfg.TCPTransport == TCPTransportH3 {
+			h2Count = 0
+		}
+		for i := 0; i < h2Count; i++ {
 			h2Cli, err := newH2TransportClient(cfg.Server, cfg.ServerName, rootURL, requestURL, cfg.Path, cfg.PSK)
 			if err != nil {
 				return nil, fmt.Errorf("init h2 client %d: %w", i, err)
 			}
 			h2Clients = append(h2Clients, h2Cli)
+		}
+
+		h3Count := 1
+		if cfg.TCPTransport == TCPTransportH3 {
+			h3Count = cfg.TCPPoolSize
+		} else if cfg.TCPTransport == TCPTransportAuto {
+			h3Count = cfg.TCPPoolSize
+		}
+		for i := 0; i < h3Count; i++ {
+			h3Managers = append(h3Managers, newH3TransportManager(
+				cfg.Server, cfg.ServerName, rootURL, requestURL, cfg.Path, cfg.PSK, cache, cfg.QUICInitialPacketSize,
+			))
 		}
 	}
 
@@ -149,6 +171,10 @@ func (c *Client) DialContext(ctx context.Context, network, address string) (net.
 		return nil, errors.New("client closed")
 	}
 	c.mu.Unlock()
+
+	if c.cfg.TCPTransport == TCPTransportPlainH1 || c.cfg.TCPTransport == TCPTransportH1 {
+		return c.dialPlainH1(ctx, address)
+	}
 
 	if c.cfg.TCPTransport == TCPTransportH2 || (c.cfg.TCPTransport == TCPTransportAuto && !c.prober.h2Degraded.Load()) {
 		if h2Cli := c.pickBestH2Client(); h2Cli != nil {

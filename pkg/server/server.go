@@ -1,6 +1,8 @@
 package server
 
 import (
+	"context"
+	"encoding/hex"
 	"errors"
 	"io"
 	"log"
@@ -10,6 +12,7 @@ import (
 	"time"
 
 	"myxray/internal/auth"
+	"myxray/internal/h1session"
 	"myxray/internal/target"
 )
 
@@ -37,6 +40,7 @@ type Server struct {
 	replays         *auth.ReplayCache
 	fallback        http.Handler
 	udpTargetBuffer int
+	dialTarget      func(ctx context.Context, address string) (net.Conn, error)
 }
 
 // NewServer creates a new Server instance
@@ -47,7 +51,13 @@ func NewServer(path string, psk []byte, replays *auth.ReplayCache, fallback http
 		replays:         replays,
 		fallback:        fallback,
 		udpTargetBuffer: udpTargetBuffer,
+		dialTarget:      target.DialContext,
 	}
+}
+
+// SetDialTargetForTest allows overriding upstream dialer in tests (e.g. for loopback echo servers).
+func (s *Server) SetDialTargetForTest(fn func(ctx context.Context, address string) (net.Conn, error)) {
+	s.dialTarget = fn
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -59,6 +69,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.ProtoMajor == 3 {
 		s.serveHTTP3(w, r)
+		return
+	}
+	if r.ProtoMajor == 1 && r.Method == http.MethodPost && r.URL.Path == s.path {
+		s.servePlainH1(w, r)
 		return
 	}
 	if r.URL.Path != s.path || r.Method != http.MethodPost || r.ProtoMajor != 2 {
@@ -81,7 +95,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	upstream, err := target.DialContext(r.Context(), targetAddress)
+	upstream, err := s.dialTarget(r.Context(), targetAddress)
 	if err != nil {
 		log.Printf("authenticated upstream dial failed")
 		http.Error(w, "upstream unavailable", http.StatusBadGateway)
@@ -145,4 +159,109 @@ func (s *Server) authorize(r *http.Request, targetAddress, timestamp, nonce, sig
 		return errReplayDetected
 	}
 	return nil
+}
+
+func (s *Server) servePlainH1(w http.ResponseWriter, r *http.Request) {
+	rc := http.NewResponseController(w)
+	_ = rc.EnableFullDuplex()
+
+	var clientHello [h1session.ClientHelloSize]byte
+	if _, err := io.ReadFull(r.Body, clientHello[:]); err != nil {
+		s.serveFallback(w, r)
+		return
+	}
+
+	now := time.Now()
+	clientNonce, _, err := h1session.VerifyClientHello(s.psk, clientHello[:], now)
+	if err != nil {
+		s.serveFallback(w, r)
+		return
+	}
+
+	nonceHex := hex.EncodeToString(clientNonce[:])
+	accepted, replayErr := s.replays.Accept(nonceHex, now)
+	if replayErr != nil {
+		log.Printf("replay cache error in plain-h1: %v", replayErr)
+	}
+	if !accepted || replayErr != nil {
+		http.Error(w, "Bad Request", http.StatusBadRequest)
+		return
+	}
+
+	serverHello, clientKey, serverKey, err := h1session.CreateServerHello(s.psk, clientNonce)
+	if err != nil {
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write(serverHello); err != nil {
+		return
+	}
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+
+	decStream, err := h1session.NewAEADStream(clientKey, h1session.DirClientToServer)
+	if err != nil {
+		return
+	}
+	encStream, err := h1session.NewAEADStream(serverKey, h1session.DirServerToClient)
+	if err != nil {
+		return
+	}
+
+	framedReader := h1session.NewFramedReader(r.Body, decStream)
+	framedWriter := h1session.NewFramedWriter(w, encStream)
+
+	// Read OPEN frame from the first AEAD chunk
+	openBuf := make([]byte, 1024)
+	n, err := framedReader.Read(openBuf)
+	if err != nil {
+		return
+	}
+
+	targetAddress, initialPayload, err := h1session.DecodeOpenFrame(openBuf[:n])
+	if err != nil {
+		return
+	}
+
+	upstream, err := s.dialTarget(r.Context(), targetAddress)
+	if err != nil {
+		log.Printf("authenticated plain-h1 upstream dial failed: %v", err)
+		return
+	}
+	defer upstream.Close()
+
+	if len(initialPayload) > 0 {
+		if _, err := upstream.Write(initialPayload); err != nil {
+			return
+		}
+	}
+
+	uploadDone := make(chan error, 1)
+	go func() {
+		bufPtr := copyBufferPool.Get().(*[]byte)
+		defer copyBufferPool.Put(bufPtr)
+		_, uploadErr := io.CopyBuffer(upstream, framedReader, *bufPtr)
+		if uploadErr == nil {
+			if tcp, ok := upstream.(*net.TCPConn); ok {
+				_ = tcp.CloseWrite()
+			}
+		} else {
+			_ = upstream.Close()
+		}
+		uploadDone <- uploadErr
+	}()
+
+	bufPtr := copyBufferPool.Get().(*[]byte)
+	_, _ = io.CopyBuffer(framedWriter, upstream, *bufPtr)
+	copyBufferPool.Put(bufPtr)
+
+	select {
+	case <-uploadDone:
+	case <-r.Context().Done():
+	}
 }

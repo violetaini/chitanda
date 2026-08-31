@@ -1,0 +1,280 @@
+package client
+
+import (
+	"bufio"
+	"context"
+	"fmt"
+	"io"
+	"net"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"myxray/internal/h1session"
+)
+
+type plainH1Conn struct {
+	raw          net.Conn
+	reader       *bufio.Reader
+	framedReader *h1session.FramedReader
+	framedWriter *h1session.FramedWriter
+	chunkWriter  *chunkedWriter
+	closeOnce    sync.Once
+	closed       chan struct{}
+}
+
+func (c *Client) dialPlainH1(ctx context.Context, target string) (net.Conn, error) {
+	var dialer net.Dialer
+	rawConn, err := dialer.DialContext(ctx, "tcp", c.cfg.Server)
+	if err != nil {
+		return nil, fmt.Errorf("plain-h1 dial server %q: %w", c.cfg.Server, err)
+	}
+
+	now := time.Now()
+	clientHello, clientNonce, _, err := h1session.CreateClientHello(c.cfg.PSK, now)
+	if err != nil {
+		_ = rawConn.Close()
+		return nil, fmt.Errorf("create client hello: %w", err)
+	}
+
+	reqHeaders := fmt.Sprintf(
+		"POST %s HTTP/1.1\r\n"+
+			"Host: %s\r\n"+
+			"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\r\n"+
+			"Content-Type: application/octet-stream\r\n"+
+			"Transfer-Encoding: chunked\r\n"+
+			"Connection: keep-alive\r\n"+
+			"\r\n",
+		c.cfg.Path, c.cfg.Server,
+	)
+	if _, err := rawConn.Write([]byte(reqHeaders)); err != nil {
+		_ = rawConn.Close()
+		return nil, fmt.Errorf("write plain-h1 request headers: %w", err)
+	}
+
+	chunk1Hdr := fmt.Sprintf("%x\r\n", len(clientHello))
+	if _, err := rawConn.Write([]byte(chunk1Hdr)); err != nil {
+		_ = rawConn.Close()
+		return nil, fmt.Errorf("write client hello chunk header: %w", err)
+	}
+	if _, err := rawConn.Write(clientHello); err != nil {
+		_ = rawConn.Close()
+		return nil, fmt.Errorf("write client hello: %w", err)
+	}
+	if _, err := rawConn.Write([]byte("\r\n")); err != nil {
+		_ = rawConn.Close()
+		return nil, fmt.Errorf("write client hello chunk trailer: %w", err)
+	}
+
+	reader := bufio.NewReader(rawConn)
+	statusLine, err := reader.ReadString('\n')
+	if err != nil {
+		_ = rawConn.Close()
+		return nil, fmt.Errorf("read response status: %w", err)
+	}
+	if !strings.Contains(statusLine, "200") {
+		_ = rawConn.Close()
+		return nil, fmt.Errorf("server rejected plain-h1: %s", strings.TrimSpace(statusLine))
+	}
+
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			_ = rawConn.Close()
+			return nil, fmt.Errorf("read response header: %w", err)
+		}
+		if line == "\r\n" || line == "\n" {
+			break
+		}
+	}
+
+	chunkLenLine, err := reader.ReadString('\n')
+	if err != nil {
+		_ = rawConn.Close()
+		return nil, fmt.Errorf("read server hello chunk length: %w", err)
+	}
+	chunkLenHex := strings.TrimSpace(chunkLenLine)
+	chunkLen, err := strconv.ParseInt(chunkLenHex, 16, 64)
+	if err != nil || chunkLen < h1session.ServerHelloSize {
+		_ = rawConn.Close()
+		return nil, fmt.Errorf("invalid server hello chunk length %q: %w", chunkLenHex, err)
+	}
+
+	serverHello := make([]byte, h1session.ServerHelloSize)
+	if _, err := io.ReadFull(reader, serverHello); err != nil {
+		_ = rawConn.Close()
+		return nil, fmt.Errorf("read server hello: %w", err)
+	}
+
+	if chunkLen > h1session.ServerHelloSize {
+		remainder := make([]byte, chunkLen-h1session.ServerHelloSize)
+		if _, err := io.ReadFull(reader, remainder); err != nil {
+			_ = rawConn.Close()
+			return nil, fmt.Errorf("read server hello remainder: %w", err)
+		}
+	}
+	var crlf [2]byte
+	if _, err := io.ReadFull(reader, crlf[:]); err != nil {
+		_ = rawConn.Close()
+		return nil, fmt.Errorf("read chunk crlf: %w", err)
+	}
+
+	clientKey, serverKey, err := h1session.VerifyServerHello(c.cfg.PSK, clientNonce, serverHello)
+	if err != nil {
+		_ = rawConn.Close()
+		return nil, fmt.Errorf("verify server hello failed: %w", err)
+	}
+
+	encStream, err := h1session.NewAEADStream(clientKey, h1session.DirClientToServer)
+	if err != nil {
+		_ = rawConn.Close()
+		return nil, err
+	}
+	decStream, err := h1session.NewAEADStream(serverKey, h1session.DirServerToClient)
+	if err != nil {
+		_ = rawConn.Close()
+		return nil, err
+	}
+
+	cw := newChunkedWriter(rawConn)
+	cr := newChunkedReader(reader)
+
+	framedWriter := h1session.NewFramedWriter(cw, encStream)
+	framedReader := h1session.NewFramedReader(cr, decStream)
+
+	openFrame, err := h1session.EncodeOpenFrame(target, nil)
+	if err != nil {
+		_ = rawConn.Close()
+		return nil, fmt.Errorf("encode open frame: %w", err)
+	}
+	if _, err := framedWriter.Write(openFrame); err != nil {
+		_ = rawConn.Close()
+		return nil, fmt.Errorf("send open frame: %w", err)
+	}
+
+	conn := &plainH1Conn{
+		raw:          rawConn,
+		reader:       reader,
+		framedReader: framedReader,
+		framedWriter: framedWriter,
+		chunkWriter:  cw,
+		closed:       make(chan struct{}),
+	}
+	return conn, nil
+}
+
+type chunkedWriter struct {
+	w  io.Writer
+	mu sync.Mutex
+}
+
+func newChunkedWriter(w io.Writer) *chunkedWriter {
+	return &chunkedWriter{w: w}
+}
+
+func (cw *chunkedWriter) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	cw.mu.Lock()
+	defer cw.mu.Unlock()
+
+	hdr := fmt.Sprintf("%x\r\n", len(p))
+	if _, err := cw.w.Write([]byte(hdr)); err != nil {
+		return 0, err
+	}
+	if _, err := cw.w.Write(p); err != nil {
+		return 0, err
+	}
+	if _, err := cw.w.Write([]byte("\r\n")); err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+func (cw *chunkedWriter) Close() error {
+	cw.mu.Lock()
+	defer cw.mu.Unlock()
+	_, err := cw.w.Write([]byte("0\r\n\r\n"))
+	return err
+}
+
+type chunkedReader struct {
+	r          *bufio.Reader
+	chunkLeft  int64
+	chunkEnded bool
+}
+
+func newChunkedReader(r *bufio.Reader) *chunkedReader {
+	return &chunkedReader{r: r}
+}
+
+func (cr *chunkedReader) Read(p []byte) (int, error) {
+	if cr.chunkEnded {
+		return 0, io.EOF
+	}
+
+	if cr.chunkLeft == 0 {
+		line, err := cr.r.ReadString('\n')
+		if err != nil {
+			return 0, err
+		}
+		line = strings.TrimSpace(line)
+		if line == "" {
+			line, err = cr.r.ReadString('\n')
+			if err != nil {
+				return 0, err
+			}
+			line = strings.TrimSpace(line)
+		}
+		chunkLen, err := strconv.ParseInt(line, 16, 64)
+		if err != nil {
+			return 0, fmt.Errorf("invalid chunk length %q: %w", line, err)
+		}
+		if chunkLen == 0 {
+			cr.chunkEnded = true
+			return 0, io.EOF
+		}
+		cr.chunkLeft = chunkLen
+	}
+
+	toRead := int64(len(p))
+	if toRead > cr.chunkLeft {
+		toRead = cr.chunkLeft
+	}
+
+	n, err := cr.r.Read(p[:toRead])
+	cr.chunkLeft -= int64(n)
+
+	if cr.chunkLeft == 0 && err == nil {
+		var crlf [2]byte
+		if _, err := io.ReadFull(cr.r, crlf[:]); err != nil {
+			return n, err
+		}
+	}
+	return n, err
+}
+
+func (c *plainH1Conn) Read(b []byte) (n int, err error) {
+	return c.framedReader.Read(b)
+}
+
+func (c *plainH1Conn) Write(b []byte) (n int, err error) {
+	return c.framedWriter.Write(b)
+}
+
+func (c *plainH1Conn) Close() error {
+	c.closeOnce.Do(func() {
+		close(c.closed)
+		_ = c.chunkWriter.Close()
+		_ = c.raw.Close()
+	})
+	return nil
+}
+
+func (c *plainH1Conn) LocalAddr() net.Addr                { return c.raw.LocalAddr() }
+func (c *plainH1Conn) RemoteAddr() net.Addr               { return c.raw.RemoteAddr() }
+func (c *plainH1Conn) SetDeadline(t time.Time) error      { return c.raw.SetDeadline(t) }
+func (c *plainH1Conn) SetReadDeadline(t time.Time) error  { return c.raw.SetReadDeadline(t) }
+func (c *plainH1Conn) SetWriteDeadline(t time.Time) error { return c.raw.SetWriteDeadline(t) }
