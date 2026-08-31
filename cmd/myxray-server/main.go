@@ -1,51 +1,11 @@
 package main
 
 import (
-	"context"
-	"crypto/tls"
-	"errors"
 	"flag"
-	"fmt"
-	"io"
 	"log"
-	"net"
-	"net/http"
-	"net/http/httputil"
-	"net/url"
-	"os"
-	"os/signal"
-	"runtime/pprof"
-	"strings"
-	"syscall"
-	"time"
 
-	"github.com/quic-go/quic-go/http3"
-	"golang.org/x/net/http2"
-
-	"myxray/internal/auth"
-	"myxray/internal/quicconfig"
-	"myxray/internal/target"
+	"myxray/pkg/server"
 )
-
-const (
-	headerTarget    = "X-Session-Target"
-	headerTimestamp = "X-Session-Time"
-	headerNonce     = "X-Session-Nonce"
-	headerSignature = "X-Session-Auth"
-	headerSessionOK = "X-Session-OK"
-	headerFraming   = "X-Session-Framing"
-
-	h2ConnectionReceiveWindow = 256 << 20
-	h2StreamReceiveWindow     = 64 << 20
-)
-
-type server struct {
-	path            string
-	psk             []byte
-	replays         *auth.ReplayCache
-	fallback        http.Handler
-	udpTargetBuffer int
-}
 
 func main() {
 	listen := flag.String("listen", ":11322", "public TLS listen address")
@@ -56,307 +16,38 @@ func main() {
 	privatePath := flag.String("path", "", "private HTTP path")
 	pathFile := flag.String("path-file", "", "file containing the private HTTP path")
 	replayFile := flag.String("replay-file", "/var/lib/myxray/replay.log", "durable replay cache file")
-	cpuProfile := flag.String("cpu-profile", "", "optional CPU profile output file")
 	quicListen := flag.String("quic-listen", "", "optional HTTP/3 UDP listen address")
-	quicInitialPacketSize := flag.Uint("quic-initial-packet-size", quicconfig.DefaultInitialPacketSize, "QUIC initial packet size (1200-1452)")
 	ticketKeyFile := flag.String("ticket-key-file", "", "32-byte hex or base64url HTTP/3 ticket key")
 	fallbackURL := flag.String("fallback", "https://127.0.0.1:443", "normal HTTPS fallback")
 	fallbackServerName := flag.String("fallback-server-name", "probe.chitanda.org", "fallback TLS server name")
 	udpTargetBuffer := flag.Int("udp-target-buffer", 8<<20, "UDP target socket buffer in bytes")
+	quicInitialPacketSize := flag.Uint("quic-initial-packet-size", 1452, "QUIC initial packet size (1200-1452)")
+	strictSNI := flag.String("strict-sni", "", "Optional: enforce Strict SNI matching on ClientHello")
+
 	flag.Parse()
-	stopCPUProfile, err := startCPUProfile(*cpuProfile)
-	if err != nil {
-		log.Fatalf("start CPU profile: %v", err)
-	}
-	defer stopCPUProfile()
-	if *quicInitialPacketSize < quicconfig.MinInitialPacketSize || *quicInitialPacketSize > quicconfig.MaxInitialPacketSize {
-		log.Fatal("quic-initial-packet-size must be between 1200 and 1452")
-	}
-	if *udpTargetBuffer < 64<<10 || *udpTargetBuffer > 16<<20 {
-		log.Fatal("udp-target-buffer must be between 65536 and 16777216")
+
+	cfg := &server.Config{
+		CertFile:              *certFile,
+		KeyFile:               *keyFile,
+		PSKFile:               *pskFile,
+		PrivatePath:           *privatePath,
+		PathFile:              *pathFile,
+		FallbackURL:           *fallbackURL,
+		FallbackServerName:    *fallbackServerName,
+		ReplayFile:            *replayFile,
+		TicketKeyFile:         *ticketKeyFile,
+		UDPTargetBuffer:       *udpTargetBuffer,
+		QuicInitialPacketSize: uint16(*quicInitialPacketSize),
+		StrictSNI:             *strictSNI,
 	}
 
-	path, err := loadPath(*privatePath, *pathFile)
-	if err != nil || *certFile == "" || *keyFile == "" || *pskFile == "" {
-		log.Fatal("cert, key, psk-file and a valid private path are required")
+	log.Printf("Starting myxray-server componentized version...")
+	if err := server.Run(cfg, *listen, *adminListen, *quicListen); err != nil {
+		log.Fatalf("Server exited with error: %v", err)
 	}
-	psk, err := auth.LoadPSK(*pskFile)
-	if err != nil {
-		log.Fatalf("load PSK: %v", err)
-	}
-	fallback, err := newFallback(*fallbackURL, *fallbackServerName)
-	if err != nil {
-		log.Fatalf("configure fallback: %v", err)
-	}
-	replays, err := auth.OpenReplayCache(*replayFile, time.Now())
-	if err != nil {
-		log.Fatalf("open replay cache: %v", err)
-	}
-	defer replays.Close()
-
-	app := &server{path: path, psk: psk, replays: replays, fallback: fallback, udpTargetBuffer: *udpTargetBuffer}
-	public := &http.Server{
-		Addr:              *listen,
-		Handler:           app,
-		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       3 * time.Minute,
-		TLSConfig:         newTLSConfig(),
-	}
-	if err := http2.ConfigureServer(public, &http2.Server{
-		MaxUploadBufferPerConnection: h2ConnectionReceiveWindow,
-		MaxUploadBufferPerStream:     h2StreamReceiveWindow,
-		MaxReadFrameSize:             1 << 20,
-		IdleTimeout:                  3 * time.Minute,
-	}); err != nil {
-		log.Fatalf("configure HTTP/2 server: %v", err)
-	}
-	admin := &http.Server{Addr: *adminListen, Handler: healthHandler(), ReadHeaderTimeout: 2 * time.Second}
-	var h3Server *http3.Server
-	if *quicListen != "" {
-		if *ticketKeyFile == "" {
-			log.Fatal("ticket-key-file is required when quic-listen is enabled")
-		}
-		h3Server, err = newHTTP3Server(*quicListen, app, *ticketKeyFile, *certFile, *keyFile, uint16(*quicInitialPacketSize))
-		if err != nil {
-			log.Fatalf("configure HTTP/3 server: %v", err)
-		}
-	}
-
-	go func() {
-		if err := admin.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("admin server: %v", err)
-		}
-	}()
-	if h3Server != nil {
-		go func() {
-			log.Printf("public HTTP/3 listener started on %s", *quicListen)
-			udpAddr, err := net.ResolveUDPAddr("udp", *quicListen)
-			if err != nil {
-				log.Fatalf("resolve HTTP/3 addr: %v", err)
-			}
-			udpConn, err := net.ListenUDP("udp", udpAddr)
-			if err != nil {
-				log.Fatalf("listen HTTP/3: %v", err)
-			}
-			_ = udpConn.SetReadBuffer(8 << 20)
-			_ = udpConn.SetWriteBuffer(8 << 20)
-			if err := h3Server.Serve(udpConn); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				log.Fatalf("HTTP/3 server: %v", err)
-			}
-		}()
-	}
-	go func() {
-		log.Printf("public TLS listener started on %s", *listen)
-		if err := public.ListenAndServeTLS(*certFile, *keyFile); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("public server: %v", err)
-		}
-	}()
-
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
-	<-stop
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	_ = public.Shutdown(ctx)
-	_ = admin.Shutdown(ctx)
-	if h3Server != nil {
-		_ = h3Server.Shutdown(ctx)
-	}
-}
-
-func startCPUProfile(path string) (func(), error) {
-	if path == "" {
-		return func() {}, nil
-	}
-	profile, err := os.Create(path)
-	if err != nil {
-		return nil, err
-	}
-	if err := pprof.StartCPUProfile(profile); err != nil {
-		_ = profile.Close()
-		return nil, err
-	}
-	return func() {
-		pprof.StopCPUProfile()
-		_ = profile.Close()
-	}, nil
-}
-
-func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.ProtoMajor == 3 {
-		s.serveHTTP3(w, r)
-		return
-	}
-	if r.URL.Path != s.path || r.Method != http.MethodPost || r.ProtoMajor != 2 {
-		s.serveFallback(w, r)
-		return
-	}
-	targetAddress := r.Header.Get(headerTarget)
-	timestamp := r.Header.Get(headerTimestamp)
-	nonce := r.Header.Get(headerNonce)
-	signature := r.Header.Get(headerSignature)
-	if !s.authorize(r, targetAddress, timestamp, nonce, signature) {
-		s.serveFallback(w, r)
-		return
-	}
-
-	upstream, err := target.DialContext(r.Context(), targetAddress)
-	if err != nil {
-		log.Printf("authenticated upstream dial failed")
-		http.Error(w, "upstream unavailable", http.StatusBadGateway)
-		return
-	}
-	defer upstream.Close()
-
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set(headerSessionOK, "1")
-	w.WriteHeader(http.StatusOK)
-	if flusher, ok := w.(http.Flusher); ok {
-		flusher.Flush()
-	}
-
-	uploadDone := make(chan error, 1)
-	go func() {
-		buf := make([]byte, 1<<20)
-		_, uploadErr := io.CopyBuffer(upstream, r.Body, buf)
-		if uploadErr == nil {
-			if tcp, ok := upstream.(*net.TCPConn); ok {
-				uploadErr = tcp.CloseWrite()
-			}
-		} else {
-			_ = upstream.Close()
-		}
-		uploadDone <- uploadErr
-	}()
-	var downloadErr error
-	buf := make([]byte, 1<<20)
-	_, downloadErr = io.CopyBuffer(flushWriter{w: w}, upstream, buf)
-	if downloadErr != nil {
-		_ = upstream.Close()
-		return
-	}
-	if tcp, ok := upstream.(*net.TCPConn); ok {
-		_ = tcp.CloseRead()
-	}
-	select {
-	case <-uploadDone:
-	case <-r.Context().Done():
-	}
-}
-
-func (s *server) authorize(r *http.Request, targetAddress, timestamp, nonce, signature string) bool {
-	now := time.Now()
-	if !auth.Verify(s.psk, r.Method, r.URL.Path, targetAddress, timestamp, nonce, signature, now) {
-		return false
-	}
-	accepted, err := s.replays.Accept(nonce, now)
-	if err != nil {
-		log.Printf("replay cache unavailable")
-	}
-	return accepted && err == nil
-}
-
-func (s *server) serveFallback(w http.ResponseWriter, r *http.Request) {
-	privateAttempt := false
-	for _, name := range []string{headerTarget, headerTimestamp, headerNonce, headerSignature, headerMode} {
-		if _, present := r.Header[http.CanonicalHeaderKey(name)]; present {
-			privateAttempt = true
-		}
-		r.Header.Del(name)
-	}
-	if privateAttempt {
-		// Closing a server request body can synchronously drain a slow HTTP/1
-		// upload. Suppress it before proxying and close the HTTP/1 connection
-		// after the fallback response so net/http won't drain it for reuse.
-		if r.ProtoMajor == 1 {
-			w.Header().Set("Connection", "close")
-			defer func() {
-				// net/http retains the original request body separately from
-				// r.Body and may drain it after the handler returns. Expire
-				// reads so an incomplete chunked upload can't pin the server.
-				_ = http.NewResponseController(w).SetReadDeadline(time.Unix(1, 0))
-			}()
-		}
-		r.Body = http.NoBody
-		r.GetBody = nil
-		r.ContentLength = 0
-		r.TransferEncoding = nil
-		r.Trailer = nil
-		r.Header.Del("Content-Length")
-		r.Header.Del("Transfer-Encoding")
-		r.Header.Del("Expect")
-	}
-	s.fallback.ServeHTTP(w, r)
-}
-
-type flushWriter struct {
-	w http.ResponseWriter
-}
-
-func (w flushWriter) Write(p []byte) (int, error) {
-	n, err := w.w.Write(p)
-	if flusher, ok := w.w.(http.Flusher); ok {
-		flusher.Flush()
-	}
-	return n, err
-}
-
-func newFallback(rawURL, serverName string) (http.Handler, error) {
-	targetURL, err := url.Parse(rawURL)
-	if err != nil {
-		return nil, err
-	}
-	proxy := httputil.NewSingleHostReverseProxy(targetURL)
-	proxy.Transport = &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, ServerName: serverName}}
-	proxy.ModifyResponse = func(response *http.Response) error {
-		response.Header.Del(headerSessionOK)
-		response.Header.Del(headerFraming)
-		response.Header.Del("X-Session-Early")
-		return nil
-	}
-	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, _ error) {
-		http.NotFound(w, nil)
-	}
-	return proxy, nil
-}
-
-func newTLSConfig() *tls.Config {
-	return &tls.Config{
-		MinVersion: tls.VersionTLS12,
-		NextProtos: []string{"h2", "http/1.1"},
-	}
-}
-
-func healthHandler() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNoContent)
-	})
-	return mux
-}
-
-func validPath(path string) bool {
-	return strings.HasPrefix(path, "/") && len(path) >= 16 && !strings.ContainsAny(path, "?#")
-}
-
-func loadPath(value, pathFile string) (string, error) {
-	if value == "" && pathFile != "" {
-		raw, err := os.ReadFile(pathFile)
-		if err != nil {
-			return "", err
-		}
-		value = strings.TrimSpace(string(raw))
-	}
-	if !validPath(value) {
-		return "", fmt.Errorf("invalid private path")
-	}
-	return value, nil
 }
 
 func init() {
 	log.SetFlags(log.Ldate | log.Ltime | log.LUTC | log.Lmsgprefix)
 	log.SetPrefix("myxray-server: ")
 }
-
-

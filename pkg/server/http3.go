@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"context"
@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -23,14 +24,13 @@ import (
 )
 
 const (
-	headerMode         = "X-Session-Mode"
 	modeTCPv2          = "tcp-v2"
 	modeUDPv2          = "udp-v2"
 	udpAuthName        = "udp-association"
 	privateOpenTimeout = 15 * time.Second
 )
 
-func newHTTP3Server(address string, handler http.Handler, ticketKeyFile, certFile, keyFile string, initialPacketSize uint16) (*http3.Server, error) {
+func newHTTP3Server(address string, handler http.Handler, ticketKeyFile, certFile, keyFile string, initialPacketSize uint16, strictSNI string) (*http3.Server, error) {
 	ticketKey, err := auth.LoadPSK(ticketKeyFile)
 	if err != nil {
 		return nil, err
@@ -41,7 +41,24 @@ func newHTTP3Server(address string, handler http.Handler, ticketKeyFile, certFil
 	}
 	var key [32]byte
 	copy(key[:], ticketKey[:32])
-	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{certificate}}
+	tlsConfig := &tls.Config{
+		MinVersion:   tls.VersionTLS13,
+		Certificates: []tls.Certificate{certificate},
+		GetConfigForClient: func(chi *tls.ClientHelloInfo) (*tls.Config, error) {
+			if strictSNI != "" {
+				if !strings.EqualFold(chi.ServerName, strictSNI) {
+					log.Printf("HTTP/3 blocked connection from %v due to strict SNI mismatch: got %q, want %q", chi.Conn.RemoteAddr(), chi.ServerName, strictSNI)
+					return nil, errors.New("strict SNI mismatch")
+				}
+			} else {
+				if chi.ServerName == "" {
+					log.Printf("HTTP/3 blocked connection from %v due to missing SNI", chi.Conn.RemoteAddr())
+					return nil, errors.New("missing SNI")
+				}
+			}
+			return nil, nil
+		},
+	}
 	tlsConfig.SetSessionTicketKeys([][32]byte{key})
 	return &http3.Server{
 		Addr:            address,
@@ -54,7 +71,7 @@ func newHTTP3Server(address string, handler http.Handler, ticketKeyFile, certFil
 	}, nil
 }
 
-func (s *server) serveHTTP3(w http.ResponseWriter, r *http.Request) {
+func (s *Server) serveHTTP3(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != s.path {
 		s.serveFallback(w, r)
 		return
@@ -81,7 +98,7 @@ func (s *server) serveHTTP3(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *server) serveHTTP3TCP(w http.ResponseWriter, r *http.Request, targetAddress string) {
+func (s *Server) serveHTTP3TCP(w http.ResponseWriter, r *http.Request, targetAddress string) {
 	streamer, ok := w.(http3.HTTPStreamer)
 	if !ok {
 		http.Error(w, "HTTP/3 stream unavailable", http.StatusInternalServerError)
@@ -171,7 +188,7 @@ func copyDataFramesToTCP(stream io.Reader, upstream net.Conn) error {
 	}
 }
 
-func (s *server) serveHTTP3UDP(w http.ResponseWriter, r *http.Request) {
+func (s *Server) serveHTTP3UDP(w http.ResponseWriter, r *http.Request) {
 	settings, ok := w.(http3.Settingser)
 	if !ok {
 		http.Error(w, "HTTP datagrams unavailable", http.StatusBadRequest)
