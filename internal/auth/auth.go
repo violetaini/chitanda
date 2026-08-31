@@ -144,10 +144,12 @@ func (c *ReplayCache) Accept(nonce string, now time.Time) (bool, error) {
 		if _, err := io.WriteString(c.file, record); err != nil {
 			return false, c.markPersistenceFailure(err)
 		}
-		if err := c.file.Sync(); err != nil {
-			return false, c.markPersistenceFailure(err)
-		}
 		c.writesSince++
+		if c.writesSince%64 == 0 {
+			if err := c.file.Sync(); err != nil {
+				return false, c.markPersistenceFailure(err)
+			}
+		}
 	}
 	expiry := now.Add(2 * MaxClockSkew)
 	c.expires[nonce] = expiry
@@ -226,6 +228,7 @@ func (c *ReplayCache) Close() error {
 	if c.file == nil {
 		return nil
 	}
+	_ = c.file.Sync()
 	err := c.file.Close()
 	c.file = nil
 	return err

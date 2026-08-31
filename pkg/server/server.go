@@ -6,17 +6,25 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"myxray/internal/auth"
 	"myxray/internal/target"
 )
 
+var copyBufferPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 256<<10)
+		return &b
+	},
+}
+
 const (
 	headerTarget    = "X-Session-Target"
-	headerTimestamp = "X-Session-Timestamp"
+	headerTimestamp = "X-Session-Time"
 	headerNonce     = "X-Session-Nonce"
-	headerSignature = "X-Session-Signature"
+	headerSignature = "X-Session-Auth"
 	headerMode      = "X-Session-Mode"
 	headerSessionOK = "X-Session-OK"
 	headerFraming   = "X-Session-Framing"
@@ -26,7 +34,7 @@ const (
 type Server struct {
 	path            string
 	psk             []byte
-	replays *auth.ReplayCache
+	replays         *auth.ReplayCache
 	fallback        http.Handler
 	udpTargetBuffer int
 }
@@ -85,8 +93,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	uploadDone := make(chan error, 1)
 	go func() {
-		buf := make([]byte, 1<<20)
-		_, uploadErr := io.CopyBuffer(upstream, r.Body, buf)
+		bufPtr := copyBufferPool.Get().(*[]byte)
+		defer copyBufferPool.Put(bufPtr)
+		_, uploadErr := io.CopyBuffer(upstream, r.Body, *bufPtr)
 		if uploadErr == nil {
 			if tcp, ok := upstream.(*net.TCPConn); ok {
 				uploadErr = tcp.CloseWrite()
@@ -97,8 +106,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		uploadDone <- uploadErr
 	}()
 	var downloadErr error
-	buf := make([]byte, 1<<20)
-	_, downloadErr = io.CopyBuffer(flushWriter{w: w}, upstream, buf)
+	bufPtr := copyBufferPool.Get().(*[]byte)
+	_, downloadErr = io.CopyBuffer(flushWriter{w: w}, upstream, *bufPtr)
+	copyBufferPool.Put(bufPtr)
 	if downloadErr != nil {
 		_ = upstream.Close()
 		return

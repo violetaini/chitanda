@@ -116,16 +116,8 @@ func (s *Server) serveHTTP3TCP(w http.ResponseWriter, r *http.Request, targetAdd
 		http.Error(w, "HTTP/3 stream unavailable", http.StatusInternalServerError)
 		return
 	}
-	controller := http.NewResponseController(w)
-	if err := controller.SetReadDeadline(time.Now().Add(privateOpenTimeout)); err != nil {
-		return
-	}
-	if err := controller.SetReadDeadline(time.Time{}); err != nil {
-		return
-	}
 
-	// An authenticated header is not enough to authorize an upstream side
-	// effect. Validate the private OPEN frame first, including for 0-RTT.
+	// Auth already validated by caller. Dial upstream.
 	upstream, err := target.DialContext(r.Context(), targetAddress)
 	if err != nil {
 		log.Printf("authenticated HTTP/3 upstream dial failed")
@@ -151,15 +143,18 @@ func (s *Server) serveHTTP3TCP(w http.ResponseWriter, r *http.Request, targetAdd
 	}()
 	uploadDone := make(chan error, 1)
 	go func() {
-		buf := make([]byte, 1<<20)
-		_, uploadErr := io.CopyBuffer(upstream, stream, buf)
+		bufPtr := copyBufferPool.Get().(*[]byte)
+		defer copyBufferPool.Put(bufPtr)
+		_, uploadErr := io.CopyBuffer(upstream, stream, *bufPtr)
 		if uploadErr != nil {
 			_ = upstream.Close()
 		}
 		uploadDone <- uploadErr
 	}()
-	buf := make([]byte, 1<<20)
-	if _, err := io.CopyBuffer(stream, upstream, buf); err != nil {
+	bufPtr := copyBufferPool.Get().(*[]byte)
+	_, err = io.CopyBuffer(stream, upstream, *bufPtr)
+	copyBufferPool.Put(bufPtr)
+	if err != nil {
 		stream.CancelWrite(0)
 		return
 	}
@@ -201,21 +196,6 @@ func copyDataFramesToTCP(stream io.Reader, upstream net.Conn) error {
 }
 
 func (s *Server) serveHTTP3UDP(w http.ResponseWriter, r *http.Request) {
-	settings, ok := w.(http3.Settingser)
-	if !ok {
-		http.Error(w, "HTTP datagrams unavailable", http.StatusBadRequest)
-		return
-	}
-	select {
-	case <-settings.ReceivedSettings():
-	case <-r.Context().Done():
-		return
-	}
-	peerSettings := settings.Settings()
-	if !peerSettings.EnableDatagrams {
-		http.Error(w, "HTTP datagrams unavailable", http.StatusBadRequest)
-		return
-	}
 	w.Header().Set("Capsule-Protocol", "?1")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set(headerSessionOK, "1")

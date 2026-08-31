@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -147,12 +148,17 @@ func (c *h2TransportClient) close() {
 
 // rawH2Conn wraps HTTP/2 full duplex stream directly into net.Conn without custom framing.
 type rawH2Conn struct {
-	target     string
-	body       io.ReadCloser
-	pipeWriter *io.PipeWriter
-	cancel     context.CancelFunc
-	h2Client   *h2TransportClient
-	closed     atomic.Bool
+	target        string
+	body          io.ReadCloser
+	pipeWriter    *io.PipeWriter
+	cancel        context.CancelFunc
+	h2Client      *h2TransportClient
+	closed        atomic.Bool
+	mu            sync.Mutex
+	readDeadline  time.Time
+	writeDeadline time.Time
+	readTimer     *time.Timer
+	writeTimer    *time.Timer
 }
 
 func newRawH2Conn(target string, body io.ReadCloser, pipeWriter *io.PipeWriter, cancel context.CancelFunc, h2Client *h2TransportClient) *rawH2Conn {
@@ -169,6 +175,12 @@ func (c *rawH2Conn) Read(b []byte) (int, error) {
 	if c.closed.Load() {
 		return 0, io.EOF
 	}
+	c.mu.Lock()
+	if !c.readDeadline.IsZero() && time.Now().After(c.readDeadline) {
+		c.mu.Unlock()
+		return 0, context.DeadlineExceeded
+	}
+	c.mu.Unlock()
 	return c.body.Read(b)
 }
 
@@ -179,6 +191,12 @@ func (c *rawH2Conn) Write(b []byte) (int, error) {
 	if c.closed.Load() {
 		return 0, errors.New("use of closed connection")
 	}
+	c.mu.Lock()
+	if !c.writeDeadline.IsZero() && time.Now().After(c.writeDeadline) {
+		c.mu.Unlock()
+		return 0, context.DeadlineExceeded
+	}
+	c.mu.Unlock()
 	return c.pipeWriter.Write(b)
 }
 
@@ -190,6 +208,15 @@ func (c *rawH2Conn) Close() error {
 	if c.closed.Swap(true) {
 		return nil
 	}
+	c.mu.Lock()
+	if c.readTimer != nil {
+		c.readTimer.Stop()
+	}
+	if c.writeTimer != nil {
+		c.writeTimer.Stop()
+	}
+	c.mu.Unlock()
+
 	if c.h2Client != nil {
 		c.h2Client.activeStreams.Add(-1)
 	}
@@ -214,6 +241,49 @@ func (c *rawH2Conn) RemoteAddr() net.Addr {
 	return &net.TCPAddr{IP: net.IPv4(0, 0, 0, 0), Port: 0}
 }
 
-func (c *rawH2Conn) SetDeadline(t time.Time) error      { return nil }
-func (c *rawH2Conn) SetReadDeadline(t time.Time) error  { return nil }
-func (c *rawH2Conn) SetWriteDeadline(t time.Time) error { return nil }
+func (c *rawH2Conn) SetDeadline(t time.Time) error {
+	_ = c.SetReadDeadline(t)
+	return c.SetWriteDeadline(t)
+}
+
+func (c *rawH2Conn) SetReadDeadline(t time.Time) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.readDeadline = t
+	if c.readTimer != nil {
+		c.readTimer.Stop()
+		c.readTimer = nil
+	}
+	if !t.IsZero() {
+		dur := time.Until(t)
+		if dur <= 0 {
+			_ = c.body.Close()
+			return nil
+		}
+		c.readTimer = time.AfterFunc(dur, func() {
+			_ = c.body.Close()
+		})
+	}
+	return nil
+}
+
+func (c *rawH2Conn) SetWriteDeadline(t time.Time) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.writeDeadline = t
+	if c.writeTimer != nil {
+		c.writeTimer.Stop()
+		c.writeTimer = nil
+	}
+	if !t.IsZero() {
+		dur := time.Until(t)
+		if dur <= 0 {
+			_ = c.pipeWriter.CloseWithError(context.DeadlineExceeded)
+			return nil
+		}
+		c.writeTimer = time.AfterFunc(dur, func() {
+			_ = c.pipeWriter.CloseWithError(context.DeadlineExceeded)
+		})
+	}
+	return nil
+}

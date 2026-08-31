@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"log"
+	"net"
 	"strings"
 )
 
@@ -17,7 +18,10 @@ func newTLSConfig(strictSNI string) *tls.Config {
 			if strictSNI != "" {
 				if !strings.EqualFold(chi.ServerName, strictSNI) {
 					log.Printf("blocked connection from %v due to strict SNI mismatch: got %q, want %q", chi.Conn.RemoteAddr(), chi.ServerName, strictSNI)
-					// Abruptly terminate the TCP connection to simulate a dead port
+					// Force TCP RST (not FIN) to prevent any TLS Alert from leaking
+					if tc, ok := chi.Conn.(*net.TCPConn); ok {
+						tc.SetLinger(0)
+					}
 					chi.Conn.Close()
 					return nil, errors.New("strict SNI mismatch")
 				}
@@ -25,6 +29,9 @@ func newTLSConfig(strictSNI string) *tls.Config {
 				// If strictSNI is not configured, we should still drop empty SNIs
 				if chi.ServerName == "" {
 					log.Printf("blocked connection from %v due to missing SNI", chi.Conn.RemoteAddr())
+					if tc, ok := chi.Conn.(*net.TCPConn); ok {
+						tc.SetLinger(0)
+					}
 					chi.Conn.Close()
 					return nil, errors.New("missing SNI")
 				}

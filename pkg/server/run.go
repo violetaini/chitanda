@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"log"
 	"net"
 	"net/http"
@@ -59,7 +60,7 @@ func Run(config *Config, listenAddr, adminListenAddr, quicListenAddr string) err
 	var h3Server *http3ServerWrapper
 	if quicListenAddr != "" {
 		if config.TicketKeyFile == "" {
-			return err
+			return errors.New("ticket-key-file is required when quic-listen is enabled")
 		}
 		hs, err := newHTTP3Server(quicListenAddr, app, config.TicketKeyFile, config.CertFile, config.KeyFile, config.QuicInitialPacketSize, config.StrictSNI)
 		if err != nil {

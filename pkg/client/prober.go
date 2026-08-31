@@ -64,7 +64,7 @@ func (p *h2Prober) pingH2() (time.Duration, error) {
 	if h2Cli == nil {
 		return 0, io.EOF
 	}
-	req, err := http.NewRequestWithContext(p.ctx, http.MethodGet, p.client.rootURL, nil)
+	req, err := http.NewRequestWithContext(p.ctx, http.MethodHead, p.client.rootURL, nil)
 	if err != nil {
 		return 0, err
 	}
@@ -74,7 +74,6 @@ func (p *h2Prober) pingH2() (time.Duration, error) {
 		return 0, err
 	}
 	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, resp.Body)
 	return time.Since(start), nil
 }
 

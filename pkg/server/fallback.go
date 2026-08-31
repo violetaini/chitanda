@@ -15,7 +15,13 @@ func NewFallback(rawURL, serverName string) (http.Handler, error) {
 		return nil, err
 	}
 	proxy := httputil.NewSingleHostReverseProxy(targetURL)
-	proxy.Transport = &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, ServerName: serverName}}
+	proxy.Transport = &http.Transport{
+		TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12, ServerName: serverName},
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   20,
+		IdleConnTimeout:       90 * time.Second,
+		ResponseHeaderTimeout: 10 * time.Second,
+	}
 	proxy.ModifyResponse = func(response *http.Response) error {
 		response.Header.Del(headerSessionOK)
 		response.Header.Del(headerFraming)

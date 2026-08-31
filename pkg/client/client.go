@@ -234,10 +234,16 @@ func (c *Client) ListenPacket(ctx context.Context) (net.PacketConn, error) {
 	}
 	c.mu.Unlock()
 
-	if len(c.h3Managers) == 0 {
+	h3Mgr := c.reserveH3Manager()
+	if h3Mgr == nil {
 		return nil, errors.New("no H3 transport available")
 	}
-	return c.h3Managers[0].createPacketConn(ctx)
+	pconn, err := h3Mgr.createPacketConn(ctx)
+	if err != nil {
+		h3Mgr.activeStreams.Add(-1)
+		return nil, err
+	}
+	return pconn, nil
 }
 
 // Prewarm optionally warms the H2 TLS connections in the pool concurrently.

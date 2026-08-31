@@ -137,7 +137,13 @@ func (m *h3TransportManager) dialH3TCP(ctx context.Context, target string) (net.
 			_ = m.sessionCache.Clear()
 		}
 		if attempt == 0 {
-			time.Sleep(100 * time.Millisecond)
+			timer := time.NewTimer(100 * time.Millisecond)
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				timer.Stop()
+				return nil, ctx.Err()
+			}
 		}
 	}
 	return nil, fmt.Errorf("H3 TCP dial failed: %w", lastErr)
@@ -199,7 +205,13 @@ func (m *h3TransportManager) createPacketConn(ctx context.Context) (net.PacketCo
 			_ = m.sessionCache.Clear()
 		}
 		if attempt == 0 {
-			time.Sleep(100 * time.Millisecond)
+			timer := time.NewTimer(100 * time.Millisecond)
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				timer.Stop()
+				return nil, ctx.Err()
+			}
 		}
 	}
 	return nil, errors.New("establish H3 UDP packet connection failed")
@@ -304,8 +316,9 @@ func (c *rawH3Conn) Write(b []byte) (int, error) {
 }
 
 func (c *rawH3Conn) CloseWrite() error {
-	c.stream.CancelWrite(0)
-	return nil
+	// Close() sends QUIC FIN (graceful half-close).
+	// CancelWrite() would send RESET_STREAM causing peer data loss.
+	return c.stream.Close()
 }
 
 func (c *rawH3Conn) Close() error {
@@ -338,20 +351,30 @@ func (c *rawH3Conn) RemoteAddr() net.Addr {
 	return &net.TCPAddr{IP: net.IPv4(0, 0, 0, 0), Port: 0}
 }
 
-func (c *rawH3Conn) SetDeadline(t time.Time) error      { return nil }
-func (c *rawH3Conn) SetReadDeadline(t time.Time) error  { return nil }
-func (c *rawH3Conn) SetWriteDeadline(t time.Time) error { return nil }
+func (c *rawH3Conn) SetDeadline(t time.Time) error {
+	return c.stream.SetDeadline(t)
+}
+
+func (c *rawH3Conn) SetReadDeadline(t time.Time) error {
+	return c.stream.SetReadDeadline(t)
+}
+
+func (c *rawH3Conn) SetWriteDeadline(t time.Time) error {
+	return c.stream.SetWriteDeadline(t)
+}
 
 // quicPacketConn wraps HTTP/3 extended CONNECT-UDP + Datagrams into standard net.PacketConn.
 type quicPacketConn struct {
-	stream   *http3.RequestStream
-	ctx      context.Context
-	cancel   context.CancelFunc
-	sequence atomic.Uint64
-	replay   frame.ReplayWindow
-	decoder  frame.DatagramCache
-	mu       sync.Mutex
-	closed   bool
+	stream        *http3.RequestStream
+	ctx           context.Context
+	cancel        context.CancelFunc
+	sequence      atomic.Uint64
+	replay        frame.ReplayWindow
+	decoder       frame.DatagramCache
+	mu            sync.Mutex
+	closed        bool
+	readDeadline  time.Time
+	writeDeadline time.Time
 }
 
 func (c *quicPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
@@ -359,7 +382,23 @@ func (c *quicPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 		if c.ctx.Err() != nil {
 			return 0, nil, c.ctx.Err()
 		}
-		rawPacket, err := c.stream.ReceiveDatagram(c.ctx)
+		c.mu.Lock()
+		readDl := c.readDeadline
+		c.mu.Unlock()
+
+		recvCtx := c.ctx
+		var cancel context.CancelFunc
+		if !readDl.IsZero() {
+			if time.Now().After(readDl) {
+				return 0, nil, context.DeadlineExceeded
+			}
+			recvCtx, cancel = context.WithDeadline(c.ctx, readDl)
+		}
+
+		rawPacket, err := c.stream.ReceiveDatagram(recvCtx)
+		if cancel != nil {
+			cancel()
+		}
 		if err != nil {
 			return 0, nil, err
 		}
@@ -381,6 +420,10 @@ func (c *quicPacketConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 	if c.closed {
 		c.mu.Unlock()
 		return 0, errors.New("use of closed network connection")
+	}
+	if !c.writeDeadline.IsZero() && time.Now().After(c.writeDeadline) {
+		c.mu.Unlock()
+		return 0, context.DeadlineExceeded
 	}
 	c.mu.Unlock()
 
@@ -412,6 +455,24 @@ func (c *quicPacketConn) LocalAddr() net.Addr {
 	return &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0}
 }
 
-func (c *quicPacketConn) SetDeadline(t time.Time) error      { return nil }
-func (c *quicPacketConn) SetReadDeadline(t time.Time) error  { return nil }
-func (c *quicPacketConn) SetWriteDeadline(t time.Time) error { return nil }
+func (c *quicPacketConn) SetDeadline(t time.Time) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.readDeadline = t
+	c.writeDeadline = t
+	return nil
+}
+
+func (c *quicPacketConn) SetReadDeadline(t time.Time) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.readDeadline = t
+	return nil
+}
+
+func (c *quicPacketConn) SetWriteDeadline(t time.Time) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.writeDeadline = t
+	return nil
+}
