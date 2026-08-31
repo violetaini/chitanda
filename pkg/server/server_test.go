@@ -110,3 +110,41 @@ func TestCarrierProbe(t *testing.T) {
 		t.Fatalf("expected X-Session-OK header on probe response")
 	}
 }
+
+func TestNewFallback(t *testing.T) {
+	// 1. Built-in ERP HTML response
+	fb, err := NewFallback("", "erp.internal.corp")
+	if err != nil {
+		t.Fatalf("NewFallback empty: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	w := httptest.NewRecorder()
+	fb.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for ERP fallback, got %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "Enterprise Business Gateway") {
+		t.Fatalf("expected ERP title in response body")
+	}
+
+	// 2. Built-in ERP JSON response
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/health", nil)
+	req.Header.Set("Accept", "application/json")
+	w = httptest.NewRecorder()
+	fb.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for ERP API JSON, got %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "Enterprise Resource Planning") {
+		t.Fatalf("expected JSON body to contain ERP service name")
+	}
+
+	// 3. UDS target parsing
+	udsFb, err := NewFallback("unix:/tmp/fake-nginx.sock", "site.corp")
+	if err != nil {
+		t.Fatalf("NewFallback unix socket: %v", err)
+	}
+	if udsFb == nil {
+		t.Fatalf("expected non-nil UDS fallback handler")
+	}
+}
