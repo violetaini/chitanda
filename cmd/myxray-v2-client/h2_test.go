@@ -53,7 +53,7 @@ func TestH2OpenTCPRequiresAuthenticatedSuccessMarker(t *testing.T) {
 		requestURL: "https://example.test/private-test-path",
 	}
 	client.client = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
-		if !auth.Verify(psk, request.Method, request.URL.Path, request.Header.Get(headerTarget), request.Header.Get(headerTimestamp), request.Header.Get(headerNonce), request.Header.Get(headerSignature), time.Now()) {
+		if !auth.Verify(psk, request.Header.Get(headerMode), request.Method, request.URL.Path, request.Header.Get(headerTarget), request.Header.Get(headerTimestamp), request.Header.Get(headerNonce), request.Header.Get(headerSignature), time.Now()) {
 			t.Fatal("request signature did not verify")
 		}
 		headers := make(http.Header)

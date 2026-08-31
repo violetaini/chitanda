@@ -119,7 +119,7 @@ func (c *h2Client) openTCPOnce(ctx context.Context, target string) (*http.Respon
 	request.Header.Set(headerTarget, target)
 	request.Header.Set(headerTimestamp, timestamp)
 	request.Header.Set(headerNonce, nonce)
-	request.Header.Set(headerSignature, auth.Signature(c.psk, request.Method, c.path, target, timestamp, nonce))
+	request.Header.Set(headerSignature, auth.Signature(c.psk, modeTCPH2Framed, request.Method, c.path, target, timestamp, nonce))
 
 	response, err := c.client.Do(request)
 	if err != nil {

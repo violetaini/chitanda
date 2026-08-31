@@ -207,3 +207,80 @@ func TestPlainH1EndToEnd(t *testing.T) {
 		t.Fatalf("echoed %q != sent %q", string(buf), string(msg))
 	}
 }
+
+
+func TestPlainUDP_ListenPacket(t *testing.T) {
+	psk := []byte(strings.Repeat("u", 32))
+
+	// 1. Local UDP echo server (the upstream destination)
+	echoLn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatalf("ListenUDP echo: %v", err)
+	}
+	defer echoLn.Close()
+	go func() {
+		buf := make([]byte, 1024)
+		for {
+			n, client, err := echoLn.ReadFromUDP(buf)
+			if err != nil {
+				return
+			}
+			_, _ = echoLn.WriteToUDP(buf[:n], client)
+		}
+	}()
+
+	// 2. Server UDP listener
+	srvLn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatalf("ListenUDP server: %v", err)
+	}
+	defer srvLn.Close()
+
+	srv := server.NewPlainUDPServer(srvLn, psk)
+	srv.SetResolveUDPForTest(func(ctx context.Context, address string) (*net.UDPAddr, error) {
+		return net.ResolveUDPAddr("udp", address)
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		_ = srv.Serve(ctx)
+	}()
+
+	// 3. Client initializes plain-h1 client and calls ListenPacket
+	c, err := New(Config{
+		Server:       srvLn.LocalAddr().String(),
+		Path:         "/test-udp",
+		PSK:          psk,
+		TCPTransport: TCPTransportPlainH1,
+	})
+	if err != nil {
+		t.Fatalf("New plain-h1 client: %v", err)
+	}
+	defer c.Close()
+
+	pconn, err := c.ListenPacket(ctx)
+	if err != nil {
+		t.Fatalf("ListenPacket: %v", err)
+	}
+	defer pconn.Close()
+
+	// 4. Send datagram to echoLn via PacketConn
+	msg := []byte("Hello Native Plain-UDP Datagram!")
+	if _, err := pconn.WriteTo(msg, echoLn.LocalAddr()); err != nil {
+		t.Fatalf("WriteTo: %v", err)
+	}
+
+	recvBuf := make([]byte, 2048)
+	_ = pconn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	n, rAddr, err := pconn.ReadFrom(recvBuf)
+	if err != nil {
+		t.Fatalf("ReadFrom: %v", err)
+	}
+
+	if rAddr.String() != echoLn.LocalAddr().String() {
+		t.Fatalf("rAddr = %q, want %q", rAddr.String(), echoLn.LocalAddr().String())
+	}
+	if string(recvBuf[:n]) != string(msg) {
+		t.Fatalf("received %q != expected %q", string(recvBuf[:n]), string(msg))
+	}
+}

@@ -250,7 +250,7 @@ func (c *Client) reserveH3Manager() *h3TransportManager {
 	return manager
 }
 
-// ListenPacket creates a net.PacketConn for native UDP proxying over QUIC Datagrams.
+// ListenPacket creates a net.PacketConn for native UDP proxying over QUIC Datagrams (or Plain-UDP Datagrams).
 // Returns a net.PacketConn that can be directly used by Xray or Mihomo for UDP associate / datagram dispatch.
 func (c *Client) ListenPacket(ctx context.Context) (net.PacketConn, error) {
 	c.mu.Lock()
@@ -259,6 +259,10 @@ func (c *Client) ListenPacket(ctx context.Context) (net.PacketConn, error) {
 		return nil, errors.New("client closed")
 	}
 	c.mu.Unlock()
+
+	if c.cfg.TCPTransport == TCPTransportPlainH1 || c.cfg.TCPTransport == TCPTransportH1 {
+		return newPlainUDPConn(c.cfg.Server, c.cfg.PSK)
+	}
 
 	h3Mgr := c.reserveH3Manager()
 	if h3Mgr == nil {

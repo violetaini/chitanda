@@ -2,6 +2,7 @@ package client
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -32,12 +33,33 @@ func (c *Client) dialPlainH1(ctx context.Context, target string) (net.Conn, erro
 	}
 
 	now := time.Now()
-	clientHello, clientNonce, _, err := h1session.CreateClientHello(c.cfg.PSK, now)
+	clientHello, clientNonce, ts, err := h1session.CreateClientHello(c.cfg.PSK, now)
 	if err != nil {
 		_ = rawConn.Close()
 		return nil, fmt.Errorf("create client hello: %w", err)
 	}
 
+	// Derive 0-RTT key for Flight 1 payload
+	k0RTT, err := h1session.Derive0RTTKey(c.cfg.PSK, ts, clientNonce)
+	if err != nil {
+		_ = rawConn.Close()
+		return nil, fmt.Errorf("derive 0-rtt key: %w", err)
+	}
+
+	openFrame, err := h1session.EncodeOpenFrame(target, nil)
+	if err != nil {
+		_ = rawConn.Close()
+		return nil, fmt.Errorf("encode open frame: %w", err)
+	}
+
+	encrypted0RTT, err := h1session.Encrypt0RTTChunk(k0RTT, openFrame)
+	if err != nil {
+		_ = rawConn.Close()
+		return nil, fmt.Errorf("encrypt 0-rtt chunk: %w", err)
+	}
+
+	// Assemble Flight 1 (HTTP Headers + Chunk 1 ClientHello + Chunk 2 0-RTT OPEN Frame)
+	var flight1 bytes.Buffer
 	reqHeaders := fmt.Sprintf(
 		"POST %s HTTP/1.1\r\n"+
 			"Host: %s\r\n"+
@@ -48,23 +70,22 @@ func (c *Client) dialPlainH1(ctx context.Context, target string) (net.Conn, erro
 			"\r\n",
 		c.cfg.Path, c.cfg.Server,
 	)
-	if _, err := rawConn.Write([]byte(reqHeaders)); err != nil {
-		_ = rawConn.Close()
-		return nil, fmt.Errorf("write plain-h1 request headers: %w", err)
-	}
+	flight1.WriteString(reqHeaders)
 
-	chunk1Hdr := fmt.Sprintf("%x\r\n", len(clientHello))
-	if _, err := rawConn.Write([]byte(chunk1Hdr)); err != nil {
+	// Chunk 1: ClientHello
+	flight1.WriteString(fmt.Sprintf("%x\r\n", len(clientHello)))
+	flight1.Write(clientHello)
+	flight1.WriteString("\r\n")
+
+	// Chunk 2: 0-RTT OPEN Frame
+	flight1.WriteString(fmt.Sprintf("%x\r\n", len(encrypted0RTT)))
+	flight1.Write(encrypted0RTT)
+	flight1.WriteString("\r\n")
+
+	// Single 0-RTT TCP write burst!
+	if _, err := rawConn.Write(flight1.Bytes()); err != nil {
 		_ = rawConn.Close()
-		return nil, fmt.Errorf("write client hello chunk header: %w", err)
-	}
-	if _, err := rawConn.Write(clientHello); err != nil {
-		_ = rawConn.Close()
-		return nil, fmt.Errorf("write client hello: %w", err)
-	}
-	if _, err := rawConn.Write([]byte("\r\n")); err != nil {
-		_ = rawConn.Close()
-		return nil, fmt.Errorf("write client hello chunk trailer: %w", err)
+		return nil, fmt.Errorf("write flight 1 0-rtt request: %w", err)
 	}
 
 	reader := bufio.NewReader(rawConn)
@@ -142,16 +163,6 @@ func (c *Client) dialPlainH1(ctx context.Context, target string) (net.Conn, erro
 
 	framedWriter := h1session.NewFramedWriter(cw, encStream)
 	framedReader := h1session.NewFramedReader(cr, decStream)
-
-	openFrame, err := h1session.EncodeOpenFrame(target, nil)
-	if err != nil {
-		_ = rawConn.Close()
-		return nil, fmt.Errorf("encode open frame: %w", err)
-	}
-	if _, err := framedWriter.Write(openFrame); err != nil {
-		_ = rawConn.Close()
-		return nil, fmt.Errorf("send open frame: %w", err)
-	}
 
 	conn := &plainH1Conn{
 		raw:          rawConn,

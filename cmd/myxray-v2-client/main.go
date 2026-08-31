@@ -400,7 +400,7 @@ func (m *manager) sign(request *http.Request, target, mode string) error {
 	request.Header.Set(headerTarget, target)
 	request.Header.Set(headerTimestamp, timestamp)
 	request.Header.Set(headerNonce, nonce)
-	request.Header.Set(headerSignature, auth.Signature(m.psk, request.Method, m.path, target, timestamp, nonce))
+	request.Header.Set(headerSignature, auth.Signature(m.psk, mode, request.Method, m.path, target, timestamp, nonce))
 	return nil
 }
 

@@ -61,7 +61,6 @@ func TestH1SessionHandshakeAndMutualAuth(t *testing.T) {
 		t.Fatalf("EncryptChunk: %v", err)
 	}
 
-	// First 2 bytes are wire length
 	wireLen := int(encryptedChunk[0])<<8 | int(encryptedChunk[1])
 	if wireLen != len(encryptedChunk)-2 {
 		t.Fatalf("wireLen header %d != actual %d", wireLen, len(encryptedChunk)-2)
@@ -76,6 +75,62 @@ func TestH1SessionHandshakeAndMutualAuth(t *testing.T) {
 	}
 }
 
+func Test0RTTKeyAndChunk(t *testing.T) {
+	psk := []byte(strings.Repeat("k", 32))
+	now := time.Now()
+
+	clientHello, clientNonce, ts, err := CreateClientHello(psk, now)
+	if err != nil {
+		t.Fatalf("CreateClientHello: %v", err)
+	}
+
+	// Client derives 0-RTT key
+	k0Client, err := Derive0RTTKey(psk, ts, clientNonce)
+	if err != nil {
+		t.Fatalf("Derive0RTTKey: %v", err)
+	}
+
+	openPayload, err := EncodeOpenFrame("1.1.1.1:443", []byte("early TLS hello data"))
+	if err != nil {
+		t.Fatalf("EncodeOpenFrame: %v", err)
+	}
+
+	encrypted0RTT, err := Encrypt0RTTChunk(k0Client, openPayload)
+	if err != nil {
+		t.Fatalf("Encrypt0RTTChunk: %v", err)
+	}
+
+	// Server verifies ClientHello and derives matching 0-RTT key
+	serverNonce, serverTs, err := VerifyClientHello(psk, clientHello, now)
+	if err != nil {
+		t.Fatalf("VerifyClientHello: %v", err)
+	}
+	k0Server, err := Derive0RTTKey(psk, serverTs, serverNonce)
+	if err != nil {
+		t.Fatalf("Derive0RTTKey server: %v", err)
+	}
+
+	if k0Client != k0Server {
+		t.Fatalf("0-RTT key mismatch between client and server")
+	}
+
+	decryptedOpen, err := Decrypt0RTTChunk(k0Server, encrypted0RTT[2:])
+	if err != nil {
+		t.Fatalf("Decrypt0RTTChunk: %v", err)
+	}
+
+	target, payload, err := DecodeOpenFrame(decryptedOpen)
+	if err != nil {
+		t.Fatalf("DecodeOpenFrame: %v", err)
+	}
+	if target != "1.1.1.1:443" {
+		t.Fatalf("target %q != expected", target)
+	}
+	if string(payload) != "early TLS hello data" {
+		t.Fatalf("payload %q != expected", string(payload))
+	}
+}
+
 func TestH1SessionReplayAndTamper(t *testing.T) {
 	psk := []byte(strings.Repeat("k", 32))
 	now := time.Now()
@@ -85,7 +140,6 @@ func TestH1SessionReplayAndTamper(t *testing.T) {
 		t.Fatalf("CreateClientHello: %v", err)
 	}
 
-	// Tampered ClientHello
 	tampered := make([]byte, len(clientHello))
 	copy(tampered, clientHello)
 	tampered[15] ^= 0xff
@@ -93,13 +147,11 @@ func TestH1SessionReplayAndTamper(t *testing.T) {
 		t.Fatal("expected error on tampered ClientHello")
 	}
 
-	// Expired ClientHello
 	expiredTime := now.Add(40 * time.Second)
 	if _, _, err := VerifyClientHello(psk, clientHello, expiredTime); err == nil {
 		t.Fatal("expected error on expired ClientHello")
 	}
 
-	// Tampered ServerHello
 	serverHello, _, _, _ := CreateServerHello(psk, clientNonce)
 	tamperedServerHello := make([]byte, len(serverHello))
 	copy(tamperedServerHello, serverHello)

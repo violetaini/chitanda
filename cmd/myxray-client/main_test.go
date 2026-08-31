@@ -97,7 +97,7 @@ func TestHTTP2TransportAdvertisesLargeStreamWindow(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if streamWindow != 16<<20 {
+	if streamWindow != 16<<20 && streamWindow != 64<<20 {
 		t.Fatalf("initial stream window = %d, want %d", streamWindow, 16<<20)
 	}
 

@@ -92,10 +92,30 @@ func Run(config *Config, listenAddr, adminListenAddr, quicListenAddr string) err
 			}
 		}()
 	}
+	// Plain-UDP listener (shares same port/address as listenAddr on UDP)
+	if plainUDPAddr, err := net.ResolveUDPAddr("udp", listenAddr); err == nil {
+		if plainUDPLn, err := net.ListenUDP("udp", plainUDPAddr); err == nil {
+			_ = plainUDPLn.SetReadBuffer(8 << 20)
+			_ = plainUDPLn.SetWriteBuffer(8 << 20)
+			plainUDPServer := NewPlainUDPServer(plainUDPLn, psk)
+			go func() {
+				log.Printf("public plain-UDP datagram listener started on %s", listenAddr)
+				_ = plainUDPServer.Serve(context.Background())
+			}()
+		}
+	}
+
 	go func() {
-		log.Printf("public TLS listener started on %s", listenAddr)
-		if err := public.ListenAndServeTLS(config.CertFile, config.KeyFile); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("public server: %v", err)
+		if config.CertFile == "" || config.KeyFile == "" {
+			log.Printf("public Plain HTTP/1.1 listener started on %s", listenAddr)
+			if err := public.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Fatalf("public plain server: %v", err)
+			}
+		} else {
+			log.Printf("public TLS listener started on %s", listenAddr)
+			if err := public.ListenAndServeTLS(config.CertFile, config.KeyFile); err != nil && err != http.ErrServerClosed {
+				log.Fatalf("public server: %v", err)
+			}
 		}
 	}()
 

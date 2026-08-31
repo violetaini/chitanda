@@ -1,7 +1,9 @@
 package server
 
 import (
+	"context"
 	"crypto/tls"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -10,6 +12,7 @@ import (
 	"time"
 
 	"myxray/internal/auth"
+	"myxray/internal/plainudp"
 )
 
 func TestServerAuthorizationAndReplay(t *testing.T) {
@@ -146,5 +149,82 @@ func TestNewFallback(t *testing.T) {
 	}
 	if udsFb == nil {
 		t.Fatalf("expected non-nil UDS fallback handler")
+	}
+}
+
+
+func TestPlainUDPServer(t *testing.T) {
+	psk := []byte(strings.Repeat("u", 32))
+	key := plainudp.DeriveKey(psk)
+
+	// 1. Local UDP echo server (the upstream destination)
+	echoLn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatalf("ListenUDP echo: %v", err)
+	}
+	defer echoLn.Close()
+	go func() {
+		buf := make([]byte, 1024)
+		for {
+			n, client, err := echoLn.ReadFromUDP(buf)
+			if err != nil {
+				return
+			}
+			_, _ = echoLn.WriteToUDP(buf[:n], client)
+		}
+	}()
+
+	// 2. Server UDP listener
+	srvLn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatalf("ListenUDP server: %v", err)
+	}
+	defer srvLn.Close()
+
+	srv := NewPlainUDPServer(srvLn, psk)
+	srv.SetResolveUDPForTest(func(ctx context.Context, address string) (*net.UDPAddr, error) {
+		return net.ResolveUDPAddr("udp", address)
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		_ = srv.Serve(ctx)
+	}()
+
+	// 3. Client sends encrypted plain-udp packet to server
+	clientLn, err := net.ListenUDP("udp", nil)
+	if err != nil {
+		t.Fatalf("ListenUDP client: %v", err)
+	}
+	defer clientLn.Close()
+
+	payload := []byte("UDP ping message")
+	pkt, err := plainudp.EncodePacket(key, echoLn.LocalAddr().String(), payload, time.Now())
+	if err != nil {
+		t.Fatalf("EncodePacket: %v", err)
+	}
+
+	if _, err := clientLn.WriteToUDP(pkt, srvLn.LocalAddr().(*net.UDPAddr)); err != nil {
+		t.Fatalf("WriteToUDP: %v", err)
+	}
+
+	// 4. Client receives encrypted response from server
+	recvBuf := make([]byte, 2048)
+	_ = clientLn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	n, _, err := clientLn.ReadFromUDP(recvBuf)
+	if err != nil {
+		t.Fatalf("ReadFromUDP response: %v", err)
+	}
+
+	targetAddr, decodedPayload, _, err := plainudp.DecodePacket(key, recvBuf[:n], time.Now())
+	if err != nil {
+		t.Fatalf("DecodePacket response: %v", err)
+	}
+
+	if targetAddr != echoLn.LocalAddr().String() {
+		t.Fatalf("targetAddr = %q, want %q", targetAddr, echoLn.LocalAddr().String())
+	}
+	if string(decodedPayload) != string(payload) {
+		t.Fatalf("decodedPayload = %q, want %q", string(decodedPayload), string(payload))
 	}
 }

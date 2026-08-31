@@ -26,6 +26,7 @@ const (
 
 	DomainClientHello = "MYXRAY-H1-CLIENT-V1"
 	DomainSessionInfo = "MYXRAY-H1-SESSION-V1"
+	Domain0RTT        = "MYXRAY-H1-0RTT-V1"
 
 	CmdConnectTCP byte = 0x01
 )
@@ -99,7 +100,71 @@ func VerifyClientHello(psk []byte, record []byte, now time.Time) (clientNonce [2
 	return clientNonce, timestamp, nil
 }
 
-// CreateServerHello generates a 40-byte ServerHello record and derives session keys.
+// Derive0RTTKey derives a 32-byte 0-RTT ChaCha20-Poly1305 key for Flight 1 client payload.
+func Derive0RTTKey(psk []byte, timestamp uint64, clientNonce [24]byte) ([32]byte, error) {
+	var key [32]byte
+	if len(psk) < 32 {
+		return key, errors.New("h1session: PSK must be at least 32 bytes")
+	}
+
+	// Salt = clientNonce (24B)
+	extractor := hmac.New(sha256.New, clientNonce[:])
+	extractor.Write(psk)
+	prk := extractor.Sum(nil) // 32B
+
+	var tsBuf [8]byte
+	binary.BigEndian.PutUint64(tsBuf[:], timestamp)
+
+	expander := hmac.New(sha256.New, prk)
+	expander.Write([]byte(Domain0RTT))
+	expander.Write(tsBuf[:])
+	expander.Write([]byte{0x01})
+	t1 := expander.Sum(nil)
+
+	copy(key[:], t1[0:32])
+	return key, nil
+}
+
+// Encrypt0RTTChunk encrypts plaintext with the 0-RTT key and prepends a 2-byte wire length header.
+func Encrypt0RTTChunk(key [32]byte, plaintext []byte) ([]byte, error) {
+	if len(plaintext) > MaxChunkPayloadLen {
+		return nil, ErrChunkTooLarge
+	}
+	aead, err := chacha20poly1305.New(key[:])
+	if err != nil {
+		return nil, err
+	}
+	var nonce [12]byte
+	copy(nonce[0:4], "0RTT")
+	// nonce[4:12] is 0
+
+	wireLen := len(plaintext) + aead.Overhead()
+	dst := make([]byte, 0, 2+wireLen)
+	dst = binary.BigEndian.AppendUint16(dst, uint16(wireLen))
+	dst = aead.Seal(dst, nonce[:], plaintext, nil)
+	return dst, nil
+}
+
+// Decrypt0RTTChunk decrypts a 0-RTT wire chunk (excluding the 2-byte length header).
+func Decrypt0RTTChunk(key [32]byte, ciphertextWithTag []byte) ([]byte, error) {
+	if len(ciphertextWithTag) > MaxChunkWireLen {
+		return nil, ErrChunkTooLarge
+	}
+	aead, err := chacha20poly1305.New(key[:])
+	if err != nil {
+		return nil, err
+	}
+	var nonce [12]byte
+	copy(nonce[0:4], "0RTT")
+
+	plaintext, err := aead.Open(nil, nonce[:], ciphertextWithTag, nil)
+	if err != nil {
+		return nil, ErrDecryptionFailed
+	}
+	return plaintext, nil
+}
+
+// CreateServerHello generates a 40-byte ServerHello record and derives 1-RTT session keys.
 func CreateServerHello(psk []byte, clientNonce [24]byte) (serverHello []byte, clientKey, serverKey [32]byte, err error) {
 	var serverNonce [24]byte
 	if _, err := io.ReadFull(rand.Reader, serverNonce[:]); err != nil {
@@ -118,7 +183,7 @@ func CreateServerHello(psk []byte, clientNonce [24]byte) (serverHello []byte, cl
 	return serverHello, clientKey, serverKey, nil
 }
 
-// VerifyServerHello verifies an incoming 40-byte ServerHello record and derives session keys.
+// VerifyServerHello verifies an incoming 40-byte ServerHello record and derives 1-RTT session keys.
 func VerifyServerHello(psk []byte, clientNonce [24]byte, serverHello []byte) (clientKey, serverKey [32]byte, err error) {
 	if len(serverHello) != ServerHelloSize {
 		return clientKey, serverKey, ErrInvalidRecordLen
@@ -140,32 +205,26 @@ func VerifyServerHello(psk []byte, clientNonce [24]byte, serverHello []byte) (cl
 	return clientKey, serverKey, nil
 }
 
-// deriveKeys implements standard RFC 5869 HKDF-SHA256 Extract and Expand for 80 bytes.
 func deriveKeys(psk []byte, clientNonce, serverNonce [24]byte) (clientKey, serverKey [32]byte, serverAuthTag [16]byte, err error) {
 	salt := make([]byte, 48)
 	copy(salt[0:24], clientNonce[:])
 	copy(salt[24:48], serverNonce[:])
 
-	// 1. HKDF-Extract: PRK = HMAC-Hash(Salt, IKM)
 	extractor := hmac.New(sha256.New, salt)
 	extractor.Write(psk)
 	prk := extractor.Sum(nil) // 32 bytes
 
-	// 2. HKDF-Expand: generate 80 bytes (32B clientKey + 32B serverKey + 16B serverAuthTag)
-	// T(1) = HMAC-Hash(PRK, info || 0x01)
 	expander1 := hmac.New(sha256.New, prk)
 	expander1.Write([]byte(DomainSessionInfo))
 	expander1.Write([]byte{0x01})
 	t1 := expander1.Sum(nil) // 32 bytes
 
-	// T(2) = HMAC-Hash(PRK, T(1) || info || 0x02)
 	expander2 := hmac.New(sha256.New, prk)
 	expander2.Write(t1)
 	expander2.Write([]byte(DomainSessionInfo))
 	expander2.Write([]byte{0x02})
 	t2 := expander2.Sum(nil) // 32 bytes
 
-	// T(3) = HMAC-Hash(PRK, T(2) || info || 0x03)
 	expander3 := hmac.New(sha256.New, prk)
 	expander3.Write(t2)
 	expander3.Write([]byte(DomainSessionInfo))

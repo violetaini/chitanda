@@ -179,7 +179,7 @@ func (c *client) openStreamOnce(target string) (*http.Response, *io.PipeWriter, 
 	request.Header.Set(headerTarget, target)
 	request.Header.Set(headerTimestamp, timestamp)
 	request.Header.Set(headerNonce, nonce)
-	request.Header.Set(headerSignature, auth.Signature(c.psk, request.Method, c.path, target, timestamp, nonce))
+	request.Header.Set(headerSignature, auth.Signature(c.psk, "tcp-v2", request.Method, c.path, target, timestamp, nonce))
 
 	response, err := c.httpClient.Do(request)
 	if err != nil {

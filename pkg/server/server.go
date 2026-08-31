@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"io"
@@ -172,7 +173,7 @@ func (s *Server) servePlainH1(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := time.Now()
-	clientNonce, _, err := h1session.VerifyClientHello(s.psk, clientHello[:], now)
+	clientNonce, ts, err := h1session.VerifyClientHello(s.psk, clientHello[:], now)
 	if err != nil {
 		s.serveFallback(w, r)
 		return
@@ -188,12 +189,21 @@ func (s *Server) servePlainH1(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 1. Derive 0-RTT key
+	k0RTT, err := h1session.Derive0RTTKey(s.psk, ts, clientNonce)
+	if err != nil {
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
+
+	// 2. Derive 1-RTT keys and ServerHello
 	serverHello, clientKey, serverKey, err := h1session.CreateServerHello(s.psk, clientNonce)
 	if err != nil {
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}
 
+	// 3. Send 200 OK + ServerHello
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
 	w.WriteHeader(http.StatusOK)
@@ -204,27 +214,30 @@ func (s *Server) servePlainH1(w http.ResponseWriter, r *http.Request) {
 		flusher.Flush()
 	}
 
-	decStream, err := h1session.NewAEADStream(clientKey, h1session.DirClientToServer)
-	if err != nil {
+	// 4. Read 0-RTT OPEN frame from Chunk 2
+	var wireLenBuf [2]byte
+	if _, err := io.ReadFull(r.Body, wireLenBuf[:]); err != nil {
 		return
 	}
-	encStream, err := h1session.NewAEADStream(serverKey, h1session.DirServerToClient)
-	if err != nil {
-		return
-	}
-
-	framedReader := h1session.NewFramedReader(r.Body, decStream)
-	framedWriter := h1session.NewFramedWriter(w, encStream)
-
-	// Read OPEN frame from the first AEAD chunk
-	openBuf := make([]byte, 1024)
-	n, err := framedReader.Read(openBuf)
-	if err != nil {
+	wireLen := int(binary.BigEndian.Uint16(wireLenBuf[:]))
+	if wireLen == 0 || wireLen > h1session.MaxChunkWireLen {
 		return
 	}
 
-	targetAddress, initialPayload, err := h1session.DecodeOpenFrame(openBuf[:n])
+	chunk0RTT := make([]byte, wireLen)
+	if _, err := io.ReadFull(r.Body, chunk0RTT); err != nil {
+		return
+	}
+
+	decryptedOpen, err := h1session.Decrypt0RTTChunk(k0RTT, chunk0RTT)
 	if err != nil {
+		log.Printf("plain-h1 0-rtt decryption failed: %v", err)
+		return
+	}
+
+	targetAddress, initialPayload, err := h1session.DecodeOpenFrame(decryptedOpen)
+	if err != nil {
+		log.Printf("plain-h1 0-rtt invalid open frame: %v", err)
 		return
 	}
 
@@ -240,6 +253,19 @@ func (s *Server) servePlainH1(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+
+	// 5. Upgrade to 1-RTT full-duplex stream
+	decStream, err := h1session.NewAEADStream(clientKey, h1session.DirClientToServer)
+	if err != nil {
+		return
+	}
+	encStream, err := h1session.NewAEADStream(serverKey, h1session.DirServerToClient)
+	if err != nil {
+		return
+	}
+
+	framedReader := h1session.NewFramedReader(r.Body, decStream)
+	framedWriter := h1session.NewFramedWriter(w, encStream)
 
 	uploadDone := make(chan error, 1)
 	go func() {
