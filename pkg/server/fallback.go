@@ -192,151 +192,153 @@ const erpHtmlTemplate = `<!DOCTYPE html>
     <title>Vanguard Global - Enterprise Resource & SCM Operations Gateway</title>
     <style>
         :root {
-            --primary: #1e3a8a;
-            --primary-light: #2563eb;
-            --bg: #0f172a;
-            --surface: #1e293b;
-            --border: #334155;
-            --text-main: #f8fafc;
-            --text-muted: #94a3b8;
-            --success: #10b981;
-            --success-bg: rgba(16, 185, 129, 0.12);
+            --bg-dark: #0f172a;
+            --card-dark: #1e293b;
+            --border-dark: #334155;
+            --text-light: #f8fafc;
+            --text-dim: #94a3b8;
+            --emerald-green: #10b981;
         }
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-            background-color: var(--bg);
-            color: var(--text-main);
+            background-color: var(--bg-dark);
+            color: var(--text-light);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
             min-height: 100vh;
             display: flex;
             flex-direction: column;
             justify-content: space-between;
-            padding: 36px 16px;
+            padding: 28px 16px;
         }
-        .container { max-width: 860px; margin: 0 auto; width: 100%; }
+        .container { max-width: 760px; margin: 0 auto; width: 100%; }
         .card {
-            background: var(--surface);
-            border: 1px solid var(--border);
+            background: var(--card-dark);
+            border: 1px solid var(--border-dark);
             border-radius: 12px;
-            padding: 32px;
+            padding: 24px;
             box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.4);
+            overflow: hidden;
         }
         .header {
             display: flex;
             align-items: center;
             justify-content: space-between;
-            border-bottom: 1px solid var(--border);
-            padding-bottom: 20px;
-            margin-bottom: 24px;
+            border-bottom: 1px solid var(--border-dark);
+            padding-bottom: 16px;
+            margin-bottom: 18px;
+            gap: 12px;
         }
-        .brand { display: flex; align-items: center; gap: 14px; }
+        .brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
         .logo-icon {
-            width: 42px;
-            height: 42px;
-            background: linear-gradient(135deg, var(--primary), var(--primary-light));
+            width: 38px;
+            height: 38px;
+            background: linear-gradient(135deg, #1e3a8a, #2563eb);
             border-radius: 8px;
             display: flex;
             align-items: center;
             justify-content: center;
             font-weight: 700;
             color: #fff;
-            font-size: 16px;
+            font-size: 15px;
             letter-spacing: 0.5px;
+            flex-shrink: 0;
             box-shadow: 0 4px 12px rgba(37, 99, 235, 0.3);
         }
-        .title { font-size: 19px; font-weight: 600; color: #ffffff; }
-        .subtitle { font-size: 13px; color: var(--text-muted); margin-top: 3px; }
+        .title { font-size: 16px; font-weight: 600; color: #ffffff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .subtitle { font-size: 12px; color: var(--text-dim); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .badge {
-            background: var(--success-bg);
-            color: var(--success);
-            border: 1px solid rgba(16, 185, 129, 0.2);
-            padding: 6px 12px;
+            background: rgba(16, 185, 129, 0.12);
+            color: var(--emerald-green);
+            border: 1px solid rgba(16, 185, 129, 0.25);
+            padding: 4px 10px;
             border-radius: 9999px;
-            font-size: 12px;
-            font-weight: 500;
+            font-size: 11px;
+            font-weight: 600;
             display: inline-flex;
             align-items: center;
             gap: 6px;
             white-space: nowrap;
+            flex-shrink: 0;
         }
-        .badge-dot { width: 6px; height: 6px; background: var(--success); border-radius: 50%; display: inline-block; }
+        .badge-dot { width: 6px; height: 6px; background: var(--emerald-green); border-radius: 50%; display: inline-block; flex-shrink: 0; }
         .grid {
             display: grid;
-            grid-template-columns: repeat(2, 1fr);
-            gap: 16px;
-            margin-bottom: 24px;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 12px;
+            margin-bottom: 18px;
         }
-        @media (max-width: 640px) {
+        @media (max-width: 540px) {
             .grid { grid-template-columns: 1fr; }
         }
         .stat-box {
             background: rgba(15, 23, 42, 0.6);
-            border: 1px solid var(--border);
+            border: 1px solid var(--border-dark);
             border-radius: 8px;
-            padding: 16px;
+            padding: 12px 14px;
+            min-width: 0;
         }
-        .stat-label { font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; }
-        .stat-val { font-size: 14px; font-weight: 600; color: #38bdf8; margin-top: 6px; word-break: break-all; }
-        .section-title { font-size: 13px; font-weight: 600; color: var(--text-muted); margin-bottom: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
-        .modules-list {
-            display: grid;
-            grid-template-columns: repeat(2, 1fr);
-            gap: 12px;
-            margin-bottom: 24px;
-        }
-        @media (max-width: 640px) {
-            .modules-list { grid-template-columns: 1fr; }
-        }
-        .module-item {
+        .stat-label { font-size: 10px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; }
+        .stat-val { font-size: 13px; font-weight: 600; color: #38bdf8; margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .section-title { font-size: 11px; font-weight: 600; color: var(--text-dim); margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px; }
+        .subsystems-list {
             background: rgba(15, 23, 42, 0.4);
-            border: 1px solid var(--border);
-            border-radius: 6px;
-            padding: 12px 16px;
-            font-size: 13px;
+            border: 1px solid var(--border-dark);
+            border-radius: 8px;
+            overflow: hidden;
+            margin-bottom: 16px;
+        }
+        .subsystem-row {
             display: flex;
             align-items: center;
             justify-content: space-between;
-            gap: 12px;
+            padding: 10px 14px;
+            border-bottom: 1px solid rgba(51, 65, 85, 0.6);
+            gap: 8px;
         }
-        .module-name {
+        .subsystem-row:last-child {
+            border-bottom: none;
+        }
+        .subsystem-name {
+            font-size: 12px;
             font-weight: 500;
             color: #e2e8f0;
-            white-space: nowrap;
-        }
-        .module-status {
-            font-size: 12px;
-            color: var(--success);
-            white-space: nowrap;
-            display: inline-flex;
+            display: flex;
             align-items: center;
-            gap: 6px;
-            flex-shrink: 0;
+            gap: 8px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            min-width: 0;
         }
-        .status-dot {
-            width: 6px;
-            height: 6px;
-            background: var(--success);
-            border-radius: 50%;
-            display: inline-block;
+        .status-badge {
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--emerald-green);
+            background: rgba(16, 185, 129, 0.1);
+            border: 1px solid rgba(16, 185, 129, 0.2);
+            padding: 2px 8px;
+            border-radius: 4px;
+            white-space: nowrap;
+            flex-shrink: 0;
         }
         .notice {
             background: rgba(37, 99, 235, 0.08);
-            border-left: 3px solid var(--primary-light);
-            padding: 14px 16px;
+            border-left: 3px solid #2563eb;
+            padding: 12px 14px;
             border-radius: 0 6px 6px 0;
-            font-size: 12px;
+            font-size: 11px;
             color: #cbd5e1;
             line-height: 1.6;
         }
         .footer {
             text-align: center;
-            font-size: 12px;
-            color: var(--text-muted);
-            margin-top: 24px;
+            font-size: 11px;
+            color: var(--text-dim);
+            margin-top: 20px;
             line-height: 1.8;
         }
-        .footer a { color: var(--text-muted); text-decoration: none; }
-        .footer-vendor { color: #64748b; font-size: 11px; }
+        .footer a { color: var(--text-dim); text-decoration: none; }
+        .footer-vendor { color: #64748b; font-size: 10px; }
     </style>
 </head>
 <body>
@@ -352,18 +354,18 @@ const erpHtmlTemplate = `<!DOCTYPE html>
                 </div>
                 <div class="badge">
                     <span class="badge-dot"></span>
-                    <span>Cluster Operational</span>
+                    <span>Operational</span>
                 </div>
             </div>
 
             <div class="grid">
                 <div class="stat-box">
                     <div class="stat-label">Service Status</div>
-                    <div class="stat-val">RUNNING (STANDBY-READY)</div>
+                    <div class="stat-val">RUNNING (STANDBY)</div>
                 </div>
                 <div class="stat-box">
                     <div class="stat-label">Access Protocol</div>
-                    <div class="stat-val">mTLS 1.3 / OAuth 2.0 PKCE</div>
+                    <div class="stat-val">mTLS 1.3 / OAuth 2.0</div>
                 </div>
                 <div class="stat-box">
                     <div class="stat-label">Production Cluster Node</div>
@@ -375,28 +377,40 @@ const erpHtmlTemplate = `<!DOCTYPE html>
                 </div>
             </div>
 
-            <div class="section-title">Core Subsystem Status</div>
-            <div class="modules-list">
-                <div class="module-item">
-                    <span class="module-name">SCM Supply Chain Engine</span>
-                    <span class="module-status"><span class="status-dot"></span>Operational</span>
+            <div class="section-title">Core Subsystem Operational Status</div>
+            <div class="subsystems-list">
+                <div class="subsystem-row">
+                    <div class="subsystem-name">
+                        <span class="badge-dot"></span>
+                        <span>SCM Supply Chain Management Engine</span>
+                    </div>
+                    <span class="status-badge">Operational</span>
                 </div>
-                <div class="module-item">
-                    <span class="module-name">CRM & Client Portal</span>
-                    <span class="module-status"><span class="status-dot"></span>Operational</span>
+                <div class="subsystem-row">
+                    <div class="subsystem-name">
+                        <span class="badge-dot"></span>
+                        <span>CRM Client Relations & Billing Portal</span>
+                    </div>
+                    <span class="status-badge">Operational</span>
                 </div>
-                <div class="module-item">
-                    <span class="module-name">FIN General Ledger</span>
-                    <span class="module-status"><span class="status-dot"></span>Operational</span>
+                <div class="subsystem-row">
+                    <div class="subsystem-name">
+                        <span class="badge-dot"></span>
+                        <span>FIN General Ledger & Settlement Hub</span>
+                    </div>
+                    <span class="status-badge">Operational</span>
                 </div>
-                <div class="module-item">
-                    <span class="module-name">WMS Smart Warehousing</span>
-                    <span class="module-status"><span class="status-dot"></span>Operational</span>
+                <div class="subsystem-row">
+                    <div class="subsystem-name">
+                        <span class="badge-dot"></span>
+                        <span>WMS Smart Warehousing & Logistics</span>
+                    </div>
+                    <span class="status-badge">Operational</span>
                 </div>
             </div>
 
             <div class="notice">
-                <strong>Corporate Security Policy</strong>: This access gateway serves as an internal API endpoint for Vanguard Global production services. Access is restricted to authorized corporate networks and authenticated microservices with valid TLS client credentials or access tokens. Unauthorized requests are logged and rejected.
+                <strong>Corporate Security Policy</strong>: This access gateway serves as an internal API endpoint for Vanguard Global production services. Access is restricted to authorized corporate networks and authenticated microservices with valid TLS client credentials or access tokens.
             </div>
         </div>
 
