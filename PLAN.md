@@ -87,8 +87,9 @@ MyXray 面向自有服务器与自有客户端部署，目标是在统一服务�
 | 服务端 H2/H3 监听 | 已实现 |
 | `pkg/client` 的 H2/H3/auto 路由 | 已实现，H2/H3 均支持 TCP carrier pool，缺少完整端到端回归 |
 | H3 Datagram UDP | 已实现，性能与弱网结论依赖部署条件 |
-| 独立 SOCKS5 客户端与当前服务端兼容 | 未完成协议同步 |
 | 完整 `net.Conn` deadline/half-close 语义 | 未完成 |
+| 服务端 `pkg/server` Inbound 组件化 | 未实现 (目前逻辑仍耦合于 `cmd/myxray-server` ) |
+| 客户端 `pkg/client` 标准 Proxy 适配器 | 未实现 (需提供适配 Mihomo/Xray 的标准 Dial 接口) |
 | Xray-core adapter | 未实现 |
 | Mihomo adapter | 未实现 |
 | sing-box adapter | 未实现 |
@@ -96,14 +97,24 @@ MyXray 面向自有服务器与自有客户端部署，目标是在统一服务�
 
 ## 6. 后续优先级
 
-### P0：恢复单一协议事实源
+**战略调整声明**：经过纯 Go (quic-go) 与纯 Rust (quinn) 在相同连接池条件下的严格 A/B 物理测速，确认我们定制的纯 Go 核心已逼近物理极限（769 Mbps），彻底否决了重写 C/Rust 底层的伪需求。项目将放弃维护独立的 SOCKS5 客户端应用，全线并入 Go 语言的通用代理内核生态。
 
-1. 让 `cmd/myxray-v2-client` 直接复用 `pkg/client`，或同步移除其旧 TCP 帧协议。
-2. 删除或改写引用已删除符号的陈旧测试。
-3. 为 `server + SDK` 增加 H2、H3、auto 的端到端测试。
-4. 修正 H2 建连使用后台 context 的问题，确保调用方取消与 deadline 能中断建连。
-5. 覆盖 TCP 双向 EOF、半关闭、取消、deadline、服务端重启和 application bytes 不重放。
-6. 覆盖 UDP association 生命周期、重放窗口、MTU 边界和连接关闭唤醒。
+### P0：补齐基础语义与组件化改造（接入宿主的前提）
+
+1. **补齐底层标准语义 (net.Conn)**：
+   - 完美实现 `SetReadDeadline` 和 `SetWriteDeadline`。
+   - 完美实现 HTTP/3 和 HTTP/2 流的 `CloseWrite`（Half-close，区分优雅 FIN 与流中止）。
+2. **服务端入站组件化 (Xray Inbound)**：
+   - 将 `cmd/myxray-server` 的核心监听、证书、鉴权逻辑抽离为 `pkg/server`。
+   - 对外暴露生命周期一致的 `Start(listener)` 接口，使其能以标准 Inbound 的身份挂载到 Xray-core 中。
+3. **客户端出站包装 (Mihomo Outbound)**：
+   - 为 `pkg/client` 包装一层干净的标准接口，提供标准的 `DialContext(ctx, network, addr)` 和 `ListenPacket()`。
+   - 删除过期的独立客户端（`cmd/myxray-v2-client`）及其陈旧 TCP 帧协议。
+4. 删除或改写引用已删除符号的陈旧测试。
+5. 为 `server + SDK` 增加 H2、H3、auto 的端到端测试。
+6. 修正 H2 建连使用后台 context 的问题，确保调用方取消与 deadline 能中断建连。
+7. 覆盖 TCP 双向 EOF、半关闭、取消、deadline、服务端重启和 application bytes 不重放。
+8. 覆盖 UDP association 生命周期、重放窗口、MTU 边界和连接关闭唤醒。
 
 验收标准：三个模式的行为矩阵均由自动测试证明，`scripts/verify-release.sh` 在干净 checkout 上通过。
 
