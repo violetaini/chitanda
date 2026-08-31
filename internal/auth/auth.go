@@ -6,6 +6,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -19,12 +20,15 @@ import (
 	"time"
 )
 
-const MaxClockSkew = 90 * time.Second
-
-const replayCompactAfter = 10_000
+const (
+	MaxClockSkew       = 90 * time.Second
+	replayCompactAfter = 10_000
+	AuthDomainV2       = "MYXRAY-AUTH-V2"
+)
 
 type ReplayCache struct {
 	mu          sync.Mutex
+	cond        *sync.Cond
 	expires     map[string]time.Time
 	expiryQueue replayExpiryHeap
 	file        *os.File
@@ -32,6 +36,10 @@ type ReplayCache struct {
 	writesSince int
 	persistent  bool
 	persistErr  error
+	syncedTx    uint64
+	currentTx   uint64
+	stopCh      chan struct{}
+	doneCh      chan struct{}
 }
 
 type replayExpiry struct {
@@ -58,7 +66,11 @@ func (h *replayExpiryHeap) Pop() any {
 }
 
 func NewReplayCache() *ReplayCache {
-	return &ReplayCache{expires: make(map[string]time.Time)}
+	c := &ReplayCache{
+		expires: make(map[string]time.Time),
+	}
+	c.cond = sync.NewCond(&c.mu)
+	return c
 }
 
 func OpenReplayCache(path string, now time.Time) (*ReplayCache, error) {
@@ -77,12 +89,53 @@ func OpenReplayCache(path string, now time.Time) (*ReplayCache, error) {
 			return nil, syncErr
 		}
 	}
-	cache := &ReplayCache{expires: make(map[string]time.Time), file: file, path: path, persistent: true}
+	cache := &ReplayCache{
+		expires:    make(map[string]time.Time),
+		file:       file,
+		path:       path,
+		persistent: true,
+		stopCh:     make(chan struct{}),
+		doneCh:     make(chan struct{}),
+	}
+	cache.cond = sync.NewCond(&cache.mu)
 	if err := cache.load(now); err != nil {
 		_ = file.Close()
 		return nil, err
 	}
+	go cache.groupCommitLoop()
 	return cache, nil
+}
+
+func (c *ReplayCache) groupCommitLoop() {
+	ticker := time.NewTicker(2 * time.Millisecond)
+	defer ticker.Stop()
+	defer close(c.doneCh)
+
+	for {
+		select {
+		case <-c.stopCh:
+			c.mu.Lock()
+			if c.file != nil && c.currentTx > c.syncedTx {
+				_ = c.file.Sync()
+				c.syncedTx = c.currentTx
+				c.cond.Broadcast()
+			}
+			c.mu.Unlock()
+			return
+		case <-ticker.C:
+			c.mu.Lock()
+			if c.file != nil && c.currentTx > c.syncedTx {
+				err := c.file.Sync()
+				if err != nil {
+					_ = c.markPersistenceFailure(err)
+				} else {
+					c.syncedTx = c.currentTx
+				}
+				c.cond.Broadcast()
+			}
+			c.mu.Unlock()
+		}
+	}
 }
 
 func (c *ReplayCache) load(now time.Time) error {
@@ -133,6 +186,7 @@ func (c *ReplayCache) Accept(nonce string, now time.Time) (bool, error) {
 	if _, exists := c.expires[nonce]; exists {
 		return false, nil
 	}
+	var thisTx uint64
 	if c.file != nil {
 		if c.writesSince >= replayCompactAfter {
 			if err := c.compact(); err != nil {
@@ -145,15 +199,21 @@ func (c *ReplayCache) Accept(nonce string, now time.Time) (bool, error) {
 			return false, c.markPersistenceFailure(err)
 		}
 		c.writesSince++
-		if c.writesSince%64 == 0 {
-			if err := c.file.Sync(); err != nil {
-				return false, c.markPersistenceFailure(err)
-			}
-		}
+		c.currentTx++
+		thisTx = c.currentTx
 	}
 	expiry := now.Add(2 * MaxClockSkew)
 	c.expires[nonce] = expiry
 	heap.Push(&c.expiryQueue, replayExpiry{nonce: nonce, expiry: expiry})
+
+	if c.persistent && thisTx > 0 {
+		for c.syncedTx < thisTx && c.persistErr == nil {
+			c.cond.Wait()
+		}
+		if c.persistErr != nil {
+			return false, c.persistErr
+		}
+	}
 	return true, nil
 }
 
@@ -223,6 +283,14 @@ func syncDirectory(dir string) error {
 }
 
 func (c *ReplayCache) Close() error {
+	if c.stopCh != nil {
+		select {
+		case <-c.stopCh:
+		default:
+			close(c.stopCh)
+			<-c.doneCh
+		}
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.file == nil {
@@ -249,13 +317,26 @@ func LoadPSK(path string) ([]byte, error) {
 	return nil, errors.New("PSK must be at least 32 bytes encoded as hex or base64url")
 }
 
-func Signature(psk []byte, method, path, target, timestamp, nonce string) string {
+func Signature(psk []byte, mode, method, path, target, timestamp, nonce string) string {
 	mac := hmac.New(sha256.New, psk)
-	fmt.Fprintf(mac, "%s\n%s\n%s\n%s\n%s", method, path, target, timestamp, nonce)
+	writeLengthPrefixed(mac, AuthDomainV2)
+	writeLengthPrefixed(mac, mode)
+	writeLengthPrefixed(mac, method)
+	writeLengthPrefixed(mac, path)
+	writeLengthPrefixed(mac, target)
+	writeLengthPrefixed(mac, timestamp)
+	writeLengthPrefixed(mac, nonce)
 	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
-func Verify(psk []byte, method, path, target, timestamp, nonce, signature string, now time.Time) bool {
+func writeLengthPrefixed(w io.Writer, s string) {
+	var lenBuf [2]byte
+	binary.BigEndian.PutUint16(lenBuf[:], uint16(len(s)))
+	_, _ = w.Write(lenBuf[:])
+	_, _ = io.WriteString(w, s)
+}
+
+func Verify(psk []byte, mode, method, path, target, timestamp, nonce, signature string, now time.Time) bool {
 	unixSeconds, err := strconv.ParseInt(timestamp, 10, 64)
 	if err != nil || nonce == "" || signature == "" {
 		return false
@@ -264,6 +345,6 @@ func Verify(psk []byte, method, path, target, timestamp, nonce, signature string
 	if requestTime.Before(now.Add(-MaxClockSkew)) || requestTime.After(now.Add(MaxClockSkew)) {
 		return false
 	}
-	expected := Signature(psk, method, path, target, timestamp, nonce)
+	expected := Signature(psk, mode, method, path, target, timestamp, nonce)
 	return hmac.Equal([]byte(expected), []byte(signature))
 }

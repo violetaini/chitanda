@@ -12,12 +12,16 @@ func TestSignatureVerification(t *testing.T) {
 	psk := []byte(strings.Repeat("k", 32))
 	now := time.Unix(1_700_000_000, 0)
 	ts := "1700000000"
-	sig := Signature(psk, "POST", "/stream", "example.com:443", ts, "nonce")
-	if !Verify(psk, "POST", "/stream", "example.com:443", ts, "nonce", sig, now) {
+	mode := "tcp-v2"
+	sig := Signature(psk, mode, "POST", "/stream", "example.com:443", ts, "nonce")
+	if !Verify(psk, mode, "POST", "/stream", "example.com:443", ts, "nonce", sig, now) {
 		t.Fatal("valid signature rejected")
 	}
-	if Verify(psk, "POST", "/stream", "other.example:443", ts, "nonce", sig, now) {
+	if Verify(psk, mode, "POST", "/stream", "other.example:443", ts, "nonce", sig, now) {
 		t.Fatal("signature accepted for a different target")
+	}
+	if Verify(psk, "udp-v2", "POST", "/stream", "example.com:443", ts, "nonce", sig, now) {
+		t.Fatal("signature accepted for a different mode (cross-mode replay)")
 	}
 }
 

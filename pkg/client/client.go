@@ -305,6 +305,6 @@ func signRequest(request *http.Request, psk []byte, path, target, mode string) e
 	request.Header.Set(HeaderTarget, target)
 	request.Header.Set(HeaderTimestamp, timestamp)
 	request.Header.Set(HeaderNonce, nonce)
-	request.Header.Set(HeaderSignature, auth.Signature(psk, request.Method, path, target, timestamp, nonce))
+	request.Header.Set(HeaderSignature, auth.Signature(psk, mode, request.Method, path, target, timestamp, nonce))
 	return nil
 }

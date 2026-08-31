@@ -53,7 +53,7 @@ func TestSignRequest(t *testing.T) {
 	if target != "1.1.1.1:443" {
 		t.Fatalf("target = %q, want 1.1.1.1:443", target)
 	}
-	if !auth.Verify(psk, http.MethodPost, "/test", target, timestamp, nonce, sig, time.Now()) {
+	if !auth.Verify(psk, ModeTCPv2, http.MethodPost, "/test", target, timestamp, nonce, sig, time.Now()) {
 		t.Fatal("signature verification failed")
 	}
 }

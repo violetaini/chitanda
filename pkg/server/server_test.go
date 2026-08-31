@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -37,10 +38,11 @@ func TestServerAuthorizationAndReplay(t *testing.T) {
 	target := "1.1.1.1:80"
 	ts := strconv.FormatInt(time.Now().Unix(), 10)
 	nonce := "test-nonce-1"
-	sig := auth.Signature(psk, http.MethodPost, "/test-path-12345678", target, ts, nonce)
+	sig := auth.Signature(psk, modeTCPv2, http.MethodPost, "/test-path-12345678", target, ts, nonce)
 
 	req = httptest.NewRequest(http.MethodPost, "/test-path-12345678", nil)
 	req.ProtoMajor = 2
+	req.Header.Set(headerMode, modeTCPv2)
 	req.Header.Set(headerTarget, target)
 	req.Header.Set(headerTimestamp, ts)
 	req.Header.Set(headerNonce, nonce)
@@ -91,5 +93,20 @@ func TestStrictSNI(t *testing.T) {
 	_, err = cfg.GetConfigForClient(chi)
 	if err != nil {
 		t.Fatalf("expected case-insensitive SNI to pass, got: %v", err)
+	}
+}
+
+func TestCarrierProbe(t *testing.T) {
+	srv := NewServer("/test-path", []byte(strings.Repeat("p", 32)), nil, nil, 1024)
+	req := httptest.NewRequest(http.MethodHead, "/", nil)
+	req.Header.Set("X-Carrier-Probe", "1")
+	w := httptest.NewRecorder()
+
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for carrier probe, got %d", w.Code)
+	}
+	if w.Header().Get(headerSessionOK) != "1" {
+		t.Fatalf("expected X-Session-OK header on probe response")
 	}
 }

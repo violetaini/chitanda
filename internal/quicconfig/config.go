@@ -9,7 +9,7 @@ import (
 
 const (
 	MinInitialPacketSize     = 1200
-	DefaultInitialPacketSize = 1452
+	DefaultInitialPacketSize = 1280
 	MaxInitialPacketSize     = 1452
 	InitialStreamWindow      = 32 << 20
 	MaxStreamWindow          = 128 << 20

@@ -51,6 +51,12 @@ func NewServer(path string, psk []byte, replays *auth.ReplayCache, fallback http
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get("X-Carrier-Probe") == "1" {
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set(headerSessionOK, "1")
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 	if r.ProtoMajor == 3 {
 		s.serveHTTP3(w, r)
 		return
@@ -123,8 +129,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) authorize(r *http.Request, targetAddress, timestamp, nonce, signature string) error {
+	mode := r.Header.Get(headerMode)
+	if mode == "" {
+		mode = modeTCPv2
+	}
 	now := time.Now()
-	if !auth.Verify(s.psk, r.Method, r.URL.Path, targetAddress, timestamp, nonce, signature, now) {
+	if !auth.Verify(s.psk, mode, r.Method, r.URL.Path, targetAddress, timestamp, nonce, signature, now) {
 		return errInvalidSignature
 	}
 	accepted, err := s.replays.Accept(nonce, now)

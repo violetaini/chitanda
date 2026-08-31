@@ -68,6 +68,7 @@ func (p *h2Prober) pingH2() (time.Duration, error) {
 	if err != nil {
 		return 0, err
 	}
+	req.Header.Set("X-Carrier-Probe", "1")
 	start := time.Now()
 	resp, err := h2Cli.transport.RoundTrip(req)
 	if err != nil {
