@@ -258,7 +258,7 @@ type udpTarget struct {
 	messages [udpRelayBatchSize]ipv4.Message
 }
 
-const udpRelayBatchSize = 32
+const udpRelayBatchSize = 64
 
 type udpRelay struct {
 	ctx          context.Context
