@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"io"
 	"log"
 	"net"
@@ -54,7 +55,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	timestamp := r.Header.Get(headerTimestamp)
 	nonce := r.Header.Get(headerNonce)
 	signature := r.Header.Get(headerSignature)
-	if !s.authorize(r, targetAddress, timestamp, nonce, signature) {
+	if err := s.authorize(r, targetAddress, timestamp, nonce, signature); err != nil {
+		if errors.Is(err, errReplayDetected) {
+			// Fast-fail on replays to prevent DoS amplification (don't dial fallback)
+			// Returning standard HTTP error mimics proxy error or fallback error 
+			// without the huge cost of a real upstream TLS connection.
+			http.Error(w, "Bad Request", http.StatusBadRequest)
+			return
+		}
 		s.serveFallback(w, r)
 		return
 	}
@@ -104,14 +112,17 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) authorize(r *http.Request, targetAddress, timestamp, nonce, signature string) bool {
+func (s *Server) authorize(r *http.Request, targetAddress, timestamp, nonce, signature string) error {
 	now := time.Now()
 	if !auth.Verify(s.psk, r.Method, r.URL.Path, targetAddress, timestamp, nonce, signature, now) {
-		return false
+		return errInvalidSignature
 	}
 	accepted, err := s.replays.Accept(nonce, now)
 	if err != nil {
 		log.Printf("replay cache unavailable")
 	}
-	return accepted && err == nil
+	if !accepted || err != nil {
+		return errReplayDetected
+	}
+	return nil
 }

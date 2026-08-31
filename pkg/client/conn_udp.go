@@ -211,20 +211,6 @@ func (m *h3TransportManager) createPacketConnOnce(ctx context.Context) (net.Pack
 		return nil, err
 	}
 
-	select {
-	case <-h3Conn.h3.ReceivedSettings():
-	case <-h3Conn.quic.Context().Done():
-		m.invalidate(h3Conn)
-		return nil, context.Cause(h3Conn.quic.Context())
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-
-	settings := h3Conn.h3.Settings()
-	if !settings.EnableDatagrams || !settings.EnableExtendedConnect {
-		return nil, errors.New("server does not enable HTTP datagrams")
-	}
-
 	stream, err := h3Conn.h3.OpenRequestStream(ctx)
 	if err != nil {
 		m.invalidate(h3Conn)
