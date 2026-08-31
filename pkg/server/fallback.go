@@ -127,7 +127,7 @@ type erpFallbackHandler struct {
 }
 
 func newERPFallbackHandler(serverName string) http.Handler {
-	tmpl, _ := template.New("erp").Parse(erpHtmlTemplate)
+	tmpl := template.Must(template.New("erp").Parse(erpHtmlTemplate))
 	return &erpFallbackHandler{
 		serverName: serverName,
 		tmpl:       tmpl,
@@ -154,10 +154,12 @@ func (h *erpFallbackHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	clusterNum := (int(randomBytes[0]) % 8) + 1
 	clusterID := fmt.Sprintf("prod-cluster-0%d", clusterNum)
 
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
+
 	accept := r.Header.Get("Accept")
 	if strings.Contains(accept, "application/json") || strings.HasPrefix(r.URL.Path, "/api") || strings.HasPrefix(r.URL.Path, "/v1") {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"code":      200,
@@ -173,7 +175,6 @@ func (h *erpFallbackHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
 	w.WriteHeader(http.StatusOK)
 
 	data := erpPageData{
