@@ -7,6 +7,7 @@ const Protocols = {
     SOCKS: 'socks',
     HTTP: 'http',
     WIREGUARD: 'wireguard',
+    CHITANDA: 'chitanda',
 };
 
 const SSMethods = {
@@ -1811,6 +1812,15 @@ class Inbound extends XrayCommonClass {
         return txt;
     }
 
+    genChitandaLink(address='', port=this.port, remark='') {
+        const psk = encodeURIComponent(this.settings.psk || '');
+        const path = encodeURIComponent(this.settings.path || '/api/v1/sync');
+        const transport = this.settings.transport || 'h2';
+        const sni = (this.stream && this.stream.isTls) ? encodeURIComponent(this.stream.tls.serverName || address) : '';
+        const name = encodeURIComponent(remark || 'Chitanda');
+        return `chitanda://${psk}@${address}:${port}?transport=${transport}&path=${path}&sni=${sni}#${name}`;
+    }
+
     genLink(address='', port=this.port, forceTls='same', remark='', client) {
         switch (this.protocol) {
             case Protocols.VMESS:
@@ -1821,6 +1831,8 @@ class Inbound extends XrayCommonClass {
                 return this.genSSLink(address, port, forceTls, remark, this.isSSMultiUser ? client.password : '');
             case Protocols.TROJAN:
                 return this.genTrojanLink(address, port, forceTls, remark, client.password);
+            case Protocols.CHITANDA:
+                return this.genChitandaLink(address, port, remark);
             default: return '';
         }
     }
@@ -1926,6 +1938,7 @@ Inbound.Settings = class extends XrayCommonClass {
             case Protocols.SOCKS: return new Inbound.SocksSettings(protocol);
             case Protocols.HTTP: return new Inbound.HttpSettings(protocol);            
             case Protocols.WIREGUARD: return new Inbound.WireguardSettings(protocol);
+            case Protocols.CHITANDA: return new Inbound.ChitandaSettings(protocol);
             default: return null;
         }
     }
@@ -1940,12 +1953,50 @@ Inbound.Settings = class extends XrayCommonClass {
             case Protocols.SOCKS: return Inbound.SocksSettings.fromJson(json);
             case Protocols.HTTP: return Inbound.HttpSettings.fromJson(json);
             case Protocols.WIREGUARD: return Inbound.WireguardSettings.fromJson(json);
+            case Protocols.CHITANDA: return Inbound.ChitandaSettings.fromJson(json);
             default: return null;
         }
     }
 
     toJson() {
         return {};
+    }
+};
+
+Inbound.ChitandaSettings = class extends Inbound.Settings {
+    constructor(protocol,
+                psk=RandomUtil.randomSeq(32),
+                path='/api/v1/sync',
+                transport='h2',
+                strict_sni='',
+                fallback='127.0.0.1:8080') {
+        super(protocol);
+        this.psk = psk;
+        this.path = path;
+        this.transport = transport;
+        this.strict_sni = strict_sni;
+        this.fallback = fallback;
+    }
+
+    static fromJson(json = {}) {
+        return new Inbound.ChitandaSettings(
+            Protocols.CHITANDA,
+            json.psk || RandomUtil.randomSeq(32),
+            json.path || '/api/v1/sync',
+            json.transport || 'h2',
+            json.strict_sni || '',
+            json.fallback || '127.0.0.1:8080',
+        );
+    }
+
+    toJson() {
+        return {
+            psk: this.psk,
+            path: this.path,
+            transport: this.transport,
+            strict_sni: this.strict_sni,
+            fallback: this.fallback,
+        };
     }
 };
 

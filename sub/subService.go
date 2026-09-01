@@ -163,8 +163,42 @@ func (s *SubService) getLink(inbound *model.Inbound, email string) string {
 		return s.genTrojanLink(inbound, email)
 	case "shadowsocks":
 		return s.genShadowsocksLink(inbound, email)
+	case "chitanda":
+		return s.genChitandaLink(inbound)
 	}
 	return ""
+}
+
+func (s *SubService) genChitandaLink(inbound *model.Inbound) string {
+	settings := map[string]interface{}{}
+	json.Unmarshal([]byte(inbound.Settings), &settings)
+	psk, _ := settings["psk"].(string)
+	path, _ := settings["path"].(string)
+	transport, _ := settings["transport"].(string)
+	if transport == "" {
+		transport = "h2"
+	}
+	if path == "" {
+		path = "/api/v1/sync"
+	}
+	sni := ""
+	var stream map[string]interface{}
+	json.Unmarshal([]byte(inbound.StreamSettings), &stream)
+	if stream != nil {
+		if tlsSetting, ok := stream["tlsSettings"].(map[string]interface{}); ok {
+			if serverName, ok := tlsSetting["serverName"].(string); ok {
+				sni = serverName
+			}
+		}
+	}
+	remark := inbound.Remark
+	if remark == "" {
+		remark = "Chitanda"
+	}
+	return fmt.Sprintf("chitanda://%s@%s:%d?transport=%s&path=%s&sni=%s#%s",
+		url.QueryEscape(psk), s.address, inbound.Port,
+		url.QueryEscape(transport), url.QueryEscape(path), url.QueryEscape(sni),
+		url.QueryEscape(remark))
 }
 
 func (s *SubService) genVmessLink(inbound *model.Inbound, email string) string {

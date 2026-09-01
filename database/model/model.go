@@ -18,6 +18,7 @@ const (
 	Shadowsocks Protocol = "shadowsocks"
 	Socks       Protocol = "socks"
 	WireGuard   Protocol = "wireguard"
+	Chitanda    Protocol = "chitanda"
 )
 
 type User struct {

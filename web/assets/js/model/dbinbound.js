@@ -60,6 +60,10 @@ class DBInbound {
         return this.protocol === Protocols.WIREGUARD;
     }
 
+    get isChitanda() {
+        return this.protocol === Protocols.CHITANDA;
+    }
+
     get address() {
         let address = location.hostname;
         if (!ObjectUtil.isEmpty(this.listen) && this.listen !== "0.0.0.0") {
@@ -135,6 +139,7 @@ class DBInbound {
             case Protocols.VLESS:
             case Protocols.TROJAN:
             case Protocols.SHADOWSOCKS:
+            case Protocols.CHITANDA:
                 return true;
             default:
                 return false;

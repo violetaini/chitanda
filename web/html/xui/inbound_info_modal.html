@@ -428,6 +428,43 @@
             </td>
           </tr>
       </table>
+      <table v-if="dbInbound.isChitanda" class="tr-info-table">
+        <tr class="client-table-odd-row">
+          <td>PSK 密钥</td>
+          <td>[[ inbound.settings.psk ]]</td>
+        </tr>
+        <tr>
+          <td>传输模式 (Transport)</td>
+          <td><a-tag color="blue">[[ inbound.settings.transport || 'h2' ]]</a-tag></td>
+        </tr>
+        <tr class="client-table-odd-row">
+          <td>请求路径 (Path)</td>
+          <td>[[ inbound.settings.path || '/api/v1/sync' ]]</td>
+        </tr>
+        <tr v-if="inbound.settings.strict_sni">
+          <td>Strict SNI</td>
+          <td>[[ inbound.settings.strict_sni ]]</td>
+        </tr>
+        <tr v-if="inbound.settings.fallback" class="client-table-odd-row">
+          <td>回退地址 (Fallback)</td>
+          <td>[[ inbound.settings.fallback ]]</td>
+        </tr>
+        <tr v-if="infoModal.links && infoModal.links.length > 0">
+          <td colspan="2">
+            <div v-for="(linkObj, index) in infoModal.links" class="tr-info-row" style="margin-top: 10px;">
+              <div class="tr-info-title" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px;">
+                <a-tag color="blue">Chitanda 节点配置链接</a-tag>
+                <a-tooltip title='{{ i18n "copy" }}'>
+                  <a-button style="min-width: 24px;" size="small" icon="snippets" :id="'copy-url-link-'+index" @click="copyToClipboard('copy-url-link-'+index, typeof linkObj === 'object' ? linkObj.link : linkObj)"></a-button>
+                </a-tooltip>
+              </div>
+              <div style="border-radius: 0.5rem; padding: 0.5rem; word-break: break-all;" class="client-table-odd-row">
+                [[ typeof linkObj === 'object' ? linkObj.link : linkObj ]]
+              </div>
+            </div>
+          </td>
+        </tr>
+      </table>
     </template>
     </template>
 </a-modal>
