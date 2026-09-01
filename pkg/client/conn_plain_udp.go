@@ -36,6 +36,8 @@ func newPlainUDPConn(server string, psk []byte) (*plainUDPConn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("listen local udp: %w", err)
 	}
+	_ = conn.SetReadBuffer(8 << 20)
+	_ = conn.SetWriteBuffer(8 << 20)
 
 	codec, err := plainudp.NewCodec(psk)
 	if err != nil {

@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -36,6 +37,13 @@ var (
 	ErrInvalidAddress     = errors.New("plainudp: malformed address in packet")
 )
 
+var packetPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, MaxPacketSize)
+		return &b
+	},
+}
+
 // DeriveKey derives a 32-byte key for plain UDP datagrams.
 func DeriveKey(psk []byte) [32]byte {
 	extractor := hmac.New(sha256.New, []byte(SaltUDP))
@@ -53,7 +61,6 @@ func DeriveKey(psk []byte) [32]byte {
 }
 
 // Codec provides stateless ChaCha20-Poly1305 AEAD encryption and decryption.
-// Anti-replay protection is decoupled and maintained per authenticated SessionID.
 type Codec struct {
 	key      [32]byte
 	aead     cipher.AEAD
@@ -75,16 +82,20 @@ func NewCodec(psk []byte) (*Codec, error) {
 
 // EncodePacket encrypts sessionID, target address and payload into a plain-udp datagram.
 func (c *Codec) EncodePacket(dst []byte, sessionID uint64, targetAddr string, payload []byte, now time.Time) ([]byte, error) {
-	addrBuf, err := encodeTargetAddress(targetAddr)
+	bufPtr := packetPool.Get().(*[]byte)
+	defer packetPool.Put(bufPtr)
+
+	plaintext := (*bufPtr)[:0]
+	var sBuf [8]byte
+	binary.BigEndian.PutUint64(sBuf[:], sessionID)
+	plaintext = append(plaintext, sBuf[:]...)
+
+	var err error
+	plaintext, err = appendTargetAddress(plaintext, targetAddr)
 	if err != nil {
 		return nil, err
 	}
-
-	// Plaintext: [SessionID (8B)] [Target SOCKS5 Addr] [Payload]
-	plaintext := make([]byte, 8+len(addrBuf)+len(payload))
-	binary.BigEndian.PutUint64(plaintext[0:8], sessionID)
-	copy(plaintext[8:], addrBuf)
-	copy(plaintext[8+len(addrBuf):], payload)
+	plaintext = append(plaintext, payload...)
 
 	seq := c.sequence.Add(1)
 
@@ -111,9 +122,8 @@ func (c *Codec) EncodePacket(dst []byte, sessionID uint64, targetAddr string, pa
 }
 
 // DecodePacket decrypts a plain-udp datagram, authenticates via AEAD, and extracts sessionID, target address and payload.
-// It is strictly stateless and verifies the cryptographic tag FIRST before returning seq to prevent replay window poisoning.
 func (c *Codec) DecodePacket(packet []byte, now time.Time) (sessionID uint64, targetAddr string, payload []byte, timestamp uint64, seq uint64, err error) {
-	if len(packet) < HeaderSize+8+1+4+2+16 { // min size with SessionID + IPv4
+	if len(packet) < HeaderSize+8+1+4+2+16 {
 		return 0, "", nil, 0, 0, ErrPacketTooShort
 	}
 
@@ -129,7 +139,6 @@ func (c *Codec) DecodePacket(packet []byte, now time.Time) (sessionID uint64, ta
 	nonce := packet[16:28]
 	ciphertextWithTag := packet[28:]
 
-	// 1. Authenticate and decrypt FIRST. Unauthenticated packets fail immediately without modifying any state.
 	plaintext, err := c.aead.Open(nil, nonce, ciphertextWithTag, ad)
 	if err != nil {
 		return 0, "", nil, timestamp, seq, ErrDecryptionFailed
@@ -141,7 +150,6 @@ func (c *Codec) DecodePacket(packet []byte, now time.Time) (sessionID uint64, ta
 
 	sessionID = binary.BigEndian.Uint64(plaintext[0:8])
 
-	// 2. Parse target address and payload.
 	targetAddr, payload, err = decodeTargetAddress(plaintext[8:])
 	if err != nil {
 		return sessionID, "", nil, timestamp, seq, err
@@ -150,7 +158,7 @@ func (c *Codec) DecodePacket(packet []byte, now time.Time) (sessionID uint64, ta
 	return sessionID, targetAddr, payload, timestamp, seq, nil
 }
 
-func encodeTargetAddress(address string) ([]byte, error) {
+func appendTargetAddress(buf []byte, address string) ([]byte, error) {
 	host, portText, err := net.SplitHostPort(address)
 	if err != nil {
 		return nil, fmt.Errorf("invalid address %q: %w", address, err)
@@ -160,7 +168,6 @@ func encodeTargetAddress(address string) ([]byte, error) {
 		return nil, fmt.Errorf("invalid port %q", portText)
 	}
 
-	buf := make([]byte, 0, 1+1+16+2)
 	if ip := net.ParseIP(host); ip != nil {
 		if ipv4 := ip.To4(); ipv4 != nil {
 			buf = append(buf, 0x01)

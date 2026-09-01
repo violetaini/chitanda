@@ -13,11 +13,19 @@ import (
 	"myxray/internal/target"
 )
 
+var udpTaskPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 64<<10)
+		return &b
+	},
+}
+
 type udpTask struct {
 	sessionID  uint64
 	clientAddr *net.UDPAddr
 	targetAddr string
 	payload    []byte
+	rawBuf     *[]byte
 	seq        uint64
 }
 
@@ -41,6 +49,9 @@ type plainUDPSession struct {
 
 // NewPlainUDPServer creates a new plain-udp listener with a bounded worker pool.
 func NewPlainUDPServer(conn *net.UDPConn, psk []byte) (*PlainUDPServer, error) {
+	_ = conn.SetReadBuffer(8 << 20)
+	_ = conn.SetWriteBuffer(8 << 20)
+
 	codec, err := plainudp.NewCodec(psk)
 	if err != nil {
 		return nil, err
@@ -52,7 +63,7 @@ func NewPlainUDPServer(conn *net.UDPConn, psk []byte) (*PlainUDPServer, error) {
 	}
 	workers := make([]chan udpTask, numWorkers)
 	for i := range workers {
-		workers[i] = make(chan udpTask, 2048)
+		workers[i] = make(chan udpTask, 4096)
 	}
 
 	return &PlainUDPServer{
@@ -72,19 +83,19 @@ func (s *PlainUDPServer) SetResolveUDPForTest(fn func(ctx context.Context, addre
 func (s *PlainUDPServer) Serve(ctx context.Context) error {
 	go s.cleaner(ctx)
 
-	// Start bounded worker goroutines
 	for i, ch := range s.workers {
 		go s.workerLoop(ctx, i, ch)
 	}
 
-	buf := make([]byte, 64<<10)
 	for {
 		if s.closed.Load() || ctx.Err() != nil {
 			return nil
 		}
 
-		n, clientAddr, err := s.conn.ReadFromUDP(buf)
+		rawBufPtr := udpTaskPool.Get().(*[]byte)
+		n, clientAddr, err := s.conn.ReadFromUDP(*rawBufPtr)
 		if err != nil {
+			udpTaskPool.Put(rawBufPtr)
 			if s.closed.Load() {
 				return nil
 			}
@@ -92,26 +103,27 @@ func (s *PlainUDPServer) Serve(ctx context.Context) error {
 		}
 
 		now := time.Now()
-		// 1. Decrypt and authenticate FIRST. Unauthenticated packets are dropped with zero state mutation.
-		sessionID, targetAddr, payload, _, seq, err := s.codec.DecodePacket(buf[:n], now)
+		sessionID, targetAddr, payload, _, seq, err := s.codec.DecodePacket((*rawBufPtr)[:n], now)
 		if err != nil {
-			continue // Drop invalid / tampered / expired packets silently
+			udpTaskPool.Put(rawBufPtr)
+			continue // Drop invalid / tampered / expired packets
 		}
 
-		// 2. Dispatch to bounded worker queue (hashed by SessionID for serial in-order processing per session)
 		workerIdx := sessionID % uint64(len(s.workers))
 		task := udpTask{
 			sessionID:  sessionID,
 			clientAddr: clientAddr,
 			targetAddr: targetAddr,
 			payload:    payload,
+			rawBuf:     rawBufPtr,
 			seq:        seq,
 		}
 
 		select {
 		case s.workers[workerIdx] <- task:
 		default:
-			// Queue full under extreme load; drop packet without stalling socket loop
+			// Under extreme burst load, drop packet and recycle buffer
+			udpTaskPool.Put(rawBufPtr)
 		}
 	}
 }
@@ -126,6 +138,7 @@ func (s *PlainUDPServer) workerLoop(ctx context.Context, workerID int, tasks <-c
 				return
 			}
 			s.processTask(ctx, task)
+			udpTaskPool.Put(task.rawBuf)
 		}
 	}
 }
@@ -138,12 +151,11 @@ func (s *PlainUDPServer) processTask(ctx context.Context, task udpTask) {
 	session.clientAddr.Store(task.clientAddr)
 	session.lastActive.Store(time.Now().Unix())
 
-	// 3. Cryptographic Anti-Replay: Session-isolated replay window check (executed ONLY on authenticated packets)
 	session.replayMu.Lock()
 	accepted := session.replay.Accept(task.seq)
 	session.replayMu.Unlock()
 	if !accepted {
-		return // Drop replayed packet (even if replayed from a different IP/port!)
+		return
 	}
 
 	targetConnVal, ok := session.targets.Load(task.targetAddr)
@@ -158,6 +170,9 @@ func (s *PlainUDPServer) processTask(ctx context.Context, task udpTask) {
 		if err != nil {
 			return
 		}
+		_ = upConn.SetReadBuffer(8 << 20)
+		_ = upConn.SetWriteBuffer(8 << 20)
+
 		actual, loaded := session.targets.LoadOrStore(task.targetAddr, upConn)
 		if loaded {
 			_ = upConn.Close()
