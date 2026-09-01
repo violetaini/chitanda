@@ -44,7 +44,7 @@ MyXray 是一个面向自有服务端部署的高性能、抗探测 Go 代理传
 - **Wire-Version 双向兼容**：服务端自适应识别现代原始流客户端与携带私有帧标记（`X-Framing: 1`）的客户端，平滑向后兼容。
 
 ### B. 无 TLS 纯 IP 实验载荷 (`plain-h1` / `plain-udp`)
-- **零特征外层 HTTP/1.1 Carrier**：
+- **标准全双工 HTTP/1.1 Carrier**：
   - 外层仅使用标准 `POST <path> HTTP/1.1` 与 `Transfer-Encoding: chunked`；
   - 彻底剥离明文 `X-Session-Target` 与自定义私有 Header，伪装为普通二进制流上传接口；
   - 服务端使用 Go `http.NewResponseController(w).EnableFullDuplex()` 实现双向流式全双工。

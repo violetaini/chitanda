@@ -116,17 +116,18 @@ func (s *PlainUDPServer) Serve(ctx context.Context) error {
 			return err
 		}
 
-		// Enforce strict memory budget (64MB max)
-		if s.inFlightMem.Add(int64(n)) > s.maxMemBudget {
-			s.inFlightMem.Add(-int64(n))
+		// Enforce strict physical buffer capacity budget (64MB max = 1024 concurrent 64KB buffers)
+		bufCap := int64(cap(*rawBufPtr))
+		if s.inFlightMem.Add(bufCap) > s.maxMemBudget {
+			s.inFlightMem.Add(-bufCap)
 			udpTaskPool.Put(rawBufPtr)
-			continue // Drop under memory pressure
+			continue // Drop under physical memory pressure
 		}
 
 		now := time.Now()
 		sessionID, targetAddr, payload, _, seq, err := s.codec.DecodePacket((*rawBufPtr)[:n], now)
 		if err != nil {
-			s.inFlightMem.Add(-int64(n))
+			s.inFlightMem.Add(-bufCap)
 			udpTaskPool.Put(rawBufPtr)
 			continue // Drop invalid / tampered / expired packets
 		}
@@ -145,8 +146,8 @@ func (s *PlainUDPServer) Serve(ctx context.Context) error {
 		select {
 		case s.workers[workerIdx] <- task:
 		default:
-			// Under extreme burst load, drop packet, decrement memory budget, and recycle buffer
-			s.inFlightMem.Add(-int64(n))
+			// Under extreme burst load, drop packet, decrement physical memory budget, and recycle buffer
+			s.inFlightMem.Add(-bufCap)
 			udpTaskPool.Put(rawBufPtr)
 		}
 	}
@@ -164,7 +165,7 @@ func (s *PlainUDPServer) workerLoop(ctx context.Context, workerID int, tasks <-c
 			for {
 				select {
 				case task := <-tasks:
-					s.inFlightMem.Add(-int64(task.rawLen))
+					s.inFlightMem.Add(-int64(cap(*task.rawBuf)))
 					udpTaskPool.Put(task.rawBuf)
 				default:
 					return
@@ -172,7 +173,7 @@ func (s *PlainUDPServer) workerLoop(ctx context.Context, workerID int, tasks <-c
 			}
 		case task := <-tasks:
 			s.processTask(ctx, task)
-			s.inFlightMem.Add(-int64(task.rawLen))
+			s.inFlightMem.Add(-int64(cap(*task.rawBuf)))
 			udpTaskPool.Put(task.rawBuf)
 		}
 	}

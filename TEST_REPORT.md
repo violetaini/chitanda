@@ -230,6 +230,6 @@ All tests passed under `go test -race -count=1 ./...` with 0 data races.
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | **150 Mbps** (3s) | 39,861 pkts | 39,861 pkts | **143.46 Mbps** | **0.00%** | 0.00% loss |
 | **300 Mbps** (3s) | 79,277 pkts | 79,277 pkts | **285.21 Mbps** | **0.00%** | 0.00% loss |
-| **600 Mbps** (3s) | 112,777 pkts | 112,777 pkts | **405.77 Mbps** | **0.00%** | Max deliverable saturation on 2-vCPU node, 0.00% loss |
+| **600 Mbps** (3s) | 112,777 pkts | 112,777 pkts | **405.77 Mbps** | **0.00%** | Source node saturated at ~405.77 Mbps with 0.00% loss |
 
 *Comparison*: Before 8MB buffer and memory pool tuning, 500 Mbps offered rate suffered 32.79% loss due to OS socket queue overflow. After tuning, `plain-udp` delivers **405+ Mbps with 0.00% loss**.

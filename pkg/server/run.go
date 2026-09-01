@@ -99,6 +99,10 @@ func Run(config *Config, listenAddr, adminListenAddr, quicListenAddr string) err
 			}
 		}()
 	}
+	serverLifecycleCtx, serverLifecycleCancel := context.WithCancel(context.Background())
+	defer serverLifecycleCancel()
+
+	var plainUDPServer *PlainUDPServer
 	// Plain-UDP listener: enabled if quicListenAddr is empty or distinct from listenAddr
 	if quicListenAddr == "" || quicListenAddr != listenAddr {
 		plainUDPAddr, err := net.ResolveUDPAddr("udp", listenAddr)
@@ -111,11 +115,12 @@ func Run(config *Config, listenAddr, adminListenAddr, quicListenAddr string) err
 		} else {
 			_ = plainUDPLn.SetReadBuffer(8 << 20)
 			_ = plainUDPLn.SetWriteBuffer(8 << 20)
-			plainUDPServer, err := NewPlainUDPServer(plainUDPLn, psk)
+			pServer, err := NewPlainUDPServer(plainUDPLn, psk)
 			if err != nil {
 				_ = plainUDPLn.Close()
 				return fmt.Errorf("init plain-UDP server: %w", err)
 			}
+			plainUDPServer = pServer
 			if config.AllowPrivateTargets {
 				plainUDPServer.SetResolveUDPForTest(func(ctx context.Context, address string) (*net.UDPAddr, error) {
 					return net.ResolveUDPAddr("udp", address)
@@ -123,7 +128,7 @@ func Run(config *Config, listenAddr, adminListenAddr, quicListenAddr string) err
 			}
 			go func() {
 				log.Printf("public plain-UDP datagram listener started on %s", listenAddr)
-				_ = plainUDPServer.Serve(context.Background())
+				_ = plainUDPServer.Serve(serverLifecycleCtx)
 			}()
 		}
 	}
@@ -147,10 +152,14 @@ func Run(config *Config, listenAddr, adminListenAddr, quicListenAddr string) err
 	<-stop
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	serverLifecycleCancel()
 	_ = public.Shutdown(ctx)
 	_ = admin.Shutdown(ctx)
 	if h3Server != nil {
 		_ = h3Server.Close()
+	}
+	if plainUDPServer != nil {
+		_ = plainUDPServer.Close()
 	}
 	return nil
 }
