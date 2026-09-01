@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"myxray/internal/frame"
 	"myxray/internal/plainudp"
 	"myxray/internal/target"
 )
@@ -23,6 +24,8 @@ type plainUDPSession struct {
 	clientAddr *net.UDPAddr
 	targets    sync.Map // string(targetAddr) -> *net.UDPConn
 	lastActive atomic.Int64
+	replayMu   sync.Mutex
+	replay     frame.ReplayWindow
 }
 
 // NewPlainUDPServer creates a new plain-udp listener using a single pre-derived Codec instance.
@@ -47,7 +50,7 @@ func (s *PlainUDPServer) SetResolveUDPForTest(fn func(ctx context.Context, addre
 func (s *PlainUDPServer) Serve(ctx context.Context) error {
 	go s.cleaner(ctx)
 
-	buf := make([]byte, plainudp.MaxPacketSize)
+	buf := make([]byte, 64<<10)
 	for {
 		if s.closed.Load() || ctx.Err() != nil {
 			return nil
@@ -62,22 +65,32 @@ func (s *PlainUDPServer) Serve(ctx context.Context) error {
 		}
 
 		now := time.Now()
-		targetAddr, payload, _, _, err := s.codec.DecodePacket(buf[:n], now)
+		// 1. Decrypt and authenticate FIRST. Unauthenticated packets are dropped with zero state mutation.
+		targetAddr, payload, _, seq, err := s.codec.DecodePacket(buf[:n], now)
 		if err != nil {
-			continue // Drop invalid / tampered / expired / replayed packets silently
+			continue // Drop invalid / tampered / expired packets silently
 		}
 
-		s.dispatch(ctx, clientAddr, targetAddr, payload)
+		// 2. Dispatch asynchronously so DNS / DialUDP never blocks the listener thread.
+		go s.dispatch(ctx, clientAddr, targetAddr, payload, seq)
 	}
 }
 
-func (s *PlainUDPServer) dispatch(ctx context.Context, clientAddr *net.UDPAddr, targetAddr string, payload []byte) {
+func (s *PlainUDPServer) dispatch(ctx context.Context, clientAddr *net.UDPAddr, targetAddr string, payload []byte, seq uint64) {
 	clientKey := clientAddr.String()
 	val, _ := s.sessions.LoadOrStore(clientKey, &plainUDPSession{
 		clientAddr: clientAddr,
 	})
 	session := val.(*plainUDPSession)
 	session.lastActive.Store(time.Now().Unix())
+
+	// 3. Check per-session replay window AFTER cryptographic authentication.
+	session.replayMu.Lock()
+	accepted := session.replay.Accept(seq)
+	session.replayMu.Unlock()
+	if !accepted {
+		return // Drop replayed packet
+	}
 
 	targetConnVal, ok := session.targets.Load(targetAddr)
 	var upstreamConn *net.UDPConn
@@ -107,7 +120,7 @@ func (s *PlainUDPServer) dispatch(ctx context.Context, clientAddr *net.UDPAddr, 
 }
 
 func (s *PlainUDPServer) listenUpstream(ctx context.Context, session *plainUDPSession, targetAddr string, upstreamConn *net.UDPConn) {
-	buf := make([]byte, 2048)
+	buf := make([]byte, 64<<10)
 	for {
 		if s.closed.Load() || ctx.Err() != nil {
 			return

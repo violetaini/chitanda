@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"myxray/internal/auth"
+	"myxray/internal/frame"
 	"myxray/internal/h1session"
 	"myxray/internal/target"
 )
@@ -104,9 +105,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer upstream.Close()
 
+	useFraming := r.Header.Get(headerFraming) == "1" || r.Header.Get(headerMode) == "tcp-h2-framed"
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set(headerSessionOK, "1")
+	if useFraming {
+		w.Header().Set(headerFraming, "1")
+	}
 	w.WriteHeader(http.StatusOK)
 	if flusher, ok := w.(http.Flusher); ok {
 		flusher.Flush()
@@ -126,16 +131,21 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		uploadDone <- uploadErr
 	}()
-	var downloadErr error
-	bufPtr := copyBufferPool.Get().(*[]byte)
-	_, downloadErr = io.CopyBuffer(flushWriter{w: w}, upstream, *bufPtr)
-	copyBufferPool.Put(bufPtr)
-	if downloadErr != nil {
-		_ = upstream.Close()
-		return
-	}
-	if tcp, ok := upstream.(*net.TCPConn); ok {
-		_ = tcp.CloseRead()
+
+	if useFraming {
+		_ = frame.CopyAsDataFramesAndClose(flushWriter{w: w}, upstream)
+	} else {
+		var downloadErr error
+		bufPtr := copyBufferPool.Get().(*[]byte)
+		_, downloadErr = io.CopyBuffer(flushWriter{w: w}, upstream, *bufPtr)
+		copyBufferPool.Put(bufPtr)
+		if downloadErr != nil {
+			_ = upstream.Close()
+			return
+		}
+		if tcp, ok := upstream.(*net.TCPConn); ok {
+			_ = tcp.CloseRead()
+		}
 	}
 	select {
 	case <-uploadDone:

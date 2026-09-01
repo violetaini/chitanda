@@ -4,9 +4,11 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sync"
 	"sync/atomic"
 	"time"
 
+	"myxray/internal/frame"
 	"myxray/internal/plainudp"
 )
 
@@ -16,6 +18,8 @@ type plainUDPConn struct {
 	codec      *plainudp.Codec
 	closed     atomic.Bool
 	buf        []byte
+	replayMu   sync.Mutex
+	replay     frame.ReplayWindow
 }
 
 func newPlainUDPConn(server string, psk []byte) (*plainUDPConn, error) {
@@ -39,7 +43,7 @@ func newPlainUDPConn(server string, psk []byte) (*plainUDPConn, error) {
 		conn:       conn,
 		serverAddr: srvAddr,
 		codec:      codec,
-		buf:        make([]byte, 2048),
+		buf:        make([]byte, 64<<10),
 	}, nil
 }
 
@@ -54,9 +58,16 @@ func (c *plainUDPConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 			return 0, nil, err
 		}
 
-		targetAddrStr, payload, _, _, err := c.codec.DecodePacket(c.buf[:readN], time.Now())
+		targetAddrStr, payload, _, seq, err := c.codec.DecodePacket(c.buf[:readN], time.Now())
 		if err != nil {
-			continue // Drop corrupt, replayed, or non-matching datagrams
+			continue // Drop corrupt, unauthenticated, or expired datagrams
+		}
+
+		c.replayMu.Lock()
+		accepted := c.replay.Accept(seq)
+		c.replayMu.Unlock()
+		if !accepted {
+			continue // Drop replayed responses
 		}
 
 		rAddr, err := net.ResolveUDPAddr("udp", targetAddrStr)

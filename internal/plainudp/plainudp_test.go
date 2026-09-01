@@ -2,9 +2,13 @@ package plainudp
 
 import (
 	"bytes"
+	"encoding/binary"
+	"math"
 	"strings"
 	"testing"
 	"time"
+
+	"myxray/internal/frame"
 )
 
 func TestPlainUDPRoundTripAndReplay(t *testing.T) {
@@ -14,6 +18,7 @@ func TestPlainUDPRoundTripAndReplay(t *testing.T) {
 		t.Fatalf("NewCodec: %v", err)
 	}
 	now := time.Now()
+	var replay frame.ReplayWindow
 
 	testCases := []struct {
 		target  string
@@ -49,10 +54,45 @@ func TestPlainUDPRoundTripAndReplay(t *testing.T) {
 			t.Fatalf("expected non-zero sequence")
 		}
 
-		// Replay attempt must be rejected!
-		if _, _, _, _, err := codec.DecodePacket(packet, now); err != ErrReplayDetected {
-			t.Fatalf("expected ErrReplayDetected on replayed packet, got %v", err)
+		// First arrival: replay window accepts
+		if !replay.Accept(seq) {
+			t.Fatalf("expected replay window to accept first-time sequence %d", seq)
 		}
+
+		// Replay arrival: replay window rejects!
+		if replay.Accept(seq) {
+			t.Fatalf("expected replay window to reject duplicate sequence %d", seq)
+		}
+	}
+}
+
+func TestUnauthenticatedPacketCannotPoisonReplayWindow(t *testing.T) {
+	psk := []byte(strings.Repeat("u", 32))
+	codec, err := NewCodec(psk)
+	if err != nil {
+		t.Fatalf("NewCodec: %v", err)
+	}
+	now := time.Now()
+	var replay frame.ReplayWindow
+
+	// Attacker crafts unauthenticated packet with high sequence number
+	fakePacket := make([]byte, 100)
+	// valid timestamp
+	nowSec := uint64(now.Unix())
+	binary.BigEndian.PutUint64(fakePacket[0:8], nowSec)
+	// high sequence number
+	binary.BigEndian.PutUint64(fakePacket[8:16], math.MaxUint64)
+
+	// Decode must fail immediately due to AEAD decryption failure
+	_, _, _, _, err = codec.DecodePacket(fakePacket, now)
+	if err != ErrDecryptionFailed {
+		t.Fatalf("expected ErrDecryptionFailed, got %v", err)
+	}
+
+	// Replay window state must remain completely unaffected
+	// Legitimate client with seq=1 must still be accepted!
+	if !replay.Accept(1) {
+		t.Fatal("replay window was poisoned by unauthenticated packet!")
 	}
 }
 

@@ -11,18 +11,16 @@ import (
 	"io"
 	"net"
 	"strconv"
-	"sync"
 	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/chacha20poly1305"
-	"myxray/internal/frame"
 )
 
 const (
 	// Header: Timestamp (8B) + Sequence (8B) + Nonce (12B) = 28B
 	HeaderSize       = 28
-	MaxPacketSize    = 1500
+	MaxPacketSize    = 64 << 10 // 64KB max datagram buffer
 	MaxTimestampSkew = 30 * time.Second
 
 	SaltUDP = "MYXRAY-PLAIN-UDP-SALT-V1"
@@ -54,13 +52,12 @@ func DeriveKey(psk []byte) [32]byte {
 	return key
 }
 
-// Codec manages zero-allocation ChaCha20-Poly1305 encryption, decryption, sequencing, and anti-replay.
+// Codec provides stateless ChaCha20-Poly1305 AEAD encryption and decryption.
+// Replay protection is decoupled and maintained per authenticated session.
 type Codec struct {
 	key      [32]byte
 	aead     cipher.AEAD
 	sequence atomic.Uint64
-	replayMu sync.Mutex
-	replay   frame.ReplayWindow
 }
 
 // NewCodec creates a persistent Codec instance holding the initialized AEAD cipher.
@@ -100,7 +97,7 @@ func (c *Codec) EncodePacket(dst []byte, targetAddr string, payload []byte, now 
 	binary.BigEndian.PutUint64(ad[0:8], ts)
 	binary.BigEndian.PutUint64(ad[8:16], seq)
 
-	// Wire: [Timestamp (8B)] [Sequence (8B)] [Nonce (12B)] [Ciphertext + Tag]
+	// Wire: [Timestamp (8B)] [Sequence (8B)] [Nonce (12B)] [Ciphertext + Tag (16B)]
 	if dst == nil {
 		dst = make([]byte, 0, HeaderSize+len(plaintext)+c.aead.Overhead())
 	}
@@ -111,7 +108,8 @@ func (c *Codec) EncodePacket(dst []byte, targetAddr string, payload []byte, now 
 	return dst, nil
 }
 
-// DecodePacket decrypts a plain-udp datagram and extracts target address and payload, with anti-replay check.
+// DecodePacket decrypts a plain-udp datagram, authenticates via AEAD, and extracts target address and payload.
+// It is strictly stateless and verifies the cryptographic tag FIRST before returning seq to prevent replay window poisoning.
 func (c *Codec) DecodePacket(packet []byte, now time.Time) (targetAddr string, payload []byte, timestamp uint64, seq uint64, err error) {
 	if len(packet) < HeaderSize+1+4+2+16 { // min size with IPv4
 		return "", nil, 0, 0, ErrPacketTooShort
@@ -125,24 +123,17 @@ func (c *Codec) DecodePacket(packet []byte, now time.Time) (targetAddr string, p
 	}
 
 	seq = binary.BigEndian.Uint64(packet[8:16])
-
-	c.replayMu.Lock()
-	accepted := c.replay.Accept(seq)
-	c.replayMu.Unlock()
-
-	if !accepted {
-		return "", nil, timestamp, seq, ErrReplayDetected
-	}
-
 	ad := packet[0:16]
 	nonce := packet[16:28]
 	ciphertextWithTag := packet[28:]
 
+	// 1. Authenticate and decrypt FIRST. Unauthenticated packets fail immediately without modifying any state.
 	plaintext, err := c.aead.Open(nil, nonce, ciphertextWithTag, ad)
 	if err != nil {
 		return "", nil, timestamp, seq, ErrDecryptionFailed
 	}
 
+	// 2. Parse target address and payload.
 	targetAddr, payload, err = decodeTargetAddress(plaintext)
 	if err != nil {
 		return "", nil, timestamp, seq, err
