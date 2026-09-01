@@ -4,6 +4,10 @@ Chitanda 是一个面向自有服务端部署的高性能、抗探测 Go 代理�
 
 当前主线支持 **4 种传输载荷模式（Transport Carriers）**：以 **`h2` (TLS 1.3 + HTTP/2 多路复用)** 作为主线默认推荐，同时提供 **`h3`**、**`auto`** 与免证书纯 IP 模式 **`h1`**（别名 `plain-h1`）。
 
+- 📖 **[完整配置手册与 Wiki 规范](docs/CONFIGURATION.md)**
+- 📁 **[示例配置文件目录 (Examples)](examples/)**
+- 📦 **[GitHub 自动发布二进制 (Releases)](https://github.com/violetaini/chitanda/releases)**
+
 ---
 
 ## 1. 传输载荷矩阵 (Transport Carrier Matrix)
@@ -91,7 +95,7 @@ func main() {
 		ServerName:   "server.example.com",
 		PSK:          []byte("your-32-byte-secure-pre-shared-key-here"),
 		Path:         "/api/v1/sync",
-		TCPTransport: client.TCPTransportH2, // 默认推荐: "h2", 备选: "h3", "auto", "h1"
+		TCPTransport: client.TCPTransportH2, // 模式: "h2", "h3", "auto", "h1"
 	})
 	if err != nil {
 		log.Fatalf("Init client failed: %v", err)
@@ -123,70 +127,160 @@ func main() {
 
 ---
 
----
+## 4. 客户端与服务端生态配置全示例 (Mihomo & Xray-core)
 
-## 4. 客户端与服务端生态集成 (Mihomo & Xray-core Integration)
+详细参数手册与生产架构请参阅 **[docs/CONFIGURATION.md](docs/CONFIGURATION.md)**。
 
-项目提供非侵入式的生态适配器，已集成至主流核心：
+### A. Mihomo (Clash.Meta) 客户端 4 种模式节点
 
-### A. Mihomo (Clash.Meta) 客户端配置
-在 `config.yaml` 的 `proxies` 列表中直接配置 `type: chitanda`：
+在 Mihomo `config.yaml` 的 `proxies` 列表中直接配置：
 
 ```yaml
 proxies:
-  # 1. 默认推荐：TLS 1.3 + HTTP/2 流复用主线
-  - name: "Tokyo-Chitanda-H2"
+  # 模式 1: H2 多路复用主线模式 (TLS 1.3 + HTTP/2 流复用) - 默认推荐
+  - name: "Chitanda-H2-Tokyo"
     type: chitanda
-    server: 1.2.3.4
+    server: jp.example.com
     port: 443
     psk: "your-32-byte-secure-pre-shared-key-here"
     path: "/api/v1/sync"
-    transport: "h2" # 模式: "h2", "h3", "auto", "h1"
-    sni: "status.chitanda.org"
+    transport: "h2"
+    sni: "jp.example.com"
     pool-size: 4
     udp: true
 
-  # 2. 免证书 / 纯 IP 实验通道 (H1)
-  - name: "Direct-IP-Chitanda-H1"
+  # 模式 2: H3 原生 QUIC 模式 (HTTP/3 0-RTT + 0 队头阻塞)
+  - name: "Chitanda-H3-Tokyo"
     type: chitanda
-    server: 1.2.3.4
-    port: 18200
+    server: jp.example.com
+    port: 443
     psk: "your-32-byte-secure-pre-shared-key-here"
     path: "/api/v1/sync"
+    transport: "h3"
+    sni: "jp.example.com"
+    udp: true
+
+  # 模式 3: Auto 智能探测与自愈容灾模式 (H2 主线 + 嗅探降级 H3)
+  - name: "Chitanda-Auto-Tokyo"
+    type: chitanda
+    server: jp.example.com
+    port: 443
+    psk: "your-32-byte-secure-pre-shared-key-here"
+    path: "/api/v1/sync"
+    transport: "auto"
+    sni: "jp.example.com"
+    pool-size: 4
+    udp: true
+
+  # 模式 4: H1 纯 IP 免证书实验模式 (全双工 HTTP/1.1 AEAD + Plain-UDP)
+  - name: "Chitanda-H1-DirectIP"
+    type: chitanda
+    server: 203.0.113.88
+    port: 18200
+    psk: "your-32-byte-secure-pre-shared-key-here"
+    path: "/gateway/stream/v2"
     transport: "h1"
     udp: true
 ```
 
-### B. Xray-core 服务端与出站配置
-在 Xray-core `config.json` 中配置 `chitanda` 协议：
+完整配置文件模板见 **[examples/mihomo/config.yaml](examples/mihomo/config.yaml)**。
 
+---
+
+### B. Xray-core 服务端与客户端 4 种模式
+
+#### 1) 服务端入站配置 (`inbounds`)
 ```json
 {
   "inbounds": [
     {
+      "tag": "chitanda-h2-in",
       "port": 443,
       "protocol": "chitanda",
       "settings": {
         "psk": "your-32-byte-secure-pre-shared-key-here",
         "path": "/api/v1/sync",
         "transport": "h2",
+        "strict_sni": "jp.example.com",
         "fallback": "127.0.0.1:8080"
       },
       "streamSettings": {
         "security": "tls",
         "tlsSettings": {
-          "certificates": [
-            {
-              "certificateFile": "/etc/ssl/chitanda.crt",
-              "keyFile": "/etc/ssl/chitanda.key"
-            }
-          ]
+          "certificates": [{ "certificateFile": "/etc/ssl/cert.pem", "keyFile": "/etc/ssl/key.pem" }]
         }
+      }
+    },
+    {
+      "tag": "chitanda-h1-in",
+      "port": 18200,
+      "protocol": "chitanda",
+      "settings": {
+        "psk": "your-32-byte-secure-pre-shared-key-here",
+        "path": "/gateway/stream/v2",
+        "transport": "h1",
+        "fallback": "127.0.0.1:80"
+      },
+      "streamSettings": { "security": "none" }
+    }
+  ]
+}
+```
+
+#### 2) 客户端出站配置 (`outbounds`)
+```json
+{
+  "outbounds": [
+    {
+      "tag": "chitanda-h2-out",
+      "protocol": "chitanda",
+      "settings": {
+        "server": "jp.example.com:443",
+        "server_name": "jp.example.com",
+        "psk": "your-32-byte-secure-pre-shared-key-here",
+        "path": "/api/v1/sync",
+        "transport": "h2",
+        "pool_size": 4
+      }
+    },
+    {
+      "tag": "chitanda-h3-out",
+      "protocol": "chitanda",
+      "settings": {
+        "server": "jp.example.com:443",
+        "server_name": "jp.example.com",
+        "psk": "your-32-byte-secure-pre-shared-key-here",
+        "path": "/api/v1/sync",
+        "transport": "h3"
+      }
+    },
+    {
+      "tag": "chitanda-auto-out",
+      "protocol": "chitanda",
+      "settings": {
+        "server": "jp.example.com:443",
+        "server_name": "jp.example.com",
+        "psk": "your-32-byte-secure-pre-shared-key-here",
+        "path": "/api/v1/sync",
+        "transport": "auto",
+        "pool_size": 4
+      }
+    },
+    {
+      "tag": "chitanda-h1-out",
+      "protocol": "chitanda",
+      "settings": {
+        "server": "203.0.113.88:18200",
+        "psk": "your-32-byte-secure-pre-shared-key-here",
+        "path": "/gateway/stream/v2",
+        "transport": "h1"
       }
     }
   ]
 }
 ```
+
+完整服务端与客户端 JSON 见 **[examples/xray/server_all_modes.json](examples/xray/server_all_modes.json)** 与 **[examples/xray/client_all_modes.json](examples/xray/client_all_modes.json)**。
 
 ---
 
@@ -195,7 +289,9 @@ proxies:
 通过本仓库的 GitHub Actions (`.github/workflows/upstream-sync-build.yml`)：
 1. **自动监控**：每日自动轮询 `XTLS/Xray-core` 与 `MetaCubeX/mihomo` 的最新 Release Tag；
 2. **动态注入**：自动执行 `scripts/inject-xray.py` 与 `scripts/inject-mihomo.py` 完成无侵入适配器挂载；
-3. **全平台发布**：自动编译 Windows / Linux / macOS / Android 多架构二进制并直接发布到本仓库的 GitHub Releases。
+3. **全平台发布**：自动编译 Windows / Linux / macOS 多架构二进制并直接发布到本仓库的 [GitHub Releases](https://github.com/violetaini/chitanda/releases)。
+
+---
 
 ## 6. 构建与验证
 

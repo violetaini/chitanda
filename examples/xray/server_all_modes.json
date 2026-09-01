@@ -1,0 +1,55 @@
+{
+  "log": {
+    "loglevel": "warning"
+  },
+  "inbounds": [
+    {
+      "tag": "inbound-h2-production",
+      "port": 443,
+      "protocol": "chitanda",
+      "settings": {
+        "psk": "super-secure-pre-shared-key-sample-token",
+        "path": "/api/v1/sync",
+        "transport": "h2",
+        "strict_sni": "jp.example.com",
+        "fallback": "127.0.0.1:8080"
+      },
+      "streamSettings": {
+        "security": "tls",
+        "tlsSettings": {
+          "certificates": [
+            {
+              "certificateFile": "/etc/ssl/chitanda/fullchain.cer",
+              "keyFile": "/etc/ssl/chitanda/private.key"
+            }
+          ],
+          "alpn": ["h2", "http/1.1"]
+        }
+      }
+    },
+    {
+      "tag": "inbound-h1-direct-ip",
+      "port": 18200,
+      "protocol": "chitanda",
+      "settings": {
+        "psk": "super-secure-pre-shared-key-sample-token",
+        "path": "/gateway/stream/v2",
+        "transport": "h1",
+        "fallback": "127.0.0.1:80"
+      },
+      "streamSettings": {
+        "security": "none"
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "direct",
+      "protocol": "freedom"
+    },
+    {
+      "tag": "blocked",
+      "protocol": "blackhole"
+    }
+  ]
+}

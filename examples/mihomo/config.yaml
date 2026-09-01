@@ -1,0 +1,108 @@
+# Mihomo (Clash.Meta) - Chitanda 完整全模式配置文件
+port: 7890
+socks-port: 7891
+allow-lan: false
+mode: rule
+log-level: info
+ipv6: false
+
+dns:
+  enable: true
+  listen: 0.0.0.0:1053
+  enhanced-mode: fake-ip
+  fake-ip-range: 198.18.0.1/16
+  nameserver:
+    - 223.5.5.5
+    - 119.29.29.29
+  fallback:
+    - 8.8.8.8
+    - 1.1.1.1
+
+proxies:
+  # -------------------------------------------------------------
+  # 模式 1: H2 多路复用主线模式 (TLS 1.3 + HTTP/2 流复用) - 默认推荐
+  # -------------------------------------------------------------
+  - name: "Chitanda-01-H2-Tokyo"
+    type: chitanda
+    server: jp.example.com
+    port: 443
+    psk: "super-secure-pre-shared-key-sample-token"
+    path: "/api/v1/sync"
+    transport: "h2"
+    sni: "jp.example.com"
+    pool-size: 4
+    udp: true
+
+  # -------------------------------------------------------------
+  # 模式 2: H3 原生 QUIC 模式 (HTTP/3 0-RTT + 0 队头阻塞)
+  # -------------------------------------------------------------
+  - name: "Chitanda-02-H3-Tokyo"
+    type: chitanda
+    server: jp.example.com
+    port: 443
+    psk: "super-secure-pre-shared-key-sample-token"
+    path: "/api/v1/sync"
+    transport: "h3"
+    sni: "jp.example.com"
+    udp: true
+
+  # -------------------------------------------------------------
+  # 模式 3: Auto 智能自愈模式 (H2 主线 + 动态嗅探故障平滑降级 H3)
+  # -------------------------------------------------------------
+  - name: "Chitanda-03-Auto-Tokyo"
+    type: chitanda
+    server: jp.example.com
+    port: 443
+    psk: "super-secure-pre-shared-key-sample-token"
+    path: "/api/v1/sync"
+    transport: "auto"
+    sni: "jp.example.com"
+    pool-size: 4
+    udp: true
+
+  # -------------------------------------------------------------
+  # 模式 4: H1 纯 IP 免证书实验模式 (全双工 HTTP/1.1 AEAD + Plain-UDP)
+  # -------------------------------------------------------------
+  - name: "Chitanda-04-H1-DirectIP"
+    type: chitanda
+    server: 203.0.113.88
+    port: 18200
+    psk: "super-secure-pre-shared-key-sample-token"
+    path: "/gateway/stream/v2"
+    transport: "h1"
+    udp: true
+
+proxy-groups:
+  - name: "PROXIES"
+    type: select
+    proxies:
+      - "AUTO-FALLBACK"
+      - "Chitanda-01-H2-Tokyo"
+      - "Chitanda-02-H3-Tokyo"
+      - "Chitanda-03-Auto-Tokyo"
+      - "Chitanda-04-H1-DirectIP"
+      - DIRECT
+
+  - name: "AUTO-FALLBACK"
+    type: fallback
+    url: "http://www.gstatic.com/generate_204"
+    interval: 300
+    proxies:
+      - "Chitanda-01-H2-Tokyo"
+      - "Chitanda-02-H3-Tokyo"
+      - "Chitanda-03-Auto-Tokyo"
+      - "Chitanda-04-H1-DirectIP"
+
+  - name: "LOAD-BALANCE"
+    type: load-balance
+    url: "http://www.gstatic.com/generate_204"
+    interval: 300
+    proxies:
+      - "Chitanda-01-H2-Tokyo"
+      - "Chitanda-02-H3-Tokyo"
+      - "Chitanda-03-Auto-Tokyo"
+
+rules:
+  - GEOIP,LAN,DIRECT
+  - GEOIP,CN,DIRECT
+  - MATCH,PROXIES

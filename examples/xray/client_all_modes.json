@@ -1,0 +1,93 @@
+{
+  "log": {
+    "loglevel": "warning"
+  },
+  "inbounds": [
+    {
+      "tag": "socks-in",
+      "port": 10808,
+      "listen": "127.0.0.1",
+      "protocol": "socks",
+      "settings": {
+        "udp": true
+      }
+    },
+    {
+      "tag": "http-in",
+      "port": 10809,
+      "listen": "127.0.0.1",
+      "protocol": "http"
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "chitanda-h2",
+      "protocol": "chitanda",
+      "settings": {
+        "server": "jp.example.com:443",
+        "server_name": "jp.example.com",
+        "psk": "super-secure-pre-shared-key-sample-token",
+        "path": "/api/v1/sync",
+        "transport": "h2",
+        "pool_size": 4
+      }
+    },
+    {
+      "tag": "chitanda-h3",
+      "protocol": "chitanda",
+      "settings": {
+        "server": "jp.example.com:443",
+        "server_name": "jp.example.com",
+        "psk": "super-secure-pre-shared-key-sample-token",
+        "path": "/api/v1/sync",
+        "transport": "h3"
+      }
+    },
+    {
+      "tag": "chitanda-auto",
+      "protocol": "chitanda",
+      "settings": {
+        "server": "jp.example.com:443",
+        "server_name": "jp.example.com",
+        "psk": "super-secure-pre-shared-key-sample-token",
+        "path": "/api/v1/sync",
+        "transport": "auto",
+        "pool_size": 4
+      }
+    },
+    {
+      "tag": "chitanda-h1",
+      "protocol": "chitanda",
+      "settings": {
+        "server": "203.0.113.88:18200",
+        "psk": "super-secure-pre-shared-key-sample-token",
+        "path": "/gateway/stream/v2",
+        "transport": "h1"
+      }
+    },
+    {
+      "tag": "direct",
+      "protocol": "freedom"
+    }
+  ],
+  "routing": {
+    "domainStrategy": "IPIfNonMatch",
+    "rules": [
+      {
+        "type": "field",
+        "ip": ["geoip:private", "geoip:cn"],
+        "outboundTag": "direct"
+      },
+      {
+        "type": "field",
+        "domain": ["geosite:cn"],
+        "outboundTag": "direct"
+      },
+      {
+        "type": "field",
+        "network": "tcp,udp",
+        "outboundTag": "chitanda-h2"
+      }
+    ]
+  }
+}
