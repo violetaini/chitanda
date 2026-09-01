@@ -289,5 +289,5 @@ func loadPath(value, pathFile string) (string, error) {
 
 func init() {
 	log.SetFlags(log.Ldate | log.Ltime | log.LUTC | log.Lmsgprefix)
-	log.SetPrefix("myxray-client: ")
+	log.SetPrefix("chitanda-client: ")
 }

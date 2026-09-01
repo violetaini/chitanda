@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"sync"
 
-	"myxray/pkg/client"
+	"chitanda/pkg/client"
 
 	N "github.com/metacubex/mihomo/common/net"
 	C "github.com/metacubex/mihomo/constant"

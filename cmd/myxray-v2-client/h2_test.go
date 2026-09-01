@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"myxray/internal/auth"
-	"myxray/internal/frame"
+	"chitanda/internal/auth"
+	"chitanda/internal/frame"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)

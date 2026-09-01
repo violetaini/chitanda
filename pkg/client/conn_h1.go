@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"myxray/internal/h1session"
+	"chitanda/internal/h1session"
 )
 
 type plainH1Conn struct {

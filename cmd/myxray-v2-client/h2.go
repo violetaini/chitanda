@@ -15,8 +15,8 @@ import (
 
 	"golang.org/x/net/http2"
 
-	"myxray/internal/auth"
-	"myxray/internal/socks5"
+	"chitanda/internal/auth"
+	"chitanda/internal/socks5"
 )
 
 type h2Client struct {

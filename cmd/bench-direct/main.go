@@ -17,8 +17,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"myxray/internal/auth"
-	"myxray/pkg/client"
+	"chitanda/internal/auth"
+	"chitanda/pkg/client"
 )
 
 func main() {

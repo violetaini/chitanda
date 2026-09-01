@@ -12,7 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"myxray/internal/auth"
+	"chitanda/internal/auth"
 )
 
 type h2Prober struct {

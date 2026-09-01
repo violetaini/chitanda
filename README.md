@@ -1,6 +1,6 @@
-# MyXray 私有传输协议
+# Chitanda (千反田) 私有传输协议
 
-MyXray 是一个面向自有服务端部署的高性能、抗探测 Go 代理传输协议。项目提供模块化服务端、可嵌入的客户端 SDK（提供标准 `net.Conn` 与 `net.PacketConn` 接口）及直连基准测试工具。
+Chitanda 是一个面向自有服务端部署的高性能、抗探测 Go 代理传输协议。项目提供模块化服务端、可嵌入的客户端 SDK（提供标准 `net.Conn` 与 `net.PacketConn` 接口）及直连基准测试工具。
 
 当前主线支持 **4 种传输载荷模式（Transport Carriers）**：以 **`h2` (TLS 1.3 + HTTP/2 多路复用)** 作为主线默认推荐，同时提供 **`h3`**、**`auto`** 与免证书纯 IP 模式 **`h1`**（别名 `plain-h1`）。
 
@@ -22,7 +22,7 @@ MyXray 是一个面向自有服务端部署的高性能、抗探测 Go 代理传
                      │                                                       │
                      └───────────────────────────┬───────────────────────────┘
                                                  ▼
-                                         cmd/myxray-server
+                                         cmd/chitanda-server
 ```
 
 | 模式 | TCP 承载机制 | UDP 承载机制 | 0-RTT 支持 | 核心特征与适用场景 |
@@ -81,7 +81,7 @@ import (
 	"net"
 	"time"
 
-	"myxray/pkg/client"
+	"chitanda/pkg/client"
 )
 
 func main() {
@@ -204,8 +204,8 @@ proxies:
 go test -count=1 -v ./...
 
 # 编译 Linux ARM64 生产二进制
-CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o bin/myxray-server ./cmd/myxray-server
-CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o bin/myxray-client ./cmd/myxray-client
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o bin/chitanda-server ./cmd/chitanda-server
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o bin/chitanda-client ./cmd/chitanda-client
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o bin/bench-direct ./cmd/bench-direct
 ```
 

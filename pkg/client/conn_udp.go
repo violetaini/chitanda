@@ -14,9 +14,9 @@ import (
 	quic "github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 
-	"myxray/internal/frame"
-	"myxray/internal/quicconfig"
-	"myxray/internal/sessioncache"
+	"chitanda/internal/frame"
+	"chitanda/internal/quicconfig"
+	"chitanda/internal/sessioncache"
 )
 
 type h3Connection struct {

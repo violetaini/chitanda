@@ -35,11 +35,11 @@ def inject_xray(xray_dir, myxray_dir):
             content = f.read()
         if 'myxray' not in content:
             abs_myxray = os.path.abspath(myxray_dir).replace('\\', '/')
-            content += f"\nreplace myxray => {abs_myxray}\n"
-            content += "\nrequire myxray v0.0.0-unpublished\n"
+            content += f"\nreplace chitanda => {abs_myxray}\n"
+            content += "\nrequire chitanda v0.0.0-unpublished\n"
             with open(go_mod, "w", encoding="utf-8") as f:
                 f.write(content)
-            print(f"  [+] Patched {go_mod} with replace myxray => {abs_myxray}")
+            print(f"  [+] Patched {go_mod} with replace chitanda => {abs_myxray}")
             
     print("[*] Injection into Xray-core completed successfully!")
 

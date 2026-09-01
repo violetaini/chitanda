@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"myxray/internal/auth"
-	"myxray/internal/plainudp"
+	"chitanda/internal/auth"
+	"chitanda/internal/plainudp"
 )
 
 func TestServerAuthorizationAndReplay(t *testing.T) {

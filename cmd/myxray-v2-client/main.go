@@ -25,11 +25,11 @@ import (
 	"github.com/quic-go/quic-go/http3"
 	"golang.org/x/net/ipv4"
 
-	"myxray/internal/auth"
-	"myxray/internal/frame"
-	"myxray/internal/quicconfig"
-	"myxray/internal/sessioncache"
-	"myxray/internal/socks5"
+	"chitanda/internal/auth"
+	"chitanda/internal/frame"
+	"chitanda/internal/quicconfig"
+	"chitanda/internal/sessioncache"
+	"chitanda/internal/socks5"
 )
 
 const (

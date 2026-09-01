@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"myxray/internal/frame"
+	"chitanda/internal/frame"
 )
 
 func TestPlainUDPRoundTripAndReplay(t *testing.T) {

@@ -12,10 +12,10 @@ import (
 	"sync"
 	"time"
 
-	"myxray/internal/auth"
-	"myxray/internal/frame"
-	"myxray/internal/h1session"
-	"myxray/internal/target"
+	"chitanda/internal/auth"
+	"chitanda/internal/frame"
+	"chitanda/internal/h1session"
+	"chitanda/internal/target"
 )
 
 var copyBufferPool = sync.Pool{

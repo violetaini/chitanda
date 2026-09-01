@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"sync"
 
-	"myxray/pkg/server"
+	"chitanda/pkg/server"
 
 	"github.com/xtls/xray-core/common"
 	xnet "github.com/xtls/xray-core/common/net"

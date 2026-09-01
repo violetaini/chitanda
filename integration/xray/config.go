@@ -1,8 +1,8 @@
 package chitanda
 
 import (
-	"myxray/pkg/client"
-	"myxray/pkg/server"
+	"chitanda/pkg/client"
+	"chitanda/pkg/server"
 )
 
 // InboundConfig specifies configuration for Chitanda inbound proxy

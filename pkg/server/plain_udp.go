@@ -8,9 +8,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"myxray/internal/frame"
-	"myxray/internal/plainudp"
-	"myxray/internal/target"
+	"chitanda/internal/frame"
+	"chitanda/internal/plainudp"
+	"chitanda/internal/target"
 )
 
 const (

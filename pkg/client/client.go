@@ -17,9 +17,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"myxray/internal/auth"
-	"myxray/internal/quicconfig"
-	"myxray/internal/sessioncache"
+	"chitanda/internal/auth"
+	"chitanda/internal/quicconfig"
+	"chitanda/internal/sessioncache"
 )
 
 const (

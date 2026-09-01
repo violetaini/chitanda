@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"myxray/internal/auth"
-	"myxray/pkg/server"
+	"chitanda/internal/auth"
+	"chitanda/pkg/server"
 )
 
 func TestConfigValidation(t *testing.T) {

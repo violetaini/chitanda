@@ -11,8 +11,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"myxray/internal/frame"
-	"myxray/internal/plainudp"
+	"chitanda/internal/frame"
+	"chitanda/internal/plainudp"
 )
 
 type plainUDPConn struct {

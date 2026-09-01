@@ -43,7 +43,7 @@ func main() {
 		AllowPrivateTargets:   *allowPrivateTargets,
 	}
 
-	log.Printf("Starting myxray-server componentized version...")
+	log.Printf("Starting chitanda-server componentized version...")
 	if err := server.Run(cfg, *listen, *adminListen, *quicListen); err != nil {
 		log.Fatalf("Server exited with error: %v", err)
 	}
@@ -51,5 +51,5 @@ func main() {
 
 func init() {
 	log.SetFlags(log.Ldate | log.Ltime | log.LUTC | log.Lmsgprefix)
-	log.SetPrefix("myxray-server: ")
+	log.SetPrefix("chitanda-server: ")
 }

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"myxray/internal/auth"
+	"chitanda/internal/auth"
 )
 
 // Config represents the server configuration parameters.

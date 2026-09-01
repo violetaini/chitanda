@@ -1,4 +1,4 @@
-module myxray
+module chitanda
 
 go 1.25.0
 
