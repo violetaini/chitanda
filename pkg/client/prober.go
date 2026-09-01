@@ -83,9 +83,11 @@ func (p *h2Prober) pingH2() (time.Duration, error) {
 	nonce := base64.RawURLEncoding.EncodeToString(nonceBytes)
 	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
 
+	// Explicitly set HeaderMode to ModeTCPv2 and sign with ModeTCPv2
+	req.Header.Set(HeaderMode, ModeTCPv2)
 	req.Header.Set(HeaderTimestamp, timestamp)
 	req.Header.Set(HeaderNonce, nonce)
-	req.Header.Set(HeaderSignature, auth.Signature(p.client.cfg.PSK, "", http.MethodHead, p.client.cfg.Path, "", timestamp, nonce))
+	req.Header.Set(HeaderSignature, auth.Signature(p.client.cfg.PSK, ModeTCPv2, http.MethodHead, p.client.cfg.Path, "", timestamp, nonce))
 
 	start := time.Now()
 	resp, err := h2Cli.transport.RoundTrip(req)
@@ -93,8 +95,11 @@ func (p *h2Prober) pingH2() (time.Duration, error) {
 		return 0, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("probe status %d", resp.StatusCode)
+
+	// Prober MUST ONLY accept 204 No Content with valid X-Session-OK header.
+	// Falling back to a 200 decoy website is strictly treated as a probe failure!
+	if resp.StatusCode != http.StatusNoContent || resp.Header.Get("X-Session-OK") != "1" {
+		return 0, fmt.Errorf("probe rejected: status=%d, session_ok=%q", resp.StatusCode, resp.Header.Get("X-Session-OK"))
 	}
 	return time.Since(start), nil
 }

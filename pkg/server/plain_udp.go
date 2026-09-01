@@ -13,6 +13,11 @@ import (
 	"myxray/internal/target"
 )
 
+const (
+	DefaultUDPWorkerQueueSize = 256
+	DefaultUDPMemoryBudget    = 64 << 20 // 64 MB maximum in-flight datagram memory budget
+)
+
 var udpTaskPool = sync.Pool{
 	New: func() any {
 		b := make([]byte, 64<<10)
@@ -26,16 +31,20 @@ type udpTask struct {
 	targetAddr string
 	payload    []byte
 	rawBuf     *[]byte
+	rawLen     int
 	seq        uint64
 }
 
 type PlainUDPServer struct {
-	codec      *plainudp.Codec
-	conn       *net.UDPConn
-	sessions   sync.Map // uint64(sessionID) -> *plainUDPSession
-	workers    []chan udpTask
-	resolveUDP func(ctx context.Context, address string) (*net.UDPAddr, error)
-	closed     atomic.Bool
+	codec        *plainudp.Codec
+	conn         *net.UDPConn
+	sessions     sync.Map // uint64(sessionID) -> *plainUDPSession
+	workers      []chan udpTask
+	workerWg     sync.WaitGroup
+	resolveUDP   func(ctx context.Context, address string) (*net.UDPAddr, error)
+	closed       atomic.Bool
+	inFlightMem  atomic.Int64
+	maxMemBudget int64
 }
 
 type plainUDPSession struct {
@@ -47,7 +56,7 @@ type plainUDPSession struct {
 	replay     frame.ReplayWindow
 }
 
-// NewPlainUDPServer creates a new plain-udp listener with a bounded worker pool.
+// NewPlainUDPServer creates a new plain-udp listener with a bounded worker pool and memory budget.
 func NewPlainUDPServer(conn *net.UDPConn, psk []byte) (*PlainUDPServer, error) {
 	_ = conn.SetReadBuffer(8 << 20)
 	_ = conn.SetWriteBuffer(8 << 20)
@@ -63,14 +72,15 @@ func NewPlainUDPServer(conn *net.UDPConn, psk []byte) (*PlainUDPServer, error) {
 	}
 	workers := make([]chan udpTask, numWorkers)
 	for i := range workers {
-		workers[i] = make(chan udpTask, 1024)
+		workers[i] = make(chan udpTask, DefaultUDPWorkerQueueSize)
 	}
 
 	return &PlainUDPServer{
-		codec:      codec,
-		conn:       conn,
-		workers:    workers,
-		resolveUDP: target.ResolveUDPAddr,
+		codec:        codec,
+		conn:         conn,
+		workers:      workers,
+		maxMemBudget: DefaultUDPMemoryBudget,
+		resolveUDP:   target.ResolveUDPAddr,
 	}, nil
 }
 
@@ -81,30 +91,42 @@ func (s *PlainUDPServer) SetResolveUDPForTest(fn func(ctx context.Context, addre
 
 // Serve starts the worker pool and the UDP packet read loop.
 func (s *PlainUDPServer) Serve(ctx context.Context) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	go s.cleaner(ctx)
 
 	for i, ch := range s.workers {
+		s.workerWg.Add(1)
 		go s.workerLoop(ctx, i, ch)
 	}
 
 	for {
 		if s.closed.Load() || ctx.Err() != nil {
-			return nil
+			break
 		}
 
 		rawBufPtr := udpTaskPool.Get().(*[]byte)
 		n, clientAddr, err := s.conn.ReadFromUDP(*rawBufPtr)
 		if err != nil {
 			udpTaskPool.Put(rawBufPtr)
-			if s.closed.Load() {
-				return nil
+			if s.closed.Load() || ctx.Err() != nil {
+				break
 			}
 			return err
+		}
+
+		// Enforce strict memory budget (64MB max)
+		if s.inFlightMem.Add(int64(n)) > s.maxMemBudget {
+			s.inFlightMem.Add(-int64(n))
+			udpTaskPool.Put(rawBufPtr)
+			continue // Drop under memory pressure
 		}
 
 		now := time.Now()
 		sessionID, targetAddr, payload, _, seq, err := s.codec.DecodePacket((*rawBufPtr)[:n], now)
 		if err != nil {
+			s.inFlightMem.Add(-int64(n))
 			udpTaskPool.Put(rawBufPtr)
 			continue // Drop invalid / tampered / expired packets
 		}
@@ -116,28 +138,41 @@ func (s *PlainUDPServer) Serve(ctx context.Context) error {
 			targetAddr: targetAddr,
 			payload:    payload,
 			rawBuf:     rawBufPtr,
+			rawLen:     n,
 			seq:        seq,
 		}
 
 		select {
 		case s.workers[workerIdx] <- task:
 		default:
-			// Under extreme burst load, drop packet and recycle buffer
+			// Under extreme burst load, drop packet, decrement memory budget, and recycle buffer
+			s.inFlightMem.Add(-int64(n))
 			udpTaskPool.Put(rawBufPtr)
 		}
 	}
+
+	s.workerWg.Wait()
+	return nil
 }
 
 func (s *PlainUDPServer) workerLoop(ctx context.Context, workerID int, tasks <-chan udpTask) {
+	defer s.workerWg.Done()
 	for {
 		select {
 		case <-ctx.Done():
-			return
-		case task, ok := <-tasks:
-			if !ok {
-				return
+			// Drain remaining tasks on shutdown
+			for {
+				select {
+				case task := <-tasks:
+					s.inFlightMem.Add(-int64(task.rawLen))
+					udpTaskPool.Put(task.rawBuf)
+				default:
+					return
+				}
 			}
+		case task := <-tasks:
 			s.processTask(ctx, task)
+			s.inFlightMem.Add(-int64(task.rawLen))
 			udpTaskPool.Put(task.rawBuf)
 		}
 	}
@@ -149,8 +184,7 @@ func (s *PlainUDPServer) processTask(ctx context.Context, task udpTask) {
 	})
 	session := val.(*plainUDPSession)
 
-	// 1. Anti-Replay verification MUST succeed BEFORE updating clientAddr
-	// This prevents an attacker from replaying old packets from spoofed IPs to hijack reverse traffic!
+	// Anti-Replay verification MUST succeed BEFORE updating clientAddr
 	session.replayMu.Lock()
 	accepted := session.replay.Accept(task.seq)
 	session.replayMu.Unlock()
@@ -244,12 +278,11 @@ func (s *PlainUDPServer) cleaner(ctx context.Context) {
 }
 
 func (s *PlainUDPServer) Close() error {
-	s.closed.Store(true)
+	if !s.closed.CompareAndSwap(false, true) {
+		return nil
+	}
 	if s.conn != nil {
 		_ = s.conn.Close()
-	}
-	for _, ch := range s.workers {
-		close(ch)
 	}
 	s.sessions.Range(func(key, value any) bool {
 		session := value.(*plainUDPSession)
