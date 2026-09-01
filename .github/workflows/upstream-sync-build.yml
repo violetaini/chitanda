@@ -18,14 +18,17 @@ jobs:
   check-and-build:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         include:
           - target: "mihomo"
             repo: "MetaCubeX/mihomo"
             name_prefix: "mihomo-chitanda"
+            pkg_path: "."
           - target: "xray"
             repo: "XTLS/Xray-core"
             name_prefix: "xray-chitanda"
+            pkg_path: "./main"
 
     steps:
       - name: Checkout Chitanda Core Repository
@@ -92,9 +95,9 @@ jobs:
             if [ "$GOOS" == "windows" ]; then EXT=".exe"; fi
             
             OUTPUT_NAME="${{ matrix.name_prefix }}-${{ steps.upstream_check.outputs.upstream_tag }}-${GOOS}-${GOARCH}${EXT}"
-            echo "Building $OUTPUT_NAME..."
+            echo "Building $OUTPUT_NAME using ${{ matrix.pkg_path }}..."
             
-            CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH go build -trimpath -ldflags="-s -w" -o "../dist/$OUTPUT_NAME" .
+            CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH go build -trimpath -ldflags="-s -w" -o "../dist/$OUTPUT_NAME" ${{ matrix.pkg_path }}
             
             # Create tar.gz / zip
             cd ../dist
