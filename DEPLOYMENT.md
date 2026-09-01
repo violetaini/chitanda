@@ -109,3 +109,28 @@ Measured between the two test nodes, whose raw RTT was about 100 ms and iperf3 t
 | **Native UDP Datagram (Sink Delivery)** | Offered 400 Mbps, 5s | **295.66 Mbps** (123,881 pkts) | **6.26%** |
 
 The 16 MiB HTTP/2 stream window is intentionally a build-time vendored change. It removes the default 4 MiB long-haul throughput ceiling while leaving TLS and HTTP/2 framing in mature libraries. See `TEST_REPORT.md` for full benchmark details.
+
+## Plain 模式独立部署说明 (Plain-H1 & Plain-UDP)
+
+在不需要 TLS 证书、或者纯 IP 敏感场景下，可以直接启动免证书纯 IP 服务：
+
+### 服务端启动命令 (无证书纯 IP 模式)
+```sh
+./myxray-server \
+  -listen=:18200 \
+  -admin-listen=127.0.0.1:18201 \
+  -path=/api/v1/private-sync-gateway \
+  -psk-file=/etc/myxray/psk.key \
+  -replay-file=/var/lib/myxray/replay_plain.log
+```
+*(注意：在无证书模式下，无需指定 `-cert` 和 `-key` 参数，服务端会自动以原生 HTTP/1.1 全双工与 Plain-UDP 数据报模式运行。)*
+
+### 客户端 SDK 配置示例
+```go
+cli, err := client.New(client.Config{
+    Server:       "168.138.209.1:18200",
+    PSK:          pskBytes,
+    Path:         "/api/v1/private-sync-gateway",
+    TCPTransport: client.TCPTransportPlainH1, // 启用 Plain-H1 + Plain-UDP
+})
+```
