@@ -52,7 +52,7 @@ type Config struct {
 	ServerName            string // e.g. "status.chitanda.org"
 	PSK                   []byte // 32+ bytes PSK
 	Path                  string // e.g. "/your-private-path"
-	TCPTransport          string // "h2" (default), "auto", "h3", or "plain-h1"
+	TCPTransport          string // "h2" (default), "auto", "h3", or "h1" (alias: "plain-h1")
 	TCPPoolSize           int    // Number of independent physical TCP carriers (H2 or H3, default 4)
 	SessionCacheFile      string // optional persistent session cache path
 	QUICInitialPacketSize uint16 // 1200 - 1452, default 1452
@@ -76,7 +76,7 @@ type Client struct {
 func New(cfg Config) (*Client, error) {
 	if cfg.TCPTransport == TCPTransportPlainH1 || cfg.TCPTransport == TCPTransportH1 {
 		if cfg.Server == "" || len(cfg.PSK) < 32 || cfg.Path == "" {
-			return nil, errors.New("server, path, and valid PSK (>=32 bytes) are required for plain-h1")
+			return nil, errors.New("server, path, and valid PSK (>=32 bytes) are required for h1")
 		}
 		if cfg.ServerName == "" {
 			cfg.ServerName = cfg.Server
@@ -90,7 +90,7 @@ func New(cfg Config) (*Client, error) {
 		cfg.TCPTransport = DefaultTCPTransport
 	}
 	if cfg.TCPTransport != TCPTransportH2 && cfg.TCPTransport != TCPTransportAuto && cfg.TCPTransport != TCPTransportH3 && cfg.TCPTransport != TCPTransportPlainH1 && cfg.TCPTransport != TCPTransportH1 {
-		return nil, fmt.Errorf("invalid tcp transport %q: must be h2, auto, h3, or plain-h1", cfg.TCPTransport)
+		return nil, fmt.Errorf("invalid tcp transport %q: must be h2, auto, h3, or h1", cfg.TCPTransport)
 	}
 	if cfg.TCPPoolSize <= 0 {
 		cfg.TCPPoolSize = DefaultTCPPoolSize

@@ -1,6 +1,6 @@
 # MyXray 四种传输模式规范 (Transport Modes Specification)
 
-MyXray 通过 `TCPTransport` 提供 `h2`、`h3`、`auto`、`plain-h1` 四种传输载荷模式。
+MyXray 通过 `TCPTransport` 提供 `h2`、`h3`、`auto`、`h1` (plain-h1) 四种传输载荷模式。
 
 本文档详细规范各模式的数据路径、密码学模型、故障切换与安全边界。
 
@@ -13,7 +13,7 @@ MyXray 通过 `TCPTransport` 提供 `h2`、`h3`、`auto`、`plain-h1` 四种传�
 | **`h2`** *(默认)* | TLS 1.3 / HTTP/2 连接池流复用 | H3 / QUIC Datagram | ✅ (连接复用 0-RTT) | 必须配置域名与有效证书 | **生产主线推荐**：低 CPU 开销、极高吞吐、主流 TLS 伪装 |
 | **`h3`** | TLS 1.3 / QUIC Stream / HTTP/3 | H3 / QUIC Datagram | ✅ (持久化票据 0-RTT) | 必须配置域名与有效证书 | **抗弱网/丢包主线**：原生 QUIC 0 队头阻塞 |
 | **`auto`** | H2 优先 $\leftrightarrow$ 迟滞自愈 H3 | H3 / QUIC Datagram | ✅ | 必须配置域名与有效证书 | **自适应容灾**：H2 异常自动降级 H3，网络恢复自动切回 |
-| **`plain-h1`** *(别名 `h1`)* | 纯 IP HTTP/1.1 全双工 + PSK-AEAD | `plain-udp` 原生 AEAD 数据报 | ✅ (Flight 1 预派生 0-RTT) | **完全不需要** (纯 IP 直连) | **免证书实验/内网载荷**：极简无 TLS，内层 ChaCha20 加密 |
+| **`h1`** *(别名 `plain-h1`)* | 纯 IP HTTP/1.1 全双工 + PSK-AEAD | `plain-udp` 原生 AEAD 数据报 | ✅ (Flight 1 预派生 0-RTT) | **完全不需要** (纯 IP 直连) | **免证书实验/内网载荷**：极简无 TLS，内层 ChaCha20 加密 |
 
 ---
 
@@ -41,8 +41,8 @@ MyXray 通过 `TCPTransport` 提供 `h2`、`h3`、`auto`、`plain-h1` 四种传�
   4. **迟滞自愈**：当 H2 连续 10 次探测成功且 RTT <= 500ms（稳定 30 秒），解除降级状态，新建 TCP 自动切回 H2；
   5. 切换仅影响后续新建流，已有在传流保持原有连接直至自然结束。
 
-### 4. `plain-h1` / `plain-udp`：免证书纯 IP 实验载荷
-- **配置方式**：`TCPTransport: client.TCPTransportPlainH1`
+### 4. `h1` (`plain-h1`) / `plain-udp`：免证书纯 IP 实验载荷
+- **配置方式**：`TCPTransport: client.TCPTransportH1` (或 `client.TCPTransportPlainH1`)
 - **无 TLS / 纯 IP**：无需配置 `ServerName` 与证书，直连服务器 IP:Port。
 - **0-RTT 流水线机制**：
   - 客户端基于 PSK、时间戳 $T_c$ 与随机数 $N_c$ 预派生 $K_{0\text{-rtt}}$；

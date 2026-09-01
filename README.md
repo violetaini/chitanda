@@ -2,7 +2,7 @@
 
 MyXray 是一个面向自有服务端部署的高性能、抗探测 Go 代理传输协议。项目提供模块化服务端、可嵌入的客户端 SDK（提供标准 `net.Conn` 与 `net.PacketConn` 接口）及直连基准测试工具。
 
-当前主线支持 **4 种传输载荷模式（Transport Carriers）**，以 **`h2` (TLS 1.3 + HTTP/2 多路复用)** 作为主线默认推荐，同时提供 `h3`、`auto` 与免证书实验性 `plain-h1` 载荷。
+当前主线支持 **4 种传输载荷模式（Transport Carriers）**：以 **`h2` (TLS 1.3 + HTTP/2 多路复用)** 作为主线默认推荐，同时提供 **`h3`**、**`auto`** 与免证书纯 IP 模式 **`h1`**（别名 `plain-h1`）。
 
 ---
 
@@ -15,7 +15,7 @@ MyXray 是一个面向自有服务端部署的高性能、抗探测 Go 代理传
                      ┌───────────────────────────┴───────────────────────────┐
                      ▼                                                       ▼
             【TLS 域名主线模式】                                      【纯 IP / 免证书实验模式】
-      h2 (默认) / h3 / auto                                                 plain-h1
+      h2 (默认) / h3 / auto                                              h1 (plain-h1)
    ┌─────────────────┬──────────────────┐                ┌───────────────────────┬───────────────────────┐
    │ TCP: H2/H3 复用  │ UDP: H3 Datagram │                │ TCP: H1 全双工 AEAD   │ UDP: Plain-UDP Datagram│
    └─────────────────┴──────────────────┘                └───────────────────────┴───────────────────────┘
@@ -30,7 +30,7 @@ MyXray 是一个面向自有服务端部署的高性能、抗探测 Go 代理传
 | **`h2`** | TLS 1.3 + HTTP/2 流复用 | H3 QUIC Datagram (RFC 9221) | ✅ (连接池流复用 0-RTT) | **默认与主线推荐**。单/多 TCP 物理连接池化复用，吞吐极高，CPU 开销低，抗审查特征成熟。 |
 | **`h3`** | TLS 1.3 + QUIC Stream + HTTP/3 | H3 QUIC Datagram (RFC 9221) | ✅ (会话恢复 0-RTT) | 原生 QUIC 0 队头阻塞，强抗丢包与弱网抖动；支持持久化 Session Ticket 0-RTT。 |
 | **`auto`** | H2 优先 $\leftrightarrow$ 异常自愈 H3 | H3 QUIC Datagram (RFC 9221) | ✅ | 新建连接动态健康探测；TCP 受阻或丢包劣化时平滑向 H3 容灾。 |
-| **`plain-h1`** *(实验)* | 纯 IP HTTP/1.1 Chunked 全双工 + PSK-AEAD | `plain-udp` 原生 AEAD 数据报 | ✅ (Flight 1 预派生 0-RTT) | **免域名 / 免证书 / 纯 IP 实验模式**。无 TLS 开销，内层 ChaCha20-Poly1305 认证加密；外层为明文 HTTP/1.1。 |
+| **`h1`** *(实验, 别名 `plain-h1`)* | 纯 IP HTTP/1.1 全双工 + PSK-AEAD | `plain-udp` 原生 AEAD 数据报 | ✅ (Flight 1 预派生 0-RTT) | **免域名 / 免证书 / 纯 IP 实验模式**。无 TLS 开销，内层 ChaCha20-Poly1305 认证加密；外层为标准全双工 HTTP/1.1。 |
 
 ---
 
@@ -43,7 +43,7 @@ MyXray 是一个面向自有服务端部署的高性能、抗探测 Go 代理传
 - **原生 UDP 旁路**：UDP 流量通过独立的 HTTP/3 Extended CONNECT 与 QUIC Datagram 传输，配合 2048 位滑动位图抵御乱序与重放。
 - **Wire-Version 双向兼容**：服务端自适应识别现代原始流客户端与携带私有帧标记（`X-Framing: 1`）的客户端，平滑向后兼容。
 
-### B. 无 TLS 纯 IP 实验载荷 (`plain-h1` / `plain-udp`)
+### B. 无 TLS 纯 IP 实验载荷 (`h1` / `plain-udp`)
 - **标准全双工 HTTP/1.1 Carrier**：
   - 外层仅使用标准 `POST <path> HTTP/1.1` 与 `Transfer-Encoding: chunked`；
   - 彻底剥离明文 `X-Session-Target` 与自定义私有 Header，伪装为普通二进制流上传接口；
@@ -91,7 +91,7 @@ func main() {
 		ServerName:   "server.example.com",
 		PSK:          []byte("your-32-byte-secure-pre-shared-key-here"),
 		Path:         "/api/v1/sync",
-		TCPTransport: client.TCPTransportH2, // 默认推荐: "h2", 备选: "h3", "auto", "plain-h1"
+		TCPTransport: client.TCPTransportH2, // 默认推荐: "h2", 备选: "h3", "auto", "h1"
 	})
 	if err != nil {
 		log.Fatalf("Init client failed: %v", err)
@@ -141,9 +141,9 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o bin/bench-dir
 
 1. **主线与实验模式定位**：
    - `h2` / `h3` 依托 TLS 1.3 加密与标准 SNI，是审查对抗环境下的**主要生产载荷**；
-   - `plain-h1` 虽具备高吞吐与无证书直连能力，但外层为明文 HTTP/1.1，易受时序和流特征分析，**定位为纯 IP / 内网 / 免证书实验通道**，不建议作为高对抗环境下的主路由。
+   - `h1` 虽具备高吞吐与无证书直连能力，但外层为明文 HTTP/1.1，易受时序和流特征分析，**定位为纯 IP / 内网 / 免证书实验通道**，不建议作为高对抗环境下的主路由。
 2. **前向保密性说明**：
    - TLS 模式 (`h2` / `h3`) 依托 TLS 1.3 ECDHE 具备完全前向保密（PFS）；
-   - 免证书模式 (`plain-h1` / `plain-udp`) 采用预共享密钥（PSK）衍生，不具备前向保密能力。
+   - 免证书模式 (`h1` / `plain-udp`) 采用预共享密钥（PSK）衍生，不具备前向保密能力。
 3. **0-RTT 与重放安全**：
    - `plain-udp` 采用“先 AEAD 校验，后会话滑动窗口防重放”的防御体系，未认证包无法污染防重放状态。
