@@ -293,7 +293,26 @@ proxies:
 
 ---
 
-## 6. 构建与验证
+## 6. 3X-UI 面板定制版一键部署 (3X-UI v2.3.11 with Chitanda Core)
+
+本项目在专有分支 [`3x-ui`](https://github.com/violetaini/chitanda/tree/3x-ui) 中提供了定制版的 **3X-UI (v2.3.11)** 控制面板。该面板锁定了经典稳定的 v2.3.11 架构，同时将内核源与更新接口无缝指向 Chitanda Xray-core。
+
+### 一键安装部署命令
+
+在 Linux 服务器（Ubuntu / Debian / CentOS / AlmaLinux 等）以 root 权限执行：
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/violetaini/chitanda/3x-ui/install.sh)
+```
+
+### 特性与说明
+- **开箱即用**：自动完成 3X-UI 面板安装，并将底层 Xray 内核直接部署为最新的 `xray-chitanda`。
+- **在线切换内核**：进入 3X-UI Web 界面后的 **Xray 设置 $\to$ 切换版本** 功能已自动接管，指向本仓库的 GitHub Releases，可直接在线选择和热更新 Chitanda 编译的所有版本内核。
+- **多架构适配**：自动识别并适配 Linux AMD64 (`x86_64`) 与 ARM64 (`aarch64`)。
+
+---
+
+## 7. 构建与验证
 
 ```sh
 # 运行全量单元测试（包含密码学、重放攻击注入、全双工回环与 UDP 模拟）
@@ -307,7 +326,7 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o bin/bench-dir
 
 ---
 
-## 7. 技术边界与安全声明 (Threat Model & Limitations)
+## 8. 技术边界与安全声明 (Threat Model & Limitations)
 
 1. **主线与实验模式定位**：
    - `h2` / `h3` 依托 TLS 1.3 加密与标准 SNI，是审查对抗环境下的**主要生产载荷**；
