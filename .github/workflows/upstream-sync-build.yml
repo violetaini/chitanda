@@ -1,14 +1,22 @@
 name: Upstream Sync & Automated Release
 
 on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'integration/**'
+      - 'pkg/**'
+      - 'scripts/**'
+      - 'go.mod'
+      - '.github/workflows/upstream-sync-build.yml'
   schedule:
     - cron: '0 2 * * *' # Daily at 02:00 UTC
   workflow_dispatch:
     inputs:
       force_build:
-        description: 'Force build even if no new upstream release'
+        description: 'Force build and overwrite existing release assets'
         required: false
-        default: false
+        default: true
         type: boolean
 
 permissions:
@@ -34,10 +42,10 @@ jobs:
       - name: Checkout Chitanda Core Repository
         uses: actions/checkout@v4
 
-      - name: Set up Go
+      - name: Set up Go (Stable)
         uses: actions/setup-go@v5
         with:
-          go-version: '1.25'
+          go-version: 'stable'
           check-latest: true
 
       - name: Set up Python
@@ -57,11 +65,13 @@ jobs:
           
           # Check if this release tag already exists in our repo
           RELEASE_EXISTS=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" https://api.github.com/repos/${{ github.repository }}/releases/tags/${{ matrix.name_prefix }}-$LATEST_TAG | jq -r .id)
-          if [ "$RELEASE_EXISTS" != "null" ] && [ "${{ inputs.force_build }}" != "true" ]; then
-            echo "Release ${{ matrix.name_prefix }}-$LATEST_TAG already exists. Skipping build."
-            echo "should_build=false" >> $GITHUB_OUTPUT
-          else
+          
+          if [ "${{ github.event_name }}" == "push" ] || [ "${{ inputs.force_build }}" == "true" ] || [ "$RELEASE_EXISTS" == "null" ] || [ -z "$RELEASE_EXISTS" ]; then
+            echo "Triggering build for ${{ matrix.name_prefix }}-$LATEST_TAG (Event: ${{ github.event_name }}, Force: ${{ inputs.force_build }})..."
             echo "should_build=true" >> $GITHUB_OUTPUT
+          else
+            echo "Release ${{ matrix.name_prefix }}-$LATEST_TAG already exists and no changes forced. Skipping build."
+            echo "should_build=false" >> $GITHUB_OUTPUT
           fi
 
       - name: Clone Upstream Source
@@ -127,7 +137,10 @@ jobs:
             ### Included Assets:
             - Multi-platform binaries (Linux AMD64/ARM64, Windows AMD64, macOS ARM64)
             - Checksums: `sha256sums.txt`
+            - Commit: `${{ github.sha }}`
           files: |
             dist/*
           draft: false
           prerelease: false
+          make_latest: false
+          clobber: true
