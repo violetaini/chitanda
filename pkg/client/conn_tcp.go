@@ -27,7 +27,26 @@ type h2TransportClient struct {
 	activeStreams atomic.Int64
 }
 
-func newH2TransportClient(server, serverName, rootURL, requestURL, path string, psk []byte) (*h2TransportClient, error) {
+func newH2TransportClient(server, serverName, rootURL, requestURL, path string, psk []byte, insecureSkipVerify bool) (*h2TransportClient, error) {
+	tlsCfg := &tls.Config{
+		MinVersion:         tls.VersionTLS13,
+		ServerName:         serverName,
+		InsecureSkipVerify: insecureSkipVerify,
+	}
+	dialTLS := func(ctx context.Context, network, _ string) (net.Conn, error) {
+		dialer := net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+		rawConn, err := dialer.DialContext(ctx, network, server)
+		if err != nil {
+			return nil, err
+		}
+		tlsConn := tls.Client(rawConn, tlsCfg)
+		if err := tlsConn.HandshakeContext(ctx); err != nil {
+			_ = rawConn.Close()
+			return nil, err
+		}
+		return tlsConn, nil
+	}
+
 	transport := &http.Transport{
 		Proxy:               nil,
 		ForceAttemptHTTP2:   true,
@@ -35,15 +54,10 @@ func newH2TransportClient(server, serverName, rootURL, requestURL, path string, 
 		MaxIdleConns:        100,
 		MaxIdleConnsPerHost: 100,
 		IdleConnTimeout:     3 * time.Minute,
-		TLSClientConfig: &tls.Config{
-			MinVersion: tls.VersionTLS13,
-			ServerName: serverName,
-		},
-		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
-			dialer := net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
-			return dialer.DialContext(ctx, network, server)
-		},
+		TLSClientConfig:     tlsCfg,
+		DialTLSContext:      dialTLS,
 	}
+
 	h2Transport, err := http2.ConfigureTransports(transport)
 	if err != nil {
 		return nil, err
@@ -51,6 +65,10 @@ func newH2TransportClient(server, serverName, rootURL, requestURL, path string, 
 	h2Transport.ReadIdleTimeout = 45 * time.Second
 	h2Transport.PingTimeout = 15 * time.Second
 	h2Transport.MaxReadFrameSize = 1 << 20
+	h2Transport.TLSClientConfig = tlsCfg
+	h2Transport.DialTLSContext = func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
+		return dialTLS(ctx, network, addr)
+	}
 
 	return &h2TransportClient{
 		server:     server,

@@ -200,13 +200,15 @@ func (s *Server) servePlainH1(w http.ResponseWriter, r *http.Request) {
 	}
 
 	nonceHex := hex.EncodeToString(clientNonce[:])
-	accepted, replayErr := s.replays.Accept(nonceHex, now)
-	if replayErr != nil {
-		log.Printf("replay cache error in plain-h1: %v", replayErr)
-	}
-	if !accepted || replayErr != nil {
-		http.Error(w, "Bad Request", http.StatusBadRequest)
-		return
+	if s.replays != nil {
+		accepted, replayErr := s.replays.Accept(nonceHex, now)
+		if replayErr != nil {
+			log.Printf("replay cache error in plain-h1: %v", replayErr)
+		}
+		if !accepted || replayErr != nil {
+			http.Error(w, "Bad Request", http.StatusBadRequest)
+			return
+		}
 	}
 
 	// 1. Derive 0-RTT key

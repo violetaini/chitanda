@@ -1,9 +1,9 @@
 package chitanda
 
 import (
+	"bufio"
 	"context"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"sync"
@@ -11,6 +11,9 @@ import (
 
 	"chitanda/pkg/server"
 
+	"golang.org/x/net/http2"
+
+	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/buf"
 	xnet "github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/session"
@@ -35,14 +38,14 @@ func NewInboundHandler(ctx context.Context, config *InboundConfig) (*InboundHand
 
 	var fbHandler http.Handler
 	if config.Fallback != "" {
-		fb, err := server.NewFallback(config.Fallback, config.StrictSNI)
+		fb, err := server.NewFallback(config.Fallback, config.StrictSni)
 		if err != nil {
 			return nil, fmt.Errorf("init fallback handler: %w", err)
 		}
 		fbHandler = fb
 	}
 
-	srv := server.NewServer(config.Path, []byte(config.PSK), nil, fbHandler, 1024)
+	srv := server.NewServer(config.Path, []byte(config.Psk), nil, fbHandler, 1024)
 
 	inCtx, inCancel := context.WithCancel(context.Background())
 	h := &InboundHandler{
@@ -71,6 +74,7 @@ func NewInboundHandler(ctx context.Context, config *InboundConfig) (*InboundHand
 		return &pipeConn{
 			reader: &buf.BufferedReader{Reader: link.Reader},
 			writer: buf.NewBufferedWriter(link.Writer),
+			closer: link.Writer,
 		}, nil
 	})
 
@@ -78,11 +82,90 @@ func NewInboundHandler(ctx context.Context, config *InboundConfig) (*InboundHand
 }
 
 func (h *InboundHandler) Network() []xnet.Network {
-	return []xnet.Network{xnet.Network_TCP, xnet.Network_UDP}
+	return []xnet.Network{xnet.Network_TCP}
+}
+
+type bufferedConn struct {
+	net.Conn
+	br *bufio.Reader
+}
+
+func (b *bufferedConn) Read(p []byte) (int, error) {
+	return b.br.Read(p)
+}
+
+type singleListener struct {
+	conn net.Conn
+	once sync.Once
+	done chan struct{}
+}
+
+func (l *singleListener) Accept() (net.Conn, error) {
+	var c net.Conn
+	l.once.Do(func() {
+		c = l.conn
+	})
+	if c != nil {
+		return c, nil
+	}
+	<-l.done
+	return nil, net.ErrClosed
+}
+
+func (l *singleListener) Close() error {
+	select {
+	case <-l.done:
+	default:
+		close(l.done)
+	}
+	return nil
+}
+
+func (l *singleListener) Addr() net.Addr {
+	return l.conn.LocalAddr()
 }
 
 func (h *InboundHandler) Process(ctx context.Context, network xnet.Network, conn stat.Connection, dispatcher routing.Dispatcher) error {
-	return nil
+	if network != xnet.Network_TCP {
+		return nil
+	}
+	defer conn.Close()
+
+	br := bufio.NewReader(conn)
+	prefix, err := br.Peek(4)
+	if err != nil {
+		return err
+	}
+
+	bconn := &bufferedConn{Conn: conn, br: br}
+
+	if string(prefix) == "PRI " {
+		// HTTP/2 Connection Preface
+		h2Server := &http2.Server{}
+		h2Server.ServeConn(bconn, &http2.ServeConnOpts{
+			Handler: h.server,
+			Context: ctx,
+		})
+		return nil
+	}
+
+	// HTTP/1.x
+	sl := &singleListener{conn: bconn, done: make(chan struct{})}
+	httpServer := &http.Server{
+		Handler: h.server,
+	}
+
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = sl.Close()
+		case <-h.ctx.Done():
+			_ = sl.Close()
+		case <-sl.done:
+		}
+	}()
+
+	return httpServer.Serve(sl)
 }
 
 func (h *InboundHandler) Close() error {
@@ -91,8 +174,9 @@ func (h *InboundHandler) Close() error {
 }
 
 type pipeConn struct {
-	reader io.Reader
-	writer io.Writer
+	reader *buf.BufferedReader
+	writer *buf.BufferedWriter
+	closer interface{}
 }
 
 func (c *pipeConn) Read(b []byte) (n int, err error) {
@@ -100,12 +184,17 @@ func (c *pipeConn) Read(b []byte) (n int, err error) {
 }
 
 func (c *pipeConn) Write(b []byte) (n int, err error) {
-	return c.writer.Write(b)
+	n, err = c.writer.Write(b)
+	if err == nil {
+		_ = c.writer.Flush()
+	}
+	return n, err
 }
 
 func (c *pipeConn) Close() error {
-	if closer, ok := c.writer.(io.Closer); ok {
-		return closer.Close()
+	_ = c.writer.Flush()
+	if c.closer != nil {
+		return common.Close(c.closer)
 	}
 	return nil
 }
@@ -115,3 +204,9 @@ func (c *pipeConn) RemoteAddr() net.Addr               { return &net.TCPAddr{IP:
 func (c *pipeConn) SetDeadline(t time.Time) error      { return nil }
 func (c *pipeConn) SetReadDeadline(t time.Time) error  { return nil }
 func (c *pipeConn) SetWriteDeadline(t time.Time) error { return nil }
+
+func init() {
+	common.Must(common.RegisterConfig((*InboundConfig)(nil), func(ctx context.Context, config interface{}) (interface{}, error) {
+		return NewInboundHandler(ctx, config.(*InboundConfig))
+	}))
+}

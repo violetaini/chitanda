@@ -1,0 +1,24 @@
+syntax = "proto3";
+
+package xray.proxy.chitanda;
+option csharp_namespace = "Xray.Proxy.Chitanda";
+option go_package = "github.com/xtls/xray-core/proxy/chitanda";
+option java_package = "com.xray.proxy.chitanda";
+option java_multiple_files = true;
+
+message InboundConfig {
+  string psk = 1;
+  string path = 2;
+  string fallback = 3;
+  string strict_sni = 4;
+  string transport = 5;
+}
+
+message OutboundConfig {
+  string server = 1;
+  string server_name = 2;
+  string psk = 3;
+  string path = 4;
+  string transport = 5;
+  int32 pool_size = 6;
+}

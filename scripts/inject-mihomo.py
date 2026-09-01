@@ -22,13 +22,11 @@ def inject_mihomo(mihomo_dir, chitanda_dir):
         with open(adapters_go, "r", encoding="utf-8") as f:
             content = f.read()
         if 'Chitanda' not in content:
-            # 1) Add Chitanda to const ( ... ) enum (ONLY replace FIRST occurrence of Shadowsocks)
             content = content.replace(
                 '\tShadowsocks',
                 '\tChitanda\n\tShadowsocks',
                 1
             )
-            # 2) Add case Chitanda: return "Chitanda" in String() (ONLY replace FIRST occurrence)
             content = content.replace(
                 'case Shadowsocks:',
                 'case Chitanda:\n\t\treturn "Chitanda"\n\tcase Shadowsocks:',
@@ -38,20 +36,21 @@ def inject_mihomo(mihomo_dir, chitanda_dir):
                 f.write(content)
             print(f"  [+] Patched {adapters_go} with Chitanda enum and Stringer")
             
-    # 3. Patch adapter/outbound/parser.go
-    parser_go = os.path.join(adapter_dir, "parser.go")
+    # 3. Patch adapter/parser.go
+    parser_go = os.path.join(mihomo_dir, "adapter", "parser.go")
     if os.path.exists(parser_go):
         with open(parser_go, "r", encoding="utf-8") as f:
             content = f.read()
-        if 'Chitanda' not in content:
-            target_hook = 'case C.Shadowsocks:'
-            new_hook = '''case C.Chitanda, "chitanda":
-		var opt ChitandaOption
-		if err := decode(mapping, &opt); err != nil {
-			return nil, err
+        if '"chitanda"' not in content:
+            target_hook = 'case "ss":'
+            new_hook = '''case "chitanda":
+		chitandaOption := &outbound.ChitandaOption{BasicOption: basicOption}
+		err = decoder.Decode(mapping, chitandaOption)
+		if err != nil {
+			break
 		}
-		return NewChitanda(opt)
-	case C.Shadowsocks:'''
+		proxy, err = outbound.NewChitanda(*chitandaOption)
+	case "ss":'''
             content = content.replace(target_hook, new_hook, 1)
             with open(parser_go, "w", encoding="utf-8") as f:
                 f.write(content)

@@ -24,7 +24,8 @@ type ChitandaOption struct {
 	Transport string `proxy:"transport,omitempty"` // "h2" (default), "h3", "auto", "h1"
 	SNI       string `proxy:"sni,omitempty"`
 	PoolSize  int    `proxy:"pool-size,omitempty"`
-	UDP       bool   `proxy:"udp,omitempty"`
+	UDP            bool   `proxy:"udp,omitempty"`
+	SkipCertVerify bool   `proxy:"skip-cert-verify,omitempty"`
 }
 
 type Chitanda struct {
@@ -94,7 +95,8 @@ func (c *Chitanda) getClient() (*client.Client, error) {
 		PSK:          []byte(c.option.PSK),
 		Path:         c.option.Path,
 		TCPTransport: c.option.Transport,
-		TCPPoolSize:  c.option.PoolSize,
+		TCPPoolSize:        c.option.PoolSize,
+		InsecureSkipVerify: c.option.SkipCertVerify,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("init chitanda client sdk: %w", err)

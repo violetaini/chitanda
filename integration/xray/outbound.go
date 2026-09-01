@@ -11,6 +11,7 @@ import (
 	"github.com/xtls/xray-core/common/buf"
 	xnet "github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/session"
+	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/features/policy"
 	"github.com/xtls/xray-core/transport"
@@ -41,10 +42,11 @@ func NewOutboundHandler(ctx context.Context, config *OutboundConfig) (*OutboundH
 	cli, err := client.New(client.Config{
 		Server:       config.Server,
 		ServerName:   config.ServerName,
-		PSK:          []byte(config.PSK),
+		PSK:          []byte(config.Psk),
 		Path:         config.Path,
 		TCPTransport: transportMode,
-		TCPPoolSize:  poolSize,
+		TCPPoolSize:        int(poolSize),
+		InsecureSkipVerify: true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("init chitanda client: %w", err)
@@ -130,4 +132,10 @@ func (h *OutboundHandler) Close() error {
 		h.client.Close()
 	}
 	return nil
+}
+
+func init() {
+	common.Must(common.RegisterConfig((*OutboundConfig)(nil), func(ctx context.Context, config interface{}) (interface{}, error) {
+		return NewOutboundHandler(ctx, config.(*OutboundConfig))
+	}))
 }

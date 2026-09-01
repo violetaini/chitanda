@@ -46,7 +46,7 @@ func (p *h2Prober) loop() {
 			return
 		case <-ticker.C:
 			rtt, err := p.pingH2()
-			if err != nil || rtt > 500*time.Millisecond {
+			if err != nil || rtt > 2500*time.Millisecond {
 				consecutiveFails++
 				consecutiveSuccesses = 0
 				if consecutiveFails >= 2 && !p.h2Degraded.Load() {
@@ -90,7 +90,7 @@ func (p *h2Prober) pingH2() (time.Duration, error) {
 	req.Header.Set(HeaderSignature, auth.Signature(p.client.cfg.PSK, ModeTCPv2, http.MethodHead, p.client.cfg.Path, "", timestamp, nonce))
 
 	start := time.Now()
-	resp, err := h2Cli.transport.RoundTrip(req)
+	resp, err := h2Cli.client.Do(req)
 	if err != nil {
 		return 0, err
 	}

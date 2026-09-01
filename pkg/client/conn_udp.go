@@ -49,11 +49,13 @@ func newH3TransportManager(
 	psk []byte,
 	sessionCache *sessioncache.Cache,
 	initialPacketSize uint16,
+	insecureSkipVerify bool,
 ) *h3TransportManager {
 	tlsConfig := &tls.Config{
-		MinVersion: tls.VersionTLS13,
-		ServerName: serverName,
-		NextProtos: []string{http3.NextProtoH3},
+		MinVersion:         tls.VersionTLS13,
+		ServerName:         serverName,
+		InsecureSkipVerify: insecureSkipVerify,
+		NextProtos:         []string{http3.NextProtoH3},
 	}
 	if sessionCache != nil {
 		tlsConfig.ClientSessionCache = sessionCache

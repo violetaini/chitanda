@@ -56,6 +56,7 @@ type Config struct {
 	TCPPoolSize           int    // Number of independent physical TCP carriers (H2 or H3, default 4)
 	SessionCacheFile      string // optional persistent session cache path
 	QUICInitialPacketSize uint16 // 1200 - 1452, default 1452
+	InsecureSkipVerify    bool   // skip TLS certificate verification
 }
 
 // Client is the MyXray core client engine.
@@ -128,7 +129,7 @@ func New(cfg Config) (*Client, error) {
 			h2Count = 0
 		}
 		for i := 0; i < h2Count; i++ {
-			h2Cli, err := newH2TransportClient(cfg.Server, cfg.ServerName, rootURL, requestURL, cfg.Path, cfg.PSK)
+			h2Cli, err := newH2TransportClient(cfg.Server, cfg.ServerName, rootURL, requestURL, cfg.Path, cfg.PSK, cfg.InsecureSkipVerify)
 			if err != nil {
 				return nil, fmt.Errorf("init h2 client %d: %w", i, err)
 			}
@@ -143,7 +144,7 @@ func New(cfg Config) (*Client, error) {
 		}
 		for i := 0; i < h3Count; i++ {
 			h3Managers = append(h3Managers, newH3TransportManager(
-				cfg.Server, cfg.ServerName, rootURL, requestURL, cfg.Path, cfg.PSK, cache, cfg.QUICInitialPacketSize,
+				cfg.Server, cfg.ServerName, rootURL, requestURL, cfg.Path, cfg.PSK, cache, cfg.QUICInitialPacketSize, cfg.InsecureSkipVerify,
 			))
 		}
 	}
