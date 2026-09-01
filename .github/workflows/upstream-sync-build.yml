@@ -1,0 +1,130 @@
+name: Upstream Sync & Automated Release
+
+on:
+  schedule:
+    - cron: '0 2 * * *' # Daily at 02:00 UTC
+  workflow_dispatch:
+    inputs:
+      force_build:
+        description: 'Force build even if no new upstream release'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  check-and-build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: "mihomo"
+            repo: "MetaCubeX/mihomo"
+            name_prefix: "mihomo-chitanda"
+          - target: "xray"
+            repo: "XTLS/Xray-core"
+            name_prefix: "xray-chitanda"
+
+    steps:
+      - name: Checkout Chitanda Core Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          check-latest: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Check Latest Upstream Tag
+        id: upstream_check
+        run: |
+          LATEST_TAG=$(curl -s https://api.github.com/repos/${{ matrix.repo }}/releases/latest | jq -r .tag_name)
+          if [ "$LATEST_TAG" == "null" ] || [ -z "$LATEST_TAG" ]; then
+            LATEST_TAG=$(curl -s https://api.github.com/repos/${{ matrix.repo }}/tags | jq -r '.[0].name')
+          fi
+          echo "Latest ${{ matrix.target }} Tag: $LATEST_TAG"
+          echo "upstream_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
+          
+          # Check if this release tag already exists in our repo
+          RELEASE_EXISTS=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" https://api.github.com/repos/${{ github.repository }}/releases/tags/${{ matrix.name_prefix }}-$LATEST_TAG | jq -r .id)
+          if [ "$RELEASE_EXISTS" != "null" ] && [ "${{ inputs.force_build }}" != "true" ]; then
+            echo "Release ${{ matrix.name_prefix }}-$LATEST_TAG already exists. Skipping build."
+            echo "should_build=false" >> $GITHUB_OUTPUT
+          else
+            echo "should_build=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Clone Upstream Source
+        if: steps.upstream_check.outputs.should_build == 'true'
+        run: |
+          git clone --depth 1 --branch ${{ steps.upstream_check.outputs.upstream_tag }} https://github.com/${{ matrix.repo }}.git upstream_src
+
+      - name: Inject Chitanda Protocol Adapter
+        if: steps.upstream_check.outputs.should_build == 'true'
+        run: |
+          if [ "${{ matrix.target }}" == "mihomo" ]; then
+            python3 scripts/inject-mihomo.py upstream_src $PWD
+          else
+            python3 scripts/inject-xray.py upstream_src $PWD
+          fi
+
+      - name: Build Multi-Architecture Binaries
+        if: steps.upstream_check.outputs.should_build == 'true'
+        run: |
+          cd upstream_src
+          go mod tidy || true
+          mkdir -p ../dist
+          
+          # Targets: Linux AMD64/ARM64, Windows AMD64, macOS ARM64
+          PLATFORMS=("linux/amd64" "linux/arm64" "windows/amd64" "darwin/arm64")
+          
+          for PLATFORM in "${PLATFORMS[@]}"; do
+            GOOS=${PLATFORM%/*}
+            GOARCH=${PLATFORM#*/}
+            EXT=""
+            if [ "$GOOS" == "windows" ]; then EXT=".exe"; fi
+            
+            OUTPUT_NAME="${{ matrix.name_prefix }}-${{ steps.upstream_check.outputs.upstream_tag }}-${GOOS}-${GOARCH}${EXT}"
+            echo "Building $OUTPUT_NAME..."
+            
+            CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH go build -trimpath -ldflags="-s -w" -o "../dist/$OUTPUT_NAME" .
+            
+            # Create tar.gz / zip
+            cd ../dist
+            if [ "$GOOS" == "windows" ]; then
+              zip "${OUTPUT_NAME%.exe}.zip" "$OUTPUT_NAME"
+              rm "$OUTPUT_NAME"
+            else
+              tar -czf "${OUTPUT_NAME}.tar.gz" "$OUTPUT_NAME"
+              rm "$OUTPUT_NAME"
+            fi
+            cd ../upstream_src
+          done
+          
+          # Generate SHA256 checksums
+          cd ../dist
+          sha256sum * > sha256sums.txt
+
+      - name: Publish GitHub Release
+        if: steps.upstream_check.outputs.should_build == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "${{ matrix.name_prefix }}-${{ steps.upstream_check.outputs.upstream_tag }}"
+          name: "${{ matrix.name_prefix }} ${{ steps.upstream_check.outputs.upstream_tag }} (Chitanda Protocol Included)"
+          body: |
+            Automated build of **${{ matrix.repo }}** `${{ steps.upstream_check.outputs.upstream_tag }}` with native **Chitanda Protocol (`h2`, `h3`, `auto`, `h1`)** integrated.
+            
+            ### Included Assets:
+            - Multi-platform binaries (Linux AMD64/ARM64, Windows AMD64, macOS ARM64)
+            - Checksums: `sha256sums.txt`
+          files: |
+            dist/*
+          draft: false
+          prerelease: false

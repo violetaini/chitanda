@@ -123,7 +123,81 @@ func main() {
 
 ---
 
-## 4. 构建与验证
+---
+
+## 4. 客户端与服务端生态集成 (Mihomo & Xray-core Integration)
+
+项目提供非侵入式的生态适配器，已集成至主流核心：
+
+### A. Mihomo (Clash.Meta) 客户端配置
+在 `config.yaml` 的 `proxies` 列表中直接配置 `type: chitanda`：
+
+```yaml
+proxies:
+  # 1. 默认推荐：TLS 1.3 + HTTP/2 流复用主线
+  - name: "Tokyo-Chitanda-H2"
+    type: chitanda
+    server: 1.2.3.4
+    port: 443
+    psk: "your-32-byte-secure-pre-shared-key-here"
+    path: "/api/v1/sync"
+    transport: "h2" # 模式: "h2", "h3", "auto", "h1"
+    sni: "status.chitanda.org"
+    pool-size: 4
+    udp: true
+
+  # 2. 免证书 / 纯 IP 实验通道 (H1)
+  - name: "Direct-IP-Chitanda-H1"
+    type: chitanda
+    server: 1.2.3.4
+    port: 18200
+    psk: "your-32-byte-secure-pre-shared-key-here"
+    path: "/api/v1/sync"
+    transport: "h1"
+    udp: true
+```
+
+### B. Xray-core 服务端与出站配置
+在 Xray-core `config.json` 中配置 `chitanda` 协议：
+
+```json
+{
+  "inbounds": [
+    {
+      "port": 443,
+      "protocol": "chitanda",
+      "settings": {
+        "psk": "your-32-byte-secure-pre-shared-key-here",
+        "path": "/api/v1/sync",
+        "transport": "h2",
+        "fallback": "127.0.0.1:8080"
+      },
+      "streamSettings": {
+        "security": "tls",
+        "tlsSettings": {
+          "certificates": [
+            {
+              "certificateFile": "/etc/ssl/chitanda.crt",
+              "keyFile": "/etc/ssl/chitanda.key"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}
+```
+
+---
+
+## 5. 自动跟随上游编译流水线 (Automated Upstream CI/CD)
+
+通过本仓库的 GitHub Actions (`.github/workflows/upstream-sync-build.yml`)：
+1. **自动监控**：每日自动轮询 `XTLS/Xray-core` 与 `MetaCubeX/mihomo` 的最新 Release Tag；
+2. **动态注入**：自动执行 `scripts/inject-xray.py` 与 `scripts/inject-mihomo.py` 完成无侵入适配器挂载；
+3. **全平台发布**：自动编译 Windows / Linux / macOS / Android 多架构二进制并直接发布到本仓库的 GitHub Releases。
+
+## 6. 构建与验证
 
 ```sh
 # 运行全量单元测试（包含密码学、重放攻击注入、全双工回环与 UDP 模拟）
@@ -137,7 +211,7 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o bin/bench-dir
 
 ---
 
-## 5. 技术边界与安全声明 (Threat Model & Limitations)
+## 7. 技术边界与安全声明 (Threat Model & Limitations)
 
 1. **主线与实验模式定位**：
    - `h2` / `h3` 依托 TLS 1.3 加密与标准 SNI，是审查对抗环境下的**主要生产载荷**；
