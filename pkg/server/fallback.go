@@ -113,7 +113,11 @@ func (s *Server) serveFallback(w http.ResponseWriter, r *http.Request) {
 		r.Header.Del("Transfer-Encoding")
 		r.Header.Del("Expect")
 	}
-	s.fallback.ServeHTTP(w, r)
+	if s.fallback != nil {
+		s.fallback.ServeHTTP(w, r)
+	} else {
+		http.NotFound(w, r)
+	}
 }
 
 type erpFallbackHandler struct {

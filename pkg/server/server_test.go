@@ -100,17 +100,37 @@ func TestStrictSNI(t *testing.T) {
 }
 
 func TestCarrierProbe(t *testing.T) {
-	srv := NewServer("/test-path", []byte(strings.Repeat("p", 32)), nil, nil, 1024)
-	req := httptest.NewRequest(http.MethodHead, "/", nil)
-	req.Header.Set("X-Carrier-Probe", "1")
-	w := httptest.NewRecorder()
+	psk := []byte(strings.Repeat("p", 32))
+	srv := NewServer("/test-path", psk, nil, nil, 1024)
 
+	// 1. Authenticated carrier probe
+	ts := strconv.FormatInt(time.Now().Unix(), 10)
+	nonce := "probe-nonce-12345"
+	sig := auth.Signature(psk, modeTCPv2, http.MethodHead, "/test-path", "", ts, nonce)
+
+	req := httptest.NewRequest(http.MethodHead, "/test-path", nil)
+	req.Header.Set("X-Carrier-Probe", "1")
+	req.Header.Set(headerMode, modeTCPv2)
+	req.Header.Set(headerTimestamp, ts)
+	req.Header.Set(headerNonce, nonce)
+	req.Header.Set(headerSignature, sig)
+
+	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK for carrier probe, got %d", w.Code)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("expected 204 No Content for authenticated carrier probe, got %d", w.Code)
 	}
 	if w.Header().Get(headerSessionOK) != "1" {
 		t.Fatalf("expected X-Session-OK header on probe response")
+	}
+
+	// 2. Unauthenticated carrier probe (must fall back to decoy, NO X-Session-OK leakage!)
+	unauthReq := httptest.NewRequest(http.MethodHead, "/test-path", nil)
+	unauthReq.Header.Set("X-Carrier-Probe", "1")
+	wUnauth := httptest.NewRecorder()
+	srv.ServeHTTP(wUnauth, unauthReq)
+	if wUnauth.Header().Get(headerSessionOK) == "1" {
+		t.Fatalf("unauthenticated probe must NOT return X-Session-OK header")
 	}
 }
 
@@ -151,7 +171,6 @@ func TestNewFallback(t *testing.T) {
 		t.Fatalf("expected non-nil UDS fallback handler")
 	}
 }
-
 
 func TestPlainUDPServer(t *testing.T) {
 	psk := []byte(strings.Repeat("u", 32))

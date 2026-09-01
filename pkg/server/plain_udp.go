@@ -63,7 +63,7 @@ func NewPlainUDPServer(conn *net.UDPConn, psk []byte) (*PlainUDPServer, error) {
 	}
 	workers := make([]chan udpTask, numWorkers)
 	for i := range workers {
-		workers[i] = make(chan udpTask, 4096)
+		workers[i] = make(chan udpTask, 1024)
 	}
 
 	return &PlainUDPServer{
@@ -148,15 +148,18 @@ func (s *PlainUDPServer) processTask(ctx context.Context, task udpTask) {
 		sessionID: task.sessionID,
 	})
 	session := val.(*plainUDPSession)
-	session.clientAddr.Store(task.clientAddr)
-	session.lastActive.Store(time.Now().Unix())
 
+	// 1. Anti-Replay verification MUST succeed BEFORE updating clientAddr
+	// This prevents an attacker from replaying old packets from spoofed IPs to hijack reverse traffic!
 	session.replayMu.Lock()
 	accepted := session.replay.Accept(task.seq)
 	session.replayMu.Unlock()
 	if !accepted {
 		return
 	}
+
+	session.clientAddr.Store(task.clientAddr)
+	session.lastActive.Store(time.Now().Unix())
 
 	targetConnVal, ok := session.targets.Load(task.targetAddr)
 	var upstreamConn *net.UDPConn

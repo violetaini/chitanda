@@ -63,10 +63,18 @@ func (s *Server) SetDialTargetForTest(fn func(ctx context.Context, address strin
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.Header.Get("X-Carrier-Probe") == "1" {
-		w.Header().Set("Cache-Control", "no-store")
-		w.Header().Set(headerSessionOK, "1")
-		w.WriteHeader(http.StatusOK)
+	if r.Method == http.MethodHead && r.URL.Path == s.path && r.Header.Get("X-Carrier-Probe") == "1" {
+		timestamp := r.Header.Get(headerTimestamp)
+		nonce := r.Header.Get(headerNonce)
+		signature := r.Header.Get(headerSignature)
+		if err := s.authorize(r, "", timestamp, nonce, signature); err == nil {
+			w.Header().Set("Cache-Control", "no-store")
+			w.Header().Set(headerSessionOK, "1")
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		// Unauthenticated probe: route directly to fallback to prevent active probing oracle!
+		s.serveFallback(w, r)
 		return
 	}
 	if r.ProtoMajor == 3 {
@@ -162,12 +170,14 @@ func (s *Server) authorize(r *http.Request, targetAddress, timestamp, nonce, sig
 	if !auth.Verify(s.psk, mode, r.Method, r.URL.Path, targetAddress, timestamp, nonce, signature, now) {
 		return errInvalidSignature
 	}
-	accepted, err := s.replays.Accept(nonce, now)
-	if err != nil {
-		log.Printf("replay cache unavailable")
-	}
-	if !accepted || err != nil {
-		return errReplayDetected
+	if s.replays != nil {
+		accepted, err := s.replays.Accept(nonce, now)
+		if err != nil {
+			log.Printf("replay cache unavailable")
+		}
+		if !accepted || err != nil {
+			return errReplayDetected
+		}
 	}
 	return nil
 }
