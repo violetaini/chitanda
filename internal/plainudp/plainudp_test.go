@@ -7,9 +7,12 @@ import (
 	"time"
 )
 
-func TestPlainUDPRoundTrip(t *testing.T) {
+func TestPlainUDPRoundTripAndReplay(t *testing.T) {
 	psk := []byte(strings.Repeat("u", 32))
-	key := DeriveKey(psk)
+	codec, err := NewCodec(psk)
+	if err != nil {
+		t.Fatalf("NewCodec: %v", err)
+	}
 	now := time.Now()
 
 	testCases := []struct {
@@ -23,12 +26,12 @@ func TestPlainUDPRoundTrip(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		packet, err := EncodePacket(key, tc.target, []byte(tc.payload), now)
+		packet, err := codec.EncodePacket(nil, tc.target, []byte(tc.payload), now)
 		if err != nil {
 			t.Fatalf("EncodePacket(%q): %v", tc.target, err)
 		}
 
-		decodedTarget, decodedPayload, ts, err := DecodePacket(key, packet, now)
+		decodedTarget, decodedPayload, ts, seq, err := codec.DecodePacket(packet, now)
 		if err != nil {
 			t.Fatalf("DecodePacket(%q): %v", tc.target, err)
 		}
@@ -42,15 +45,26 @@ func TestPlainUDPRoundTrip(t *testing.T) {
 		if ts != uint64(now.Unix()) {
 			t.Fatalf("timestamp %d != expected %d", ts, uint64(now.Unix()))
 		}
+		if seq == 0 {
+			t.Fatalf("expected non-zero sequence")
+		}
+
+		// Replay attempt must be rejected!
+		if _, _, _, _, err := codec.DecodePacket(packet, now); err != ErrReplayDetected {
+			t.Fatalf("expected ErrReplayDetected on replayed packet, got %v", err)
+		}
 	}
 }
 
 func TestPlainUDPTamperAndExpire(t *testing.T) {
 	psk := []byte(strings.Repeat("u", 32))
-	key := DeriveKey(psk)
+	codec, err := NewCodec(psk)
+	if err != nil {
+		t.Fatalf("NewCodec: %v", err)
+	}
 	now := time.Now()
 
-	packet, err := EncodePacket(key, "1.1.1.1:53", []byte("hello"), now)
+	packet, err := codec.EncodePacket(nil, "1.1.1.1:53", []byte("hello"), now)
 	if err != nil {
 		t.Fatalf("EncodePacket: %v", err)
 	}
@@ -59,13 +73,13 @@ func TestPlainUDPTamperAndExpire(t *testing.T) {
 	tampered := make([]byte, len(packet))
 	copy(tampered, packet)
 	tampered[len(tampered)-1] ^= 0xff
-	if _, _, _, err := DecodePacket(key, tampered, now); err == nil {
+	if _, _, _, _, err := codec.DecodePacket(tampered, now); err == nil {
 		t.Fatal("expected decryption error on tampered packet")
 	}
 
 	// Expired packet (>30s)
 	future := now.Add(45 * time.Second)
-	if _, _, _, err := DecodePacket(key, packet, future); err == nil {
-		t.Fatal("expected expired error on out-of-window packet")
+	if _, _, _, _, err := codec.DecodePacket(packet, future); err != ErrTimestampExpired {
+		t.Fatalf("expected ErrTimestampExpired on out-of-window packet, got %v", err)
 	}
 }

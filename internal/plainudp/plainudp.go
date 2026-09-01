@@ -1,6 +1,7 @@
 package plainudp
 
 import (
+	"crypto/cipher"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -10,13 +11,17 @@ import (
 	"io"
 	"net"
 	"strconv"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/chacha20poly1305"
+	"myxray/internal/frame"
 )
 
 const (
-	HeaderSize       = 20 // 8B Timestamp + 12B Nonce
+	// Header: Timestamp (8B) + Sequence (8B) + Nonce (12B) = 28B
+	HeaderSize       = 28
 	MaxPacketSize    = 1500
 	MaxTimestampSkew = 30 * time.Second
 
@@ -27,12 +32,13 @@ const (
 var (
 	ErrPacketTooShort     = errors.New("plainudp: packet too short")
 	ErrTimestampExpired   = errors.New("plainudp: timestamp out of acceptable window")
+	ErrReplayDetected     = errors.New("plainudp: duplicate or replayed datagram")
 	ErrDecryptionFailed   = errors.New("plainudp: AEAD packet decryption failed")
 	ErrInvalidAddressType = errors.New("plainudp: unsupported SOCKS5 address type")
 	ErrInvalidAddress     = errors.New("plainudp: malformed address in packet")
 )
 
-// DeriveKey derives a 32-byte ChaCha20-Poly1305 key for plain UDP datagrams.
+// DeriveKey derives a 32-byte key for plain UDP datagrams.
 func DeriveKey(psk []byte) [32]byte {
 	extractor := hmac.New(sha256.New, []byte(SaltUDP))
 	extractor.Write(psk)
@@ -48,13 +54,30 @@ func DeriveKey(psk []byte) [32]byte {
 	return key
 }
 
-// EncodePacket encrypts target address and payload into a plain-udp datagram.
-func EncodePacket(key [32]byte, targetAddr string, payload []byte, now time.Time) ([]byte, error) {
+// Codec manages zero-allocation ChaCha20-Poly1305 encryption, decryption, sequencing, and anti-replay.
+type Codec struct {
+	key      [32]byte
+	aead     cipher.AEAD
+	sequence atomic.Uint64
+	replayMu sync.Mutex
+	replay   frame.ReplayWindow
+}
+
+// NewCodec creates a persistent Codec instance holding the initialized AEAD cipher.
+func NewCodec(psk []byte) (*Codec, error) {
+	key := DeriveKey(psk)
 	aead, err := chacha20poly1305.New(key[:])
 	if err != nil {
 		return nil, err
 	}
+	return &Codec{
+		key:  key,
+		aead: aead,
+	}, nil
+}
 
+// EncodePacket encrypts target address and payload into a plain-udp datagram.
+func (c *Codec) EncodePacket(dst []byte, targetAddr string, payload []byte, now time.Time) ([]byte, error) {
 	addrBuf, err := encodeTargetAddress(targetAddr)
 	if err != nil {
 		return nil, err
@@ -64,57 +87,68 @@ func EncodePacket(key [32]byte, targetAddr string, payload []byte, now time.Time
 	plaintext = append(plaintext, addrBuf...)
 	plaintext = append(plaintext, payload...)
 
+	seq := c.sequence.Add(1)
+
 	var nonce [12]byte
-	if _, err := io.ReadFull(rand.Reader, nonce[:]); err != nil {
+	if _, err := io.ReadFull(rand.Reader, nonce[:4]); err != nil {
 		return nil, fmt.Errorf("plainudp: random nonce failed: %w", err)
 	}
+	binary.BigEndian.PutUint64(nonce[4:12], seq)
 
 	ts := uint64(now.Unix())
-	var tsBuf [8]byte
-	binary.BigEndian.PutUint64(tsBuf[:], ts)
+	var ad [16]byte
+	binary.BigEndian.PutUint64(ad[0:8], ts)
+	binary.BigEndian.PutUint64(ad[8:16], seq)
 
-	// Wire: [Timestamp (8B)] [Nonce (12B)] [Ciphertext + Tag]
-	packet := make([]byte, 0, HeaderSize+len(plaintext)+aead.Overhead())
-	packet = append(packet, tsBuf[:]...)
-	packet = append(packet, nonce[:]...)
-	packet = aead.Seal(packet, nonce[:], plaintext, tsBuf[:])
+	// Wire: [Timestamp (8B)] [Sequence (8B)] [Nonce (12B)] [Ciphertext + Tag]
+	if dst == nil {
+		dst = make([]byte, 0, HeaderSize+len(plaintext)+c.aead.Overhead())
+	}
+	dst = append(dst, ad[:]...)
+	dst = append(dst, nonce[:]...)
+	dst = c.aead.Seal(dst, nonce[:], plaintext, ad[:])
 
-	return packet, nil
+	return dst, nil
 }
 
-// DecodePacket decrypts a plain-udp datagram and extracts target address and payload.
-func DecodePacket(key [32]byte, packet []byte, now time.Time) (targetAddr string, payload []byte, timestamp uint64, err error) {
+// DecodePacket decrypts a plain-udp datagram and extracts target address and payload, with anti-replay check.
+func (c *Codec) DecodePacket(packet []byte, now time.Time) (targetAddr string, payload []byte, timestamp uint64, seq uint64, err error) {
 	if len(packet) < HeaderSize+1+4+2+16 { // min size with IPv4
-		return "", nil, 0, ErrPacketTooShort
+		return "", nil, 0, 0, ErrPacketTooShort
 	}
 
 	timestamp = binary.BigEndian.Uint64(packet[0:8])
 	nowSec := uint64(now.Unix())
 	diff := int64(nowSec) - int64(timestamp)
 	if diff < -int64(MaxTimestampSkew/time.Second) || diff > int64(MaxTimestampSkew/time.Second) {
-		return "", nil, timestamp, ErrTimestampExpired
+		return "", nil, timestamp, 0, ErrTimestampExpired
 	}
 
-	nonce := packet[8:20]
-	ciphertext := packet[20:]
-	ad := packet[0:8]
+	seq = binary.BigEndian.Uint64(packet[8:16])
 
-	aead, err := chacha20poly1305.New(key[:])
-	if err != nil {
-		return "", nil, timestamp, err
+	c.replayMu.Lock()
+	accepted := c.replay.Accept(seq)
+	c.replayMu.Unlock()
+
+	if !accepted {
+		return "", nil, timestamp, seq, ErrReplayDetected
 	}
 
-	plaintext, err := aead.Open(nil, nonce, ciphertext, ad)
+	ad := packet[0:16]
+	nonce := packet[16:28]
+	ciphertextWithTag := packet[28:]
+
+	plaintext, err := c.aead.Open(nil, nonce, ciphertextWithTag, ad)
 	if err != nil {
-		return "", nil, timestamp, ErrDecryptionFailed
+		return "", nil, timestamp, seq, ErrDecryptionFailed
 	}
 
 	targetAddr, payload, err = decodeTargetAddress(plaintext)
 	if err != nil {
-		return "", nil, timestamp, err
+		return "", nil, timestamp, seq, err
 	}
 
-	return targetAddr, payload, timestamp, nil
+	return targetAddr, payload, timestamp, seq, nil
 }
 
 func encodeTargetAddress(address string) ([]byte, error) {

@@ -23,6 +23,7 @@ type Config struct {
 	UDPTargetBuffer       int
 	QuicInitialPacketSize uint16
 	StrictSNI             string // The allowed SNI for Strict SNI checking
+	AllowPrivateTargets   bool   // Allow loopback and private IP targets (for local benchmarks)
 }
 
 // Init loads configurations and initialized components
@@ -31,8 +32,11 @@ func (c *Config) Init() (string, []byte, *auth.ReplayCache, error) {
 	if err != nil {
 		return "", nil, nil, fmt.Errorf("invalid path: %v", err)
 	}
-	if c.CertFile == "" || c.KeyFile == "" || c.PSKFile == "" {
-		return "", nil, nil, fmt.Errorf("cert, key, and psk-file are required")
+	if c.PSKFile == "" {
+		return "", nil, nil, fmt.Errorf("psk-file is required")
+	}
+	if (c.CertFile == "" && c.KeyFile != "") || (c.CertFile != "" && c.KeyFile == "") {
+		return "", nil, nil, fmt.Errorf("both cert and key must be provided together, or both omitted for plain-h1 mode")
 	}
 
 	psk, err := auth.LoadPSK(c.PSKFile)

@@ -155,7 +155,6 @@ func TestNewFallback(t *testing.T) {
 
 func TestPlainUDPServer(t *testing.T) {
 	psk := []byte(strings.Repeat("u", 32))
-	key := plainudp.DeriveKey(psk)
 
 	// 1. Local UDP echo server (the upstream destination)
 	echoLn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
@@ -181,7 +180,10 @@ func TestPlainUDPServer(t *testing.T) {
 	}
 	defer srvLn.Close()
 
-	srv := NewPlainUDPServer(srvLn, psk)
+	srv, err := NewPlainUDPServer(srvLn, psk)
+	if err != nil {
+		t.Fatalf("NewPlainUDPServer: %v", err)
+	}
 	srv.SetResolveUDPForTest(func(ctx context.Context, address string) (*net.UDPAddr, error) {
 		return net.ResolveUDPAddr("udp", address)
 	})
@@ -199,7 +201,8 @@ func TestPlainUDPServer(t *testing.T) {
 	defer clientLn.Close()
 
 	payload := []byte("UDP ping message")
-	pkt, err := plainudp.EncodePacket(key, echoLn.LocalAddr().String(), payload, time.Now())
+	codec, _ := plainudp.NewCodec(psk)
+	pkt, err := codec.EncodePacket(nil, echoLn.LocalAddr().String(), payload, time.Now())
 	if err != nil {
 		t.Fatalf("EncodePacket: %v", err)
 	}
@@ -216,7 +219,7 @@ func TestPlainUDPServer(t *testing.T) {
 		t.Fatalf("ReadFromUDP response: %v", err)
 	}
 
-	targetAddr, decodedPayload, _, err := plainudp.DecodePacket(key, recvBuf[:n], time.Now())
+	targetAddr, decodedPayload, _, _, err := codec.DecodePacket(recvBuf[:n], time.Now())
 	if err != nil {
 		t.Fatalf("DecodePacket response: %v", err)
 	}

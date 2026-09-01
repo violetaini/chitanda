@@ -236,7 +236,10 @@ func TestPlainUDP_ListenPacket(t *testing.T) {
 	}
 	defer srvLn.Close()
 
-	srv := server.NewPlainUDPServer(srvLn, psk)
+	srv, err := server.NewPlainUDPServer(srvLn, psk)
+	if err != nil {
+		t.Fatalf("NewPlainUDPServer: %v", err)
+	}
 	srv.SetResolveUDPForTest(func(ctx context.Context, address string) (*net.UDPAddr, error) {
 		return net.ResolveUDPAddr("udp", address)
 	})

@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -38,6 +39,12 @@ func Run(config *Config, listenAddr, adminListenAddr, quicListenAddr string) err
 	}
 
 	app := NewServer(path, psk, replays, fallback, config.UDPTargetBuffer)
+	if config.AllowPrivateTargets {
+		app.SetDialTargetForTest(func(ctx context.Context, address string) (net.Conn, error) {
+			dialer := net.Dialer{Timeout: 10 * time.Second}
+			return dialer.DialContext(ctx, "tcp", address)
+		})
+	}
 
 	public := &http.Server{
 		Addr:              listenAddr,
@@ -92,12 +99,28 @@ func Run(config *Config, listenAddr, adminListenAddr, quicListenAddr string) err
 			}
 		}()
 	}
-	// Plain-UDP listener (shares same port/address as listenAddr on UDP)
-	if plainUDPAddr, err := net.ResolveUDPAddr("udp", listenAddr); err == nil {
-		if plainUDPLn, err := net.ListenUDP("udp", plainUDPAddr); err == nil {
+	// Plain-UDP listener: enabled if quicListenAddr is empty or distinct from listenAddr
+	if quicListenAddr == "" || quicListenAddr != listenAddr {
+		plainUDPAddr, err := net.ResolveUDPAddr("udp", listenAddr)
+		if err != nil {
+			return fmt.Errorf("resolve plain-UDP addr %q: %w", listenAddr, err)
+		}
+		plainUDPLn, err := net.ListenUDP("udp", plainUDPAddr)
+		if err != nil {
+			log.Printf("warning: plain-UDP listen on %s failed: %v", listenAddr, err)
+		} else {
 			_ = plainUDPLn.SetReadBuffer(8 << 20)
 			_ = plainUDPLn.SetWriteBuffer(8 << 20)
-			plainUDPServer := NewPlainUDPServer(plainUDPLn, psk)
+			plainUDPServer, err := NewPlainUDPServer(plainUDPLn, psk)
+			if err != nil {
+				_ = plainUDPLn.Close()
+				return fmt.Errorf("init plain-UDP server: %w", err)
+			}
+			if config.AllowPrivateTargets {
+				plainUDPServer.SetResolveUDPForTest(func(ctx context.Context, address string) (*net.UDPAddr, error) {
+					return net.ResolveUDPAddr("udp", address)
+				})
+			}
 			go func() {
 				log.Printf("public plain-UDP datagram listener started on %s", listenAddr)
 				_ = plainUDPServer.Serve(context.Background())

@@ -23,6 +23,7 @@ func main() {
 	udpTargetBuffer := flag.Int("udp-target-buffer", 8<<20, "UDP target socket buffer in bytes")
 	quicInitialPacketSize := flag.Uint("quic-initial-packet-size", 1452, "QUIC initial packet size (1200-1452)")
 	strictSNI := flag.String("strict-sni", "", "Optional: enforce Strict SNI matching on ClientHello")
+	allowPrivateTargets := flag.Bool("allow-private-targets", false, "Allow dialing private/loopback targets (for testing)")
 
 	flag.Parse()
 
@@ -39,6 +40,7 @@ func main() {
 		UDPTargetBuffer:       *udpTargetBuffer,
 		QuicInitialPacketSize: uint16(*quicInitialPacketSize),
 		StrictSNI:             *strictSNI,
+		AllowPrivateTargets:   *allowPrivateTargets,
 	}
 
 	log.Printf("Starting myxray-server componentized version...")

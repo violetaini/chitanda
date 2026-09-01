@@ -12,7 +12,7 @@ import (
 )
 
 type PlainUDPServer struct {
-	key        [32]byte
+	codec      *plainudp.Codec
 	conn       *net.UDPConn
 	sessions   sync.Map // string(clientAddr) -> *plainUDPSession
 	resolveUDP func(ctx context.Context, address string) (*net.UDPAddr, error)
@@ -25,13 +25,17 @@ type plainUDPSession struct {
 	lastActive atomic.Int64
 }
 
-// NewPlainUDPServer creates a new plain-udp listener.
-func NewPlainUDPServer(conn *net.UDPConn, psk []byte) *PlainUDPServer {
+// NewPlainUDPServer creates a new plain-udp listener using a single pre-derived Codec instance.
+func NewPlainUDPServer(conn *net.UDPConn, psk []byte) (*PlainUDPServer, error) {
+	codec, err := plainudp.NewCodec(psk)
+	if err != nil {
+		return nil, err
+	}
 	return &PlainUDPServer{
-		key:        plainudp.DeriveKey(psk),
+		codec:      codec,
 		conn:       conn,
 		resolveUDP: target.ResolveUDPAddr,
-	}
+	}, nil
 }
 
 // SetResolveUDPForTest overrides target resolution in unit tests.
@@ -58,9 +62,9 @@ func (s *PlainUDPServer) Serve(ctx context.Context) error {
 		}
 
 		now := time.Now()
-		targetAddr, payload, _, err := plainudp.DecodePacket(s.key, buf[:n], now)
+		targetAddr, payload, _, _, err := s.codec.DecodePacket(buf[:n], now)
 		if err != nil {
-			continue // Drop invalid / tampered / expired packets silently
+			continue // Drop invalid / tampered / expired / replayed packets silently
 		}
 
 		s.dispatch(ctx, clientAddr, targetAddr, payload)
@@ -117,7 +121,7 @@ func (s *PlainUDPServer) listenUpstream(ctx context.Context, session *plainUDPSe
 		}
 
 		session.lastActive.Store(time.Now().Unix())
-		encrypted, err := plainudp.EncodePacket(s.key, targetAddr, buf[:n], time.Now())
+		encrypted, err := s.codec.EncodePacket(nil, targetAddr, buf[:n], time.Now())
 		if err != nil {
 			continue
 		}
