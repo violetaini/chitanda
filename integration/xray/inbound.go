@@ -6,13 +6,16 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"time"
 
 	"chitanda/pkg/server"
 
+	"github.com/xtls/xray-core/common/buf"
 	xnet "github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/session"
 	"github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/features/routing"
+	"github.com/xtls/xray-core/transport"
 	"github.com/xtls/xray-core/transport/internet/stat"
 )
 
@@ -41,7 +44,7 @@ func NewInboundHandler(ctx context.Context, config *InboundConfig) (*InboundHand
 
 	srv := server.NewServer(config.Path, []byte(config.PSK), nil, fbHandler, 1024)
 	if config.StrictSNI != "" {
-		srv.SetStrictServerNameForTest(config.StrictSNI)
+		srv.SetStrictServerName(config.StrictSNI)
 	}
 
 	inCtx, inCancel := context.WithCancel(context.Background())
@@ -68,7 +71,10 @@ func NewInboundHandler(ctx context.Context, config *InboundConfig) (*InboundHand
 			return nil, err
 		}
 
-		return stat.ConnectionFromLink(link), nil
+		return &pipeConn{
+			reader: buf.NewReader(link.Reader),
+			writer: buf.NewWriter(link.Writer),
+		}, nil
 	})
 
 	return h, nil
@@ -86,3 +92,27 @@ func (h *InboundHandler) Close() error {
 	h.cancel()
 	return nil
 }
+
+type pipeConn struct {
+	reader *buf.BufferedReader
+	writer *buf.BufferedWriter
+}
+
+func (c *pipeConn) Read(b []byte) (n int, err error) {
+	return c.reader.Read(b)
+}
+
+func (c *pipeConn) Write(b []byte) (n int, err error) {
+	return c.writer.Write(b)
+}
+
+func (c *pipeConn) Close() error {
+	_ = c.writer.Flush()
+	return nil
+}
+
+func (c *pipeConn) LocalAddr() net.Addr                { return &net.TCPAddr{IP: net.IPv4zero, Port: 0} }
+func (c *pipeConn) RemoteAddr() net.Addr               { return &net.TCPAddr{IP: net.IPv4zero, Port: 0} }
+func (c *pipeConn) SetDeadline(t time.Time) error      { return nil }
+func (c *pipeConn) SetReadDeadline(t time.Time) error  { return nil }
+func (c *pipeConn) SetWriteDeadline(t time.Time) error { return nil }
