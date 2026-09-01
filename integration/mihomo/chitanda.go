@@ -11,12 +11,14 @@ import (
 
 	"chitanda/pkg/client"
 
-	N "github.com/metacubex/mihomo/common/net"
 	C "github.com/metacubex/mihomo/constant"
 )
 
 type ChitandaOption struct {
 	BasicOption
+	Name      string `proxy:"name"`
+	Server    string `proxy:"server"`
+	Port      int    `proxy:"port"`
 	PSK       string `proxy:"psk"`
 	Path      string `proxy:"path"`
 	Transport string `proxy:"transport,omitempty"` // "h2" (default), "h3", "auto", "h1"
@@ -56,16 +58,16 @@ func NewChitanda(option ChitandaOption) (*Chitanda, error) {
 	}
 
 	c := &Chitanda{
-		Base: &Base{
-			name:   option.Name,
-			addr:   serverAddr,
-			tp:     C.Chitanda,
-			udp:    option.UDP,
-			tfo:    false,
-			iface:  option.Interface,
-			rmark:  option.RoutingMark,
-			prefer: option.IPVersion,
-		},
+		Base: NewBase(BaseOption{
+			Name:        option.Name,
+			Addr:        serverAddr,
+			Type:        C.Chitanda,
+			UDP:         option.UDP,
+			TFO:         false,
+			Interface:   option.Interface,
+			RoutingMark: option.RoutingMark,
+			Prefer:      option.IPVersion,
+		}),
 		option: &option,
 	}
 
@@ -102,7 +104,7 @@ func (c *Chitanda) getClient() (*client.Client, error) {
 	return c.client, nil
 }
 
-func (c *Chitanda) DialContext(ctx context.Context, metadata *C.Metadata, opts ...DialOption) (C.Conn, error) {
+func (c *Chitanda) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, error) {
 	cli, err := c.getClient()
 	if err != nil {
 		return nil, err
@@ -117,7 +119,7 @@ func (c *Chitanda) DialContext(ctx context.Context, metadata *C.Metadata, opts .
 	return NewConn(conn, c), nil
 }
 
-func (c *Chitanda) ListenPacketContext(ctx context.Context, metadata *C.Metadata, opts ...DialOption) (C.PacketConn, error) {
+func (c *Chitanda) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (C.PacketConn, error) {
 	if !c.option.UDP {
 		return nil, errors.New("chitanda: udp is disabled for this node")
 	}
@@ -132,7 +134,7 @@ func (c *Chitanda) ListenPacketContext(ctx context.Context, metadata *C.Metadata
 		return nil, fmt.Errorf("chitanda listen udp: %w", err)
 	}
 
-	return newChitandaPacketConn(pconn, c), nil
+	return NewPacketConn(pconn, c), nil
 }
 
 func (c *Chitanda) SupportUDP() bool {
@@ -160,32 +162,4 @@ func (c *Chitanda) Close() error {
 		c.client = nil
 	}
 	return nil
-}
-
-type chitandaPacketConn struct {
-	net.PacketConn
-	adapter C.ProxyAdapter
-}
-
-func newChitandaPacketConn(pc net.PacketConn, adapter C.ProxyAdapter) *chitandaPacketConn {
-	return &chitandaPacketConn{
-		PacketConn: pc,
-		adapter:    adapter,
-	}
-}
-
-func (c *chitandaPacketConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
-	return c.PacketConn.WriteTo(p, addr)
-}
-
-func (c *chitandaPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
-	return c.PacketConn.ReadFrom(p)
-}
-
-func (c *chitandaPacketConn) LocalAddr() net.Addr {
-	return c.PacketConn.LocalAddr()
-}
-
-func (c *chitandaPacketConn) Close() error {
-	return c.PacketConn.Close()
 }

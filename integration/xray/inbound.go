@@ -3,6 +3,7 @@ package chitanda
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"sync"
@@ -15,7 +16,6 @@ import (
 	"github.com/xtls/xray-core/common/session"
 	"github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/features/routing"
-	"github.com/xtls/xray-core/transport"
 	"github.com/xtls/xray-core/transport/internet/stat"
 )
 
@@ -43,9 +43,6 @@ func NewInboundHandler(ctx context.Context, config *InboundConfig) (*InboundHand
 	}
 
 	srv := server.NewServer(config.Path, []byte(config.PSK), nil, fbHandler, 1024)
-	if config.StrictSNI != "" {
-		srv.SetStrictServerName(config.StrictSNI)
-	}
 
 	inCtx, inCancel := context.WithCancel(context.Background())
 	h := &InboundHandler{
@@ -72,8 +69,8 @@ func NewInboundHandler(ctx context.Context, config *InboundConfig) (*InboundHand
 		}
 
 		return &pipeConn{
-			reader: buf.NewReader(link.Reader),
-			writer: buf.NewWriter(link.Writer),
+			reader: &buf.BufferedReader{Reader: link.Reader},
+			writer: buf.NewBufferedWriter(link.Writer),
 		}, nil
 	})
 
@@ -94,8 +91,8 @@ func (h *InboundHandler) Close() error {
 }
 
 type pipeConn struct {
-	reader *buf.BufferedReader
-	writer *buf.BufferedWriter
+	reader io.Reader
+	writer io.Writer
 }
 
 func (c *pipeConn) Read(b []byte) (n int, err error) {
@@ -107,7 +104,9 @@ func (c *pipeConn) Write(b []byte) (n int, err error) {
 }
 
 func (c *pipeConn) Close() error {
-	_ = c.writer.Flush()
+	if closer, ok := c.writer.(io.Closer); ok {
+		return closer.Close()
+	}
 	return nil
 }
 

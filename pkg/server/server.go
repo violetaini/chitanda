@@ -311,8 +311,3 @@ func (s *Server) servePlainH1(w http.ResponseWriter, r *http.Request) {
 	case <-r.Context().Done():
 	}
 }
-
-// SetStrictServerName configures strict SNI checking on the server.
-func (s *Server) SetStrictServerName(sni string) {
-	s.SetStrictServerNameForTest(sni)
-}
