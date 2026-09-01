@@ -95,6 +95,8 @@ jobs:
           go mod tidy || true
           mkdir -p ../dist
           
+          TAG="${{ steps.upstream_check.outputs.upstream_tag }}"
+          
           # Targets: Linux AMD64/ARM64, Windows AMD64, macOS ARM64
           PLATFORMS=("linux/amd64" "linux/arm64" "windows/amd64" "darwin/arm64")
           
@@ -104,24 +106,53 @@ jobs:
             EXT=""
             if [ "$GOOS" == "windows" ]; then EXT=".exe"; fi
             
-            OUTPUT_NAME="${{ matrix.name_prefix }}-${{ steps.upstream_check.outputs.upstream_tag }}-${GOOS}-${GOARCH}${EXT}"
+            OUTPUT_NAME="${{ matrix.name_prefix }}-${TAG}-${GOOS}-${GOARCH}${EXT}"
             echo "Building $OUTPUT_NAME using ${{ matrix.pkg_path }}..."
             
             CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH go build -trimpath -ldflags="-s -w" -o "../dist/$OUTPUT_NAME" ${{ matrix.pkg_path }}
             
-            # Create tar.gz / zip
             cd ../dist
+            
+            # 1. Custom named archives
             if [ "$GOOS" == "windows" ]; then
               zip "${OUTPUT_NAME%.exe}.zip" "$OUTPUT_NAME"
-              rm "$OUTPUT_NAME"
             else
               tar -czf "${OUTPUT_NAME}.tar.gz" "$OUTPUT_NAME"
-              rm "$OUTPUT_NAME"
             fi
+            
+            # 2. Ecosystem standard naming
+            if [ "${{ matrix.target }}" == "xray" ]; then
+              # Standard Xray package naming: Xray-linux-64.zip, Xray-linux-arm64-v8a.zip, etc.
+              XRAY_ARCH="$GOARCH"
+              XRAY_OS="$GOOS"
+              if [ "$GOARCH" == "amd64" ]; then XRAY_ARCH="64"; fi
+              if [ "$GOARCH" == "arm64" ]; then XRAY_ARCH="arm64-v8a"; fi
+              if [ "$GOOS" == "darwin" ]; then XRAY_OS="macos"; fi
+              
+              STD_ZIP="Xray-${XRAY_OS}-${XRAY_ARCH}.zip"
+              cp "$OUTPUT_NAME" "xray${EXT}"
+              zip "$STD_ZIP" "xray${EXT}"
+              rm "xray${EXT}"
+              
+              # Generate .dgst sidecar for 3x-ui and downstream tool checksum verification
+              SHA256_VAL=$(sha256sum "$STD_ZIP" | awk '{print $1}')
+              echo "SHA256(${STD_ZIP})= ${SHA256_VAL}" > "${STD_ZIP}.dgst"
+            elif [ "${{ matrix.target }}" == "mihomo" ]; then
+              # Standard Mihomo package naming: mihomo-linux-amd64-v1.19.30.gz / .zip
+              if [ "$GOOS" == "windows" ]; then
+                cp "$OUTPUT_NAME" "mihomo.exe"
+                zip "mihomo-${GOOS}-${GOARCH}-${TAG}.zip" "mihomo.exe"
+                rm "mihomo.exe"
+              else
+                gzip -c "$OUTPUT_NAME" > "mihomo-${GOOS}-${GOARCH}-${TAG}.gz"
+              fi
+            fi
+            
+            rm "$OUTPUT_NAME"
             cd ../upstream_src
           done
           
-          # Generate SHA256 checksums
+          # Generate consolidated SHA256 checksums
           cd ../dist
           sha256sum * > sha256sums.txt
 
@@ -135,9 +166,10 @@ jobs:
             Automated build of **${{ matrix.repo }}** `${{ steps.upstream_check.outputs.upstream_tag }}` with native **Chitanda Protocol (`h2`, `h3`, `auto`, `h1`)** integrated.
             
             ### Included Assets:
-            - Multi-platform binaries (Linux AMD64/ARM64, Windows AMD64, macOS ARM64)
-            - Checksums: `sha256sums.txt`
-            - Commit: `${{ github.sha }}`
+            - **Ecosystem Standard Naming**: `Xray-linux-64.zip` (with `.dgst`), `Xray-linux-arm64-v8a.zip`, `mihomo-linux-amd64-...`
+            - **Chitanda Standard Naming**: Multi-platform archives
+            - **Checksums**: `sha256sums.txt`
+            - **Commit**: `${{ github.sha }}`
           files: |
             dist/*
           draft: false
