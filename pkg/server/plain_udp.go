@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"net"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -12,31 +13,52 @@ import (
 	"myxray/internal/target"
 )
 
+type udpTask struct {
+	sessionID  uint64
+	clientAddr *net.UDPAddr
+	targetAddr string
+	payload    []byte
+	seq        uint64
+}
+
 type PlainUDPServer struct {
 	codec      *plainudp.Codec
 	conn       *net.UDPConn
-	sessions   sync.Map // string(clientAddr) -> *plainUDPSession
+	sessions   sync.Map // uint64(sessionID) -> *plainUDPSession
+	workers    []chan udpTask
 	resolveUDP func(ctx context.Context, address string) (*net.UDPAddr, error)
 	closed     atomic.Bool
 }
 
 type plainUDPSession struct {
-	clientAddr *net.UDPAddr
+	sessionID  uint64
+	clientAddr atomic.Pointer[net.UDPAddr]
 	targets    sync.Map // string(targetAddr) -> *net.UDPConn
 	lastActive atomic.Int64
 	replayMu   sync.Mutex
 	replay     frame.ReplayWindow
 }
 
-// NewPlainUDPServer creates a new plain-udp listener using a single pre-derived Codec instance.
+// NewPlainUDPServer creates a new plain-udp listener with a bounded worker pool.
 func NewPlainUDPServer(conn *net.UDPConn, psk []byte) (*PlainUDPServer, error) {
 	codec, err := plainudp.NewCodec(psk)
 	if err != nil {
 		return nil, err
 	}
+
+	numWorkers := runtime.NumCPU() * 2
+	if numWorkers < 8 {
+		numWorkers = 8
+	}
+	workers := make([]chan udpTask, numWorkers)
+	for i := range workers {
+		workers[i] = make(chan udpTask, 2048)
+	}
+
 	return &PlainUDPServer{
 		codec:      codec,
 		conn:       conn,
+		workers:    workers,
 		resolveUDP: target.ResolveUDPAddr,
 	}, nil
 }
@@ -46,9 +68,14 @@ func (s *PlainUDPServer) SetResolveUDPForTest(fn func(ctx context.Context, addre
 	s.resolveUDP = fn
 }
 
-// Serve starts the UDP packet read loop.
+// Serve starts the worker pool and the UDP packet read loop.
 func (s *PlainUDPServer) Serve(ctx context.Context) error {
 	go s.cleaner(ctx)
+
+	// Start bounded worker goroutines
+	for i, ch := range s.workers {
+		go s.workerLoop(ctx, i, ch)
+	}
 
 	buf := make([]byte, 64<<10)
 	for {
@@ -66,36 +93,63 @@ func (s *PlainUDPServer) Serve(ctx context.Context) error {
 
 		now := time.Now()
 		// 1. Decrypt and authenticate FIRST. Unauthenticated packets are dropped with zero state mutation.
-		targetAddr, payload, _, seq, err := s.codec.DecodePacket(buf[:n], now)
+		sessionID, targetAddr, payload, _, seq, err := s.codec.DecodePacket(buf[:n], now)
 		if err != nil {
 			continue // Drop invalid / tampered / expired packets silently
 		}
 
-		// 2. Dispatch asynchronously so DNS / DialUDP never blocks the listener thread.
-		go s.dispatch(ctx, clientAddr, targetAddr, payload, seq)
+		// 2. Dispatch to bounded worker queue (hashed by SessionID for serial in-order processing per session)
+		workerIdx := sessionID % uint64(len(s.workers))
+		task := udpTask{
+			sessionID:  sessionID,
+			clientAddr: clientAddr,
+			targetAddr: targetAddr,
+			payload:    payload,
+			seq:        seq,
+		}
+
+		select {
+		case s.workers[workerIdx] <- task:
+		default:
+			// Queue full under extreme load; drop packet without stalling socket loop
+		}
 	}
 }
 
-func (s *PlainUDPServer) dispatch(ctx context.Context, clientAddr *net.UDPAddr, targetAddr string, payload []byte, seq uint64) {
-	clientKey := clientAddr.String()
-	val, _ := s.sessions.LoadOrStore(clientKey, &plainUDPSession{
-		clientAddr: clientAddr,
+func (s *PlainUDPServer) workerLoop(ctx context.Context, workerID int, tasks <-chan udpTask) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case task, ok := <-tasks:
+			if !ok {
+				return
+			}
+			s.processTask(ctx, task)
+		}
+	}
+}
+
+func (s *PlainUDPServer) processTask(ctx context.Context, task udpTask) {
+	val, _ := s.sessions.LoadOrStore(task.sessionID, &plainUDPSession{
+		sessionID: task.sessionID,
 	})
 	session := val.(*plainUDPSession)
+	session.clientAddr.Store(task.clientAddr)
 	session.lastActive.Store(time.Now().Unix())
 
-	// 3. Check per-session replay window AFTER cryptographic authentication.
+	// 3. Cryptographic Anti-Replay: Session-isolated replay window check (executed ONLY on authenticated packets)
 	session.replayMu.Lock()
-	accepted := session.replay.Accept(seq)
+	accepted := session.replay.Accept(task.seq)
 	session.replayMu.Unlock()
 	if !accepted {
-		return // Drop replayed packet
+		return // Drop replayed packet (even if replayed from a different IP/port!)
 	}
 
-	targetConnVal, ok := session.targets.Load(targetAddr)
+	targetConnVal, ok := session.targets.Load(task.targetAddr)
 	var upstreamConn *net.UDPConn
 	if !ok {
-		resolved, err := s.resolveUDP(ctx, targetAddr)
+		resolved, err := s.resolveUDP(ctx, task.targetAddr)
 		if err != nil {
 			return
 		}
@@ -104,19 +158,19 @@ func (s *PlainUDPServer) dispatch(ctx context.Context, clientAddr *net.UDPAddr, 
 		if err != nil {
 			return
 		}
-		actual, loaded := session.targets.LoadOrStore(targetAddr, upConn)
+		actual, loaded := session.targets.LoadOrStore(task.targetAddr, upConn)
 		if loaded {
 			_ = upConn.Close()
 			upstreamConn = actual.(*net.UDPConn)
 		} else {
 			upstreamConn = upConn
-			go s.listenUpstream(ctx, session, targetAddr, upstreamConn)
+			go s.listenUpstream(ctx, session, task.targetAddr, upstreamConn)
 		}
 	} else {
 		upstreamConn = targetConnVal.(*net.UDPConn)
 	}
 
-	_, _ = upstreamConn.Write(payload)
+	_, _ = upstreamConn.Write(task.payload)
 }
 
 func (s *PlainUDPServer) listenUpstream(ctx context.Context, session *plainUDPSession, targetAddr string, upstreamConn *net.UDPConn) {
@@ -134,12 +188,15 @@ func (s *PlainUDPServer) listenUpstream(ctx context.Context, session *plainUDPSe
 		}
 
 		session.lastActive.Store(time.Now().Unix())
-		encrypted, err := s.codec.EncodePacket(nil, targetAddr, buf[:n], time.Now())
+		encrypted, err := s.codec.EncodePacket(nil, session.sessionID, targetAddr, buf[:n], time.Now())
 		if err != nil {
 			continue
 		}
 
-		_, _ = s.conn.WriteToUDP(encrypted, session.clientAddr)
+		clientAddr := session.clientAddr.Load()
+		if clientAddr != nil {
+			_, _ = s.conn.WriteToUDP(encrypted, clientAddr)
+		}
 	}
 }
 
@@ -172,6 +229,9 @@ func (s *PlainUDPServer) Close() error {
 	s.closed.Store(true)
 	if s.conn != nil {
 		_ = s.conn.Close()
+	}
+	for _, ch := range s.workers {
+		close(ch)
 	}
 	s.sessions.Range(func(key, value any) bool {
 		session := value.(*plainUDPSession)

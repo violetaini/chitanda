@@ -53,7 +53,7 @@ func DeriveKey(psk []byte) [32]byte {
 }
 
 // Codec provides stateless ChaCha20-Poly1305 AEAD encryption and decryption.
-// Replay protection is decoupled and maintained per authenticated session.
+// Anti-replay protection is decoupled and maintained per authenticated SessionID.
 type Codec struct {
 	key      [32]byte
 	aead     cipher.AEAD
@@ -73,16 +73,18 @@ func NewCodec(psk []byte) (*Codec, error) {
 	}, nil
 }
 
-// EncodePacket encrypts target address and payload into a plain-udp datagram.
-func (c *Codec) EncodePacket(dst []byte, targetAddr string, payload []byte, now time.Time) ([]byte, error) {
+// EncodePacket encrypts sessionID, target address and payload into a plain-udp datagram.
+func (c *Codec) EncodePacket(dst []byte, sessionID uint64, targetAddr string, payload []byte, now time.Time) ([]byte, error) {
 	addrBuf, err := encodeTargetAddress(targetAddr)
 	if err != nil {
 		return nil, err
 	}
 
-	plaintext := make([]byte, 0, len(addrBuf)+len(payload))
-	plaintext = append(plaintext, addrBuf...)
-	plaintext = append(plaintext, payload...)
+	// Plaintext: [SessionID (8B)] [Target SOCKS5 Addr] [Payload]
+	plaintext := make([]byte, 8+len(addrBuf)+len(payload))
+	binary.BigEndian.PutUint64(plaintext[0:8], sessionID)
+	copy(plaintext[8:], addrBuf)
+	copy(plaintext[8+len(addrBuf):], payload)
 
 	seq := c.sequence.Add(1)
 
@@ -108,18 +110,18 @@ func (c *Codec) EncodePacket(dst []byte, targetAddr string, payload []byte, now 
 	return dst, nil
 }
 
-// DecodePacket decrypts a plain-udp datagram, authenticates via AEAD, and extracts target address and payload.
+// DecodePacket decrypts a plain-udp datagram, authenticates via AEAD, and extracts sessionID, target address and payload.
 // It is strictly stateless and verifies the cryptographic tag FIRST before returning seq to prevent replay window poisoning.
-func (c *Codec) DecodePacket(packet []byte, now time.Time) (targetAddr string, payload []byte, timestamp uint64, seq uint64, err error) {
-	if len(packet) < HeaderSize+1+4+2+16 { // min size with IPv4
-		return "", nil, 0, 0, ErrPacketTooShort
+func (c *Codec) DecodePacket(packet []byte, now time.Time) (sessionID uint64, targetAddr string, payload []byte, timestamp uint64, seq uint64, err error) {
+	if len(packet) < HeaderSize+8+1+4+2+16 { // min size with SessionID + IPv4
+		return 0, "", nil, 0, 0, ErrPacketTooShort
 	}
 
 	timestamp = binary.BigEndian.Uint64(packet[0:8])
 	nowSec := uint64(now.Unix())
 	diff := int64(nowSec) - int64(timestamp)
 	if diff < -int64(MaxTimestampSkew/time.Second) || diff > int64(MaxTimestampSkew/time.Second) {
-		return "", nil, timestamp, 0, ErrTimestampExpired
+		return 0, "", nil, timestamp, 0, ErrTimestampExpired
 	}
 
 	seq = binary.BigEndian.Uint64(packet[8:16])
@@ -130,16 +132,22 @@ func (c *Codec) DecodePacket(packet []byte, now time.Time) (targetAddr string, p
 	// 1. Authenticate and decrypt FIRST. Unauthenticated packets fail immediately without modifying any state.
 	plaintext, err := c.aead.Open(nil, nonce, ciphertextWithTag, ad)
 	if err != nil {
-		return "", nil, timestamp, seq, ErrDecryptionFailed
+		return 0, "", nil, timestamp, seq, ErrDecryptionFailed
 	}
+
+	if len(plaintext) < 8 {
+		return 0, "", nil, timestamp, seq, ErrPacketTooShort
+	}
+
+	sessionID = binary.BigEndian.Uint64(plaintext[0:8])
 
 	// 2. Parse target address and payload.
-	targetAddr, payload, err = decodeTargetAddress(plaintext)
+	targetAddr, payload, err = decodeTargetAddress(plaintext[8:])
 	if err != nil {
-		return "", nil, timestamp, seq, err
+		return sessionID, "", nil, timestamp, seq, err
 	}
 
-	return targetAddr, payload, timestamp, seq, nil
+	return sessionID, targetAddr, payload, timestamp, seq, nil
 }
 
 func encodeTargetAddress(address string) ([]byte, error) {

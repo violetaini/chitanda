@@ -19,6 +19,7 @@ func TestPlainUDPRoundTripAndReplay(t *testing.T) {
 	}
 	now := time.Now()
 	var replay frame.ReplayWindow
+	sessionID := uint64(0x1122334455667788)
 
 	testCases := []struct {
 		target  string
@@ -31,16 +32,19 @@ func TestPlainUDPRoundTripAndReplay(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		packet, err := codec.EncodePacket(nil, tc.target, []byte(tc.payload), now)
+		packet, err := codec.EncodePacket(nil, sessionID, tc.target, []byte(tc.payload), now)
 		if err != nil {
 			t.Fatalf("EncodePacket(%q): %v", tc.target, err)
 		}
 
-		decodedTarget, decodedPayload, ts, seq, err := codec.DecodePacket(packet, now)
+		decodedSessionID, decodedTarget, decodedPayload, ts, seq, err := codec.DecodePacket(packet, now)
 		if err != nil {
 			t.Fatalf("DecodePacket(%q): %v", tc.target, err)
 		}
 
+		if decodedSessionID != sessionID {
+			t.Fatalf("sessionID %x != expected %x", decodedSessionID, sessionID)
+		}
 		if decodedTarget != tc.target {
 			t.Fatalf("target %q != expected %q", decodedTarget, tc.target)
 		}
@@ -77,14 +81,12 @@ func TestUnauthenticatedPacketCannotPoisonReplayWindow(t *testing.T) {
 
 	// Attacker crafts unauthenticated packet with high sequence number
 	fakePacket := make([]byte, 100)
-	// valid timestamp
 	nowSec := uint64(now.Unix())
 	binary.BigEndian.PutUint64(fakePacket[0:8], nowSec)
-	// high sequence number
 	binary.BigEndian.PutUint64(fakePacket[8:16], math.MaxUint64)
 
 	// Decode must fail immediately due to AEAD decryption failure
-	_, _, _, _, err = codec.DecodePacket(fakePacket, now)
+	_, _, _, _, _, err = codec.DecodePacket(fakePacket, now)
 	if err != ErrDecryptionFailed {
 		t.Fatalf("expected ErrDecryptionFailed, got %v", err)
 	}
@@ -104,7 +106,7 @@ func TestPlainUDPTamperAndExpire(t *testing.T) {
 	}
 	now := time.Now()
 
-	packet, err := codec.EncodePacket(nil, "1.1.1.1:53", []byte("hello"), now)
+	packet, err := codec.EncodePacket(nil, 0x1234, "1.1.1.1:53", []byte("hello"), now)
 	if err != nil {
 		t.Fatalf("EncodePacket: %v", err)
 	}
@@ -113,13 +115,13 @@ func TestPlainUDPTamperAndExpire(t *testing.T) {
 	tampered := make([]byte, len(packet))
 	copy(tampered, packet)
 	tampered[len(tampered)-1] ^= 0xff
-	if _, _, _, _, err := codec.DecodePacket(tampered, now); err == nil {
+	if _, _, _, _, _, err := codec.DecodePacket(tampered, now); err == nil {
 		t.Fatal("expected decryption error on tampered packet")
 	}
 
 	// Expired packet (>30s)
 	future := now.Add(45 * time.Second)
-	if _, _, _, _, err := codec.DecodePacket(packet, future); err != ErrTimestampExpired {
+	if _, _, _, _, _, err := codec.DecodePacket(packet, future); err != ErrTimestampExpired {
 		t.Fatalf("expected ErrTimestampExpired on out-of-window packet, got %v", err)
 	}
 }

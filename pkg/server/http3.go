@@ -126,9 +126,13 @@ func (s *Server) serveHTTP3TCP(w http.ResponseWriter, r *http.Request, targetAdd
 	}
 	defer upstream.Close()
 
+	useFraming := r.Header.Get(headerFraming) == "1" || r.Header.Get(headerMode) == "tcp-v2" || r.Header.Get(headerMode) == "tcp-h2-framed"
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set(headerSessionOK, "1")
+	if useFraming {
+		w.Header().Set(headerFraming, "1")
+	}
 	if r.TLS != nil && !r.TLS.HandshakeComplete {
 		w.Header().Set("X-Session-Early", "1")
 	}
@@ -143,20 +147,33 @@ func (s *Server) serveHTTP3TCP(w http.ResponseWriter, r *http.Request, targetAdd
 	}()
 	uploadDone := make(chan error, 1)
 	go func() {
-		bufPtr := copyBufferPool.Get().(*[]byte)
-		defer copyBufferPool.Put(bufPtr)
-		_, uploadErr := io.CopyBuffer(upstream, stream, *bufPtr)
-		if uploadErr != nil {
-			_ = upstream.Close()
+		if useFraming {
+			uploadErr := copyDataFramesToTCP(stream, upstream)
+			if uploadErr != nil {
+				_ = upstream.Close()
+			}
+			uploadDone <- uploadErr
+		} else {
+			bufPtr := copyBufferPool.Get().(*[]byte)
+			defer copyBufferPool.Put(bufPtr)
+			_, uploadErr := io.CopyBuffer(upstream, stream, *bufPtr)
+			if uploadErr != nil {
+				_ = upstream.Close()
+			}
+			uploadDone <- uploadErr
 		}
-		uploadDone <- uploadErr
 	}()
-	bufPtr := copyBufferPool.Get().(*[]byte)
-	_, err = io.CopyBuffer(stream, upstream, *bufPtr)
-	copyBufferPool.Put(bufPtr)
-	if err != nil {
-		stream.CancelWrite(0)
-		return
+
+	if useFraming {
+		_ = frame.CopyAsDataFramesAndClose(stream, upstream)
+	} else {
+		bufPtr := copyBufferPool.Get().(*[]byte)
+		_, err = io.CopyBuffer(stream, upstream, *bufPtr)
+		copyBufferPool.Put(bufPtr)
+		if err != nil {
+			stream.CancelWrite(0)
+			return
+		}
 	}
 	select {
 	case <-uploadDone:

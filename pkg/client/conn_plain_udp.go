@@ -1,8 +1,11 @@
 package client
 
 import (
+	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -13,6 +16,7 @@ import (
 )
 
 type plainUDPConn struct {
+	sessionID  uint64
 	conn       *net.UDPConn
 	serverAddr *net.UDPAddr
 	codec      *plainudp.Codec
@@ -39,7 +43,15 @@ func newPlainUDPConn(server string, psk []byte) (*plainUDPConn, error) {
 		return nil, err
 	}
 
+	var sessionBytes [8]byte
+	if _, err := io.ReadFull(rand.Reader, sessionBytes[:]); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("generate session ID: %w", err)
+	}
+	sessionID := binary.BigEndian.Uint64(sessionBytes[:])
+
 	return &plainUDPConn{
+		sessionID:  sessionID,
 		conn:       conn,
 		serverAddr: srvAddr,
 		codec:      codec,
@@ -58,9 +70,12 @@ func (c *plainUDPConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 			return 0, nil, err
 		}
 
-		targetAddrStr, payload, _, seq, err := c.codec.DecodePacket(c.buf[:readN], time.Now())
+		sessionID, targetAddrStr, payload, _, seq, err := c.codec.DecodePacket(c.buf[:readN], time.Now())
 		if err != nil {
 			continue // Drop corrupt, unauthenticated, or expired datagrams
+		}
+		if sessionID != c.sessionID {
+			continue // Drop mismatched session datagrams
 		}
 
 		c.replayMu.Lock()
@@ -85,7 +100,7 @@ func (c *plainUDPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 		return 0, errors.New("conn closed")
 	}
 
-	packet, err := c.codec.EncodePacket(nil, addr.String(), p, time.Now())
+	packet, err := c.codec.EncodePacket(nil, c.sessionID, addr.String(), p, time.Now())
 	if err != nil {
 		return 0, err
 	}

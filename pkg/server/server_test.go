@@ -202,7 +202,7 @@ func TestPlainUDPServer(t *testing.T) {
 
 	payload := []byte("UDP ping message")
 	codec, _ := plainudp.NewCodec(psk)
-	pkt, err := codec.EncodePacket(nil, echoLn.LocalAddr().String(), payload, time.Now())
+	pkt, err := codec.EncodePacket(nil, 0x8899aabbccddeeff, echoLn.LocalAddr().String(), payload, time.Now())
 	if err != nil {
 		t.Fatalf("EncodePacket: %v", err)
 	}
@@ -219,7 +219,7 @@ func TestPlainUDPServer(t *testing.T) {
 		t.Fatalf("ReadFromUDP response: %v", err)
 	}
 
-	targetAddr, decodedPayload, _, _, err := codec.DecodePacket(recvBuf[:n], time.Now())
+	_, targetAddr, decodedPayload, _, _, err := codec.DecodePacket(recvBuf[:n], time.Now())
 	if err != nil {
 		t.Fatalf("DecodePacket response: %v", err)
 	}
