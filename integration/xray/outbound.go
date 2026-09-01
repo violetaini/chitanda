@@ -58,12 +58,12 @@ func NewOutboundHandler(ctx context.Context, config *OutboundConfig) (*OutboundH
 }
 
 func (h *OutboundHandler) Process(ctx context.Context, link *transport.Link, dialer internet.Dialer) error {
-	outbounds := session.OutboundFromContext(ctx)
-	if outbounds == nil || !outbounds.Target.IsValid() {
+	outboundSession := session.OutboundFromContext(ctx)
+	if outboundSession == nil || !outboundSession.Target.IsValid() {
 		return fmt.Errorf("chitanda: target not found in context")
 	}
 
-	destination := outbounds.Target
+	destination := outboundSession.Target
 	targetAddr := destination.NetAddr()
 
 	if destination.Network == xnet.Network_TCP {

@@ -22,15 +22,17 @@ def inject_mihomo(mihomo_dir, chitanda_dir):
         with open(adapters_go, "r", encoding="utf-8") as f:
             content = f.read()
         if 'Chitanda' not in content:
-            # 1) Add Chitanda to const ( ... ) enum
+            # 1) Add Chitanda to const ( ... ) enum (ONLY replace FIRST occurrence of Shadowsocks)
             content = content.replace(
                 '\tShadowsocks',
-                '\tChitanda\n\tShadowsocks'
+                '\tChitanda\n\tShadowsocks',
+                1
             )
-            # 2) Add case Chitanda: return "Chitanda" in String()
+            # 2) Add case Chitanda: return "Chitanda" in String() (ONLY replace FIRST occurrence)
             content = content.replace(
                 'case Shadowsocks:',
-                'case Chitanda:\n\t\treturn "Chitanda"\n\tcase Shadowsocks:'
+                'case Chitanda:\n\t\treturn "Chitanda"\n\tcase Shadowsocks:',
+                1
             )
             with open(adapters_go, "w", encoding="utf-8") as f:
                 f.write(content)
@@ -50,7 +52,7 @@ def inject_mihomo(mihomo_dir, chitanda_dir):
 		}
 		return NewChitanda(opt)
 	case C.Shadowsocks:'''
-            content = content.replace(target_hook, new_hook)
+            content = content.replace(target_hook, new_hook, 1)
             with open(parser_go, "w", encoding="utf-8") as f:
                 f.write(content)
             print(f"  [+] Patched {parser_go} with Chitanda decoder")

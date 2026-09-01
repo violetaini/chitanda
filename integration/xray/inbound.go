@@ -13,7 +13,7 @@ import (
 	"github.com/xtls/xray-core/common/session"
 	"github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/features/routing"
-	"github.com/xtls/xray-core/transport/internet"
+	"github.com/xtls/xray-core/transport/internet/stat"
 )
 
 // InboundHandler implements proxy.Inbound for Chitanda protocol in Xray
@@ -41,7 +41,7 @@ func NewInboundHandler(ctx context.Context, config *InboundConfig) (*InboundHand
 
 	srv := server.NewServer(config.Path, []byte(config.PSK), nil, fbHandler, 1024)
 	if config.StrictSNI != "" {
-		srv.SetStrictServerName(config.StrictSNI)
+		srv.SetStrictServerNameForTest(config.StrictSNI)
 	}
 
 	inCtx, inCancel := context.WithCancel(context.Background())
@@ -53,7 +53,6 @@ func NewInboundHandler(ctx context.Context, config *InboundConfig) (*InboundHand
 		cancel:     inCancel,
 	}
 
-	// Route decrypted upstream connections through Xray Dispatcher
 	srv.SetDialTargetForTest(func(ctx context.Context, address string) (net.Conn, error) {
 		dest, err := xnet.ParseDestination("tcp:" + address)
 		if err != nil {
@@ -69,7 +68,7 @@ func NewInboundHandler(ctx context.Context, config *InboundConfig) (*InboundHand
 			return nil, err
 		}
 
-		return internet.NewConnection(link), nil
+		return stat.ConnectionFromLink(link), nil
 	})
 
 	return h, nil
@@ -79,7 +78,7 @@ func (h *InboundHandler) Network() []xnet.Network {
 	return []xnet.Network{xnet.Network_TCP, xnet.Network_UDP}
 }
 
-func (h *InboundHandler) Process(ctx context.Context, network xnet.Network, conn internet.Connection, dispatcher routing.Dispatcher) error {
+func (h *InboundHandler) Process(ctx context.Context, network xnet.Network, conn stat.Connection, dispatcher routing.Dispatcher) error {
 	return nil
 }
 
