@@ -15,8 +15,6 @@ import (
 	C "github.com/metacubex/mihomo/constant"
 )
 
-const ChitandaAdapterType C.AdapterType = "Chitanda"
-
 type ChitandaOption struct {
 	BasicOption
 	PSK       string `proxy:"psk"`
@@ -61,7 +59,7 @@ func NewChitanda(option ChitandaOption) (*Chitanda, error) {
 		Base: &Base{
 			name:   option.Name,
 			addr:   serverAddr,
-			tp:     ChitandaAdapterType,
+			tp:     C.Chitanda,
 			udp:    option.UDP,
 			tfo:    false,
 			iface:  option.Interface,
@@ -143,7 +141,7 @@ func (c *Chitanda) SupportUDP() bool {
 
 func (c *Chitanda) MarshalJSON() ([]byte, error) {
 	return json.Marshal(map[string]any{
-		"type":      ChitandaAdapterType.String(),
+		"type":      C.Chitanda.String(),
 		"server":    c.option.Server,
 		"port":      c.option.Port,
 		"path":      c.option.Path,

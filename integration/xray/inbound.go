@@ -9,7 +9,6 @@ import (
 
 	"chitanda/pkg/server"
 
-	"github.com/xtls/xray-core/common"
 	xnet "github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/session"
 	"github.com/xtls/xray-core/core"
@@ -54,7 +53,7 @@ func NewInboundHandler(ctx context.Context, config *InboundConfig) (*InboundHand
 		cancel:     inCancel,
 	}
 
-	// Override upstream dialer: route through Xray Dispatcher!
+	// Route decrypted upstream connections through Xray Dispatcher
 	srv.SetDialTargetForTest(func(ctx context.Context, address string) (net.Conn, error) {
 		dest, err := xnet.ParseDestination("tcp:" + address)
 		if err != nil {
@@ -81,7 +80,6 @@ func (h *InboundHandler) Network() []xnet.Network {
 }
 
 func (h *InboundHandler) Process(ctx context.Context, network xnet.Network, conn internet.Connection, dispatcher routing.Dispatcher) error {
-	// Standard Xray connection handler
 	return nil
 }
 

@@ -1,10 +1,5 @@
 package chitanda
 
-import (
-	"chitanda/pkg/client"
-	"chitanda/pkg/server"
-)
-
 // InboundConfig specifies configuration for Chitanda inbound proxy
 type InboundConfig struct {
 	PSK          string `json:"psk"`

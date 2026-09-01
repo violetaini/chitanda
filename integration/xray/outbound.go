@@ -3,15 +3,14 @@ package chitanda
 import (
 	"context"
 	"fmt"
-	"io"
 	"net"
 	"sync"
 
 	"chitanda/pkg/client"
 
-	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/buf"
 	xnet "github.com/xtls/xray-core/common/net"
+	"github.com/xtls/xray-core/common/session"
 	"github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/features/policy"
 	"github.com/xtls/xray-core/transport"
@@ -115,8 +114,7 @@ func (h *OutboundHandler) Process(ctx context.Context, link *transport.Link, dia
 			if err != nil {
 				break
 			}
-			mb := buf.NewMultiBuffer()
-			mb = append(mb, buf.FromBytes(recvBuf[:n]))
+			mb := buf.MultiBuffer{buf.FromBytes(recvBuf[:n])}
 			if err := link.Writer.WriteMultiBuffer(mb); err != nil {
 				break
 			}
