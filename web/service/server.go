@@ -269,7 +269,7 @@ func (s *ServerService) GetXrayVersions() ([]string, error) {
 	}
 	var versions []string
 	for _, release := range releases {
-		if strings.HasPrefix(release.TagName, "xray-chitanda-") || release.TagName >= "v1.7.5" {
+		if strings.HasPrefix(release.TagName, "v") {
 			versions = append(versions, release.TagName)
 		}
 	}
