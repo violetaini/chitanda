@@ -1208,6 +1208,12 @@ class Inbound extends XrayCommonClass {
         this.settings = Inbound.Settings.getSettings(protocol);
         if (protocol === Protocols.TROJAN) {
             this.tls = false;
+        } else if (protocol === Protocols.CHITANDA) {
+            if (this.settings && this.settings.transport !== 'h1') {
+                this.stream.security = 'tls';
+            } else {
+                this.stream.security = 'none';
+            }
         }
     }
 
@@ -1355,6 +1361,9 @@ class Inbound extends XrayCommonClass {
     }
 
     canEnableTls() {
+        if (this.protocol === Protocols.CHITANDA) {
+            return this.settings && this.settings.transport !== 'h1';
+        }
         if(![Protocols.VMESS, Protocols.VLESS, Protocols.TROJAN, Protocols.SHADOWSOCKS].includes(this.protocol)) return false;
         return ["tcp", "ws", "http", "quic", "grpc", "httpupgrade" , "splithttp"].includes(this.network);
     }
@@ -1969,7 +1978,7 @@ Inbound.ChitandaSettings = class extends Inbound.Settings {
                 path='/api/v1/sync',
                 transport='h2',
                 strict_sni='',
-                fallback='127.0.0.1:8080') {
+                fallback='default') {
         super(protocol);
         this.psk = psk;
         this.path = path;
@@ -1985,7 +1994,7 @@ Inbound.ChitandaSettings = class extends Inbound.Settings {
             json.path || '/api/v1/sync',
             json.transport || 'h2',
             json.strict_sni || '',
-            json.fallback || '127.0.0.1:8080',
+            json.fallback || 'default',
         );
     }
 

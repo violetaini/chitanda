@@ -136,6 +136,36 @@
                 inModal.inbound.stream.xtls.certs[index].certFile = app.defaultCert;
                 inModal.inbound.stream.xtls.certs[index].keyFile = app.defaultKey;
             },
+            onChitandaTransportChange(val) {
+                if (val === 'h1') {
+                    this.inModal.inbound.stream.security = 'none';
+                } else {
+                    this.inModal.inbound.stream.security = 'tls';
+                }
+            },
+            getChitandaFallbackType() {
+                if (!this.inModal.inbound.settings) return 'default';
+                const fb = this.inModal.inbound.settings.fallback;
+                if (!fb || fb === 'default' || fb === 'builtin' || fb === 'embed') {
+                    return 'default';
+                }
+                if (fb === '127.0.0.1:8080') return '127.0.0.1:8080';
+                if (fb === 'unix:/run/nginx.sock') return 'unix:/run/nginx.sock';
+                if (fb === '/var/www/html') return '/var/www/html';
+                return 'custom';
+            },
+            setChitandaFallbackType(val) {
+                if (!this.inModal.inbound.settings) return;
+                if (val === 'default') {
+                    this.inModal.inbound.settings.fallback = 'default';
+                } else if (val === '127.0.0.1:8080') {
+                    this.inModal.inbound.settings.fallback = '127.0.0.1:8080';
+                } else if (val === 'unix:/run/nginx.sock') {
+                    this.inModal.inbound.settings.fallback = 'unix:/run/nginx.sock';
+                } else if (val === '/var/www/html') {
+                    this.inModal.inbound.settings.fallback = '/var/www/html';
+                }
+            },
             async getNewX25519Cert() {
                 inModal.loading(true);
                 const msg = await HttpUtil.post('/server/getNewX25519Cert');
