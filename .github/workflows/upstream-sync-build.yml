@@ -16,7 +16,7 @@ on:
       force_build:
         description: 'Force build and overwrite existing release assets'
         required: false
-        default: true
+        default: false
         type: boolean
 
 permissions:
@@ -26,13 +26,17 @@ jobs:
   cleanup-legacy:
     runs-on: ubuntu-latest
     steps:
-      - name: Delete legacy release objects
+      - name: Delete legacy and draft release objects
         run: |
-          for tag in "xray-chitanda-v26.3.27" "mihomo-chitanda-v1.19.30"; do
-            rel_id=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" https://api.github.com/repos/${{ github.repository }}/releases/tags/$tag | jq -r .id)
-            if [ "$rel_id" != "null" ] && [ -n "$rel_id" ]; then
-              echo "Deleting legacy release $tag (ID: $rel_id)..."
-              curl -s -X DELETE -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" https://api.github.com/repos/${{ github.repository }}/releases/$rel_id
+          echo "Scanning all releases including drafts for legacy items..."
+          curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" https://api.github.com/repos/${{ github.repository }}/releases | jq -c '.[]' | while read -r rel; do
+            rel_id=$(echo "$rel" | jq -r '.id')
+            tag_name=$(echo "$rel" | jq -r '.tag_name // ""')
+            rel_name=$(echo "$rel" | jq -r '.name // ""')
+            echo "Checking release ID $rel_id (tag: '$tag_name', name: '$rel_name')..."
+            if [[ "$tag_name" == *"xray-chitanda"* || "$tag_name" == *"mihomo-chitanda"* || "$rel_name" == *"xray-chitanda"* || "$rel_name" == *"mihomo-chitanda"* ]]; then
+              echo ">>> Deleting legacy release ID $rel_id ($tag_name / $rel_name)..."
+              curl -s -X DELETE -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" "https://api.github.com/repos/${{ github.repository }}/releases/$rel_id"
             fi
           done
 
@@ -78,11 +82,11 @@ jobs:
           # Check if this release tag already exists in our repo
           RELEASE_EXISTS=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" https://api.github.com/repos/${{ github.repository }}/releases/tags/$LATEST_TAG | jq -r .id)
           
-          if [ "${{ github.event_name }}" == "push" ] || [ "${{ inputs.force_build }}" == "true" ] || [ "$RELEASE_EXISTS" == "null" ] || [ -z "$RELEASE_EXISTS" ]; then
-            echo "Triggering build for $LATEST_TAG (Event: ${{ github.event_name }}, Force: ${{ inputs.force_build }})..."
+          if [ "${{ inputs.force_build }}" == "true" ] || [ "$RELEASE_EXISTS" == "null" ] || [ -z "$RELEASE_EXISTS" ]; then
+            echo "Triggering build for $LATEST_TAG (Force: ${{ inputs.force_build }})..."
             echo "should_build=true" >> $GITHUB_OUTPUT
           else
-            echo "Release $LATEST_TAG already exists and no changes forced. Skipping build."
+            echo "Release $LATEST_TAG already exists. Skipping build."
             echo "should_build=false" >> $GITHUB_OUTPUT
           fi
 
