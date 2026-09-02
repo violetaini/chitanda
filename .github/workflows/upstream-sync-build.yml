@@ -23,7 +23,21 @@ permissions:
   contents: write
 
 jobs:
+  cleanup-legacy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete legacy release objects
+        run: |
+          for tag in "xray-chitanda-v26.3.27" "mihomo-chitanda-v1.19.30"; do
+            rel_id=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" https://api.github.com/repos/${{ github.repository }}/releases/tags/$tag | jq -r .id)
+            if [ "$rel_id" != "null" ] && [ -n "$rel_id" ]; then
+              echo "Deleting legacy release $tag (ID: $rel_id)..."
+              curl -s -X DELETE -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" https://api.github.com/repos/${{ github.repository }}/releases/$rel_id
+            fi
+          done
+
   check-and-build:
+    needs: cleanup-legacy
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
