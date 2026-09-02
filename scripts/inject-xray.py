@@ -65,7 +65,7 @@ def inject_xray(xray_dir, chitanda_dir):
         if 'chitanda' not in content:
             abs_chitanda = os.path.abspath(chitanda_dir).replace('\\', '/')
             content += f"\nreplace chitanda => {abs_chitanda}\n"
-            content += "\nrequire chitanda v0.0.0-unpublished\n"
+            content += "\nrequire (\n\tchitanda v0.0.0-unpublished\n\tgithub.com/quic-go/quic-go v0.59.0\n)\n"
             with open(go_mod, "w", encoding="utf-8") as f:
                 f.write(content)
             print(f"  [+] Patched {go_mod} with replace chitanda => {abs_chitanda}")
