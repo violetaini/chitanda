@@ -16,7 +16,7 @@ on:
       force_build:
         description: 'Force build and overwrite existing release assets'
         required: false
-        default: false
+        default: true
         type: boolean
 
 permissions:
@@ -33,7 +33,6 @@ jobs:
             rel_id=$(echo "$rel" | jq -r '.id')
             tag_name=$(echo "$rel" | jq -r '.tag_name // ""')
             rel_name=$(echo "$rel" | jq -r '.name // ""')
-            echo "Checking release ID $rel_id (tag: '$tag_name', name: '$rel_name')..."
             if [[ "$tag_name" == *"xray-chitanda"* || "$tag_name" == *"mihomo-chitanda"* || "$rel_name" == *"xray-chitanda"* || "$rel_name" == *"mihomo-chitanda"* ]]; then
               echo ">>> Deleting legacy release ID $rel_id ($tag_name / $rel_name)..."
               curl -s -X DELETE -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" "https://api.github.com/repos/${{ github.repository }}/releases/$rel_id"
@@ -82,8 +81,8 @@ jobs:
           # Check if this release tag already exists in our repo
           RELEASE_EXISTS=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" https://api.github.com/repos/${{ github.repository }}/releases/tags/$LATEST_TAG | jq -r .id)
           
-          if [ "${{ inputs.force_build }}" == "true" ] || [ "$RELEASE_EXISTS" == "null" ] || [ -z "$RELEASE_EXISTS" ]; then
-            echo "Triggering build for $LATEST_TAG (Force: ${{ inputs.force_build }})..."
+          if [ "${{ github.event_name }}" == "push" ] || [ "${{ inputs.force_build }}" == "true" ] || [ "$RELEASE_EXISTS" == "null" ] || [ -z "$RELEASE_EXISTS" ]; then
+            echo "Triggering build for $LATEST_TAG (Event: ${{ github.event_name }}, Force: ${{ inputs.force_build }})..."
             echo "should_build=true" >> $GITHUB_OUTPUT
           else
             echo "Release $LATEST_TAG already exists. Skipping build."
@@ -125,7 +124,14 @@ jobs:
             BIN_NAME="${{ matrix.target }}${EXT}"
             echo "Building $BIN_NAME for $GOOS/$GOARCH..."
             
-            CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH go build -trimpath -ldflags="-s -w" -o "../dist/$BIN_NAME" ${{ matrix.pkg_path }}
+            BUILD_FLAGS=""
+            LDFLAGS="-s -w -buildid="
+            if [ "${{ matrix.target }}" == "mihomo" ]; then
+              BUILD_FLAGS="-tags with_gvisor"
+              LDFLAGS="-s -w -buildid= -X github.com/metacubex/mihomo/constant.Version=${TAG}"
+            fi
+            
+            CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH go build $BUILD_FLAGS -trimpath -ldflags="$LDFLAGS" -o "../dist/$BIN_NAME" ${{ matrix.pkg_path }}
             
             cd ../dist
             
@@ -179,6 +185,7 @@ jobs:
             
             ### Package Standard:
             - **Strict Ecosystem Alignment**: Identical naming rules to official upstream releases.
+            - **gVisor TUN Support**: Compiled with `-tags with_gvisor` for full Clash Verge / Mihomo Party TUN compatibility.
             - **Checksum Sidecars**: `.dgst` sidecars and `sha256sums.txt` included.
             - **Commit**: `${{ github.sha }}`
           files: |
