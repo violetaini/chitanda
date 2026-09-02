@@ -20,7 +20,7 @@ import (
 // NewFallback creates a fallback handler based on the target configuration.
 func NewFallback(target, serverName string) (http.Handler, error) {
 	target = strings.TrimSpace(target)
-	if target == "" || target == "embed" || target == "default" {
+	if target == "" || target == "embed" || target == "default" || target == "builtin" {
 		return newERPFallbackHandler(serverName), nil
 	}
 
