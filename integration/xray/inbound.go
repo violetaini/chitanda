@@ -72,9 +72,10 @@ func NewInboundHandler(ctx context.Context, config *InboundConfig) (*InboundHand
 		}
 
 		return &pipeConn{
-			reader: &buf.BufferedReader{Reader: link.Reader},
-			writer: buf.NewBufferedWriter(link.Writer),
-			closer: link.Writer,
+			reader:      &buf.BufferedReader{Reader: link.Reader},
+			writer:      buf.NewBufferedWriter(link.Writer),
+			readCloser:  link.Reader,
+			writeCloser: link.Writer,
 		}, nil
 	})
 
@@ -95,15 +96,21 @@ func (b *bufferedConn) Read(p []byte) (int, error) {
 }
 
 type singleListener struct {
-	conn net.Conn
-	once sync.Once
-	done chan struct{}
+	conn   net.Conn
+	once   sync.Once
+	done   chan struct{}
+	closed atomic.Bool
 }
 
 func (l *singleListener) Accept() (net.Conn, error) {
 	var c net.Conn
 	l.once.Do(func() {
-		c = l.conn
+		c = &closeNotifyConn{
+			Conn: l.conn,
+			onClose: func() {
+				_ = l.Close()
+			},
+		}
 	})
 	if c != nil {
 		return c, nil
@@ -113,16 +120,30 @@ func (l *singleListener) Accept() (net.Conn, error) {
 }
 
 func (l *singleListener) Close() error {
-	select {
-	case <-l.done:
-	default:
+	if l.closed.CompareAndSwap(false, true) {
 		close(l.done)
+		_ = l.conn.Close()
 	}
 	return nil
 }
 
 func (l *singleListener) Addr() net.Addr {
 	return l.conn.LocalAddr()
+}
+
+type closeNotifyConn struct {
+	net.Conn
+	once    sync.Once
+	onClose func()
+}
+
+func (c *closeNotifyConn) Close() error {
+	c.once.Do(func() {
+		if c.onClose != nil {
+			c.onClose()
+		}
+	})
+	return c.Conn.Close()
 }
 
 func (h *InboundHandler) Process(ctx context.Context, network xnet.Network, conn stat.Connection, dispatcher routing.Dispatcher) error {
@@ -174,9 +195,10 @@ func (h *InboundHandler) Close() error {
 }
 
 type pipeConn struct {
-	reader *buf.BufferedReader
-	writer *buf.BufferedWriter
-	closer interface{}
+	reader      *buf.BufferedReader
+	writer      *buf.BufferedWriter
+	readCloser  io.Closer
+	writeCloser io.Closer
 }
 
 func (c *pipeConn) Read(b []byte) (n int, err error) {
@@ -193,10 +215,17 @@ func (c *pipeConn) Write(b []byte) (n int, err error) {
 
 func (c *pipeConn) Close() error {
 	_ = c.writer.Flush()
-	if c.closer != nil {
-		return common.Close(c.closer)
+	var err1, err2 error
+	if c.writeCloser != nil {
+		err1 = common.Close(c.writeCloser)
 	}
-	return nil
+	if c.readCloser != nil {
+		err2 = common.Close(c.readCloser)
+	}
+	if err1 != nil {
+		return err1
+	}
+	return err2
 }
 
 func (c *pipeConn) LocalAddr() net.Addr                { return &net.TCPAddr{IP: net.IPv4zero, Port: 0} }

@@ -22,7 +22,7 @@ const (
 	ServerHelloSize    = 40 // 24B ServerNonce + 16B ServerAuthTag
 	MaxChunkPayloadLen = 16384
 	MaxChunkWireLen    = MaxChunkPayloadLen + 16 // 16B Poly1305 tag
-	MaxTimestampSkew   = 30 * time.Second
+	MaxTimestampSkew   = 90 * time.Second
 
 	DomainClientHello = "MYXRAY-H1-CLIENT-V1"
 	DomainSessionInfo = "MYXRAY-H1-SESSION-V1"

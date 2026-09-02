@@ -125,40 +125,31 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		flusher.Flush()
 	}
 
-	uploadDone := make(chan error, 1)
+	done := make(chan struct{}, 2)
 	go func() {
 		bufPtr := copyBufferPool.Get().(*[]byte)
 		defer copyBufferPool.Put(bufPtr)
-		_, uploadErr := io.CopyBuffer(upstream, r.Body, *bufPtr)
-		if uploadErr == nil {
-			if tcp, ok := upstream.(*net.TCPConn); ok {
-				uploadErr = tcp.CloseWrite()
-			}
-		} else {
-			_ = upstream.Close()
-		}
-		uploadDone <- uploadErr
+		_, _ = io.CopyBuffer(upstream, r.Body, *bufPtr)
+		_ = upstream.Close()
+		done <- struct{}{}
 	}()
 
-	if useFraming {
-		_ = frame.CopyAsDataFramesAndClose(flushWriter{w: w}, upstream)
-	} else {
-		var downloadErr error
-		bufPtr := copyBufferPool.Get().(*[]byte)
-		_, downloadErr = io.CopyBuffer(flushWriter{w: w}, upstream, *bufPtr)
-		copyBufferPool.Put(bufPtr)
-		if downloadErr != nil {
-			_ = upstream.Close()
-			return
+	go func() {
+		if useFraming {
+			_ = frame.CopyAsDataFramesAndClose(flushWriter{w: w}, upstream)
+		} else {
+			bufPtr := copyBufferPool.Get().(*[]byte)
+			defer copyBufferPool.Put(bufPtr)
+			_, _ = io.CopyBuffer(flushWriter{w: w}, upstream, *bufPtr)
 		}
-		if tcp, ok := upstream.(*net.TCPConn); ok {
-			_ = tcp.CloseRead()
-		}
-	}
+		done <- struct{}{}
+	}()
+
 	select {
-	case <-uploadDone:
+	case <-done:
 	case <-r.Context().Done():
 	}
+	_ = upstream.Close()
 }
 
 func (s *Server) authorize(r *http.Request, targetAddress, timestamp, nonce, signature string) error {
@@ -289,27 +280,25 @@ func (s *Server) servePlainH1(w http.ResponseWriter, r *http.Request) {
 	framedReader := h1session.NewFramedReader(r.Body, decStream)
 	framedWriter := h1session.NewFramedWriter(w, encStream)
 
-	uploadDone := make(chan error, 1)
+	done := make(chan struct{}, 2)
 	go func() {
 		bufPtr := copyBufferPool.Get().(*[]byte)
 		defer copyBufferPool.Put(bufPtr)
-		_, uploadErr := io.CopyBuffer(upstream, framedReader, *bufPtr)
-		if uploadErr == nil {
-			if tcp, ok := upstream.(*net.TCPConn); ok {
-				_ = tcp.CloseWrite()
-			}
-		} else {
-			_ = upstream.Close()
-		}
-		uploadDone <- uploadErr
+		_, _ = io.CopyBuffer(upstream, framedReader, *bufPtr)
+		_ = upstream.Close()
+		done <- struct{}{}
 	}()
 
-	bufPtr := copyBufferPool.Get().(*[]byte)
-	_, _ = io.CopyBuffer(framedWriter, upstream, *bufPtr)
-	copyBufferPool.Put(bufPtr)
+	go func() {
+		bufPtr := copyBufferPool.Get().(*[]byte)
+		defer copyBufferPool.Put(bufPtr)
+		_, _ = io.CopyBuffer(framedWriter, upstream, *bufPtr)
+		done <- struct{}{}
+	}()
 
 	select {
-	case <-uploadDone:
+	case <-done:
 	case <-r.Context().Done():
 	}
+	_ = upstream.Close()
 }
