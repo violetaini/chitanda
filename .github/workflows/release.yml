@@ -4,14 +4,6 @@ on:
   push:
     branches:
       - 3x-ui
-    paths:
-      - 'database/**'
-      - 'web/**'
-      - 'sub/**'
-      - 'xray/**'
-      - 'main.go'
-      - 'install.sh'
-      - '.github/workflows/release.yml'
   workflow_dispatch:
 
 permissions:
@@ -26,9 +18,11 @@ jobs:
           - platform: "amd64"
             arch_name: "amd64"
             xray_pkg: "64"
+            cc: "gcc"
           - platform: "arm64"
             arch_name: "arm64"
             xray_pkg: "arm64-v8a"
+            cc: "aarch64-linux-gnu-gcc"
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout repository
@@ -37,25 +31,25 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: 'stable'
+          go-version: '1.22'
 
-      - name: Install cross-compilation dependencies
+      - name: Install dependencies
         run: |
           sudo apt-get update
           if [ "${{ matrix.platform }}" == "arm64" ]; then
-            sudo apt install -y gcc-aarch64-linux-gnu
+            sudo apt-get install -y gcc-aarch64-linux-gnu
+          else
+            sudo apt-get install -y gcc
           fi
 
-      - name: Build Customized 3X-UI with Chitanda
+      - name: Build 3X-UI Binary
         run: |
           export CGO_ENABLED=1
           export GOOS=linux
           export GOARCH=${{ matrix.platform }}
-          if [ "${{ matrix.platform }}" == "arm64" ]; then
-            export CC=aarch64-linux-gnu-gcc
-          fi
+          export CC=${{ matrix.cc }}
           
-          go build -ldflags="-s -w" -o xui-release -v main.go
+          go build -ldflags="-s -w" -o xui-release .
           
           mkdir -p x-ui/bin
           cp xui-release x-ui/x-ui
@@ -63,33 +57,50 @@ jobs:
           cp x-ui.service x-ui/
           cp x-ui.sh x-ui/
           
-          cd x-ui/bin
-          XRAY_URL="https://github.com/violetaini/chitanda/releases/download/xray-chitanda-v26.3.27/"
-          wget ${XRAY_URL}Xray-linux-${{ matrix.xray_pkg }}.zip
-          unzip Xray-linux-${{ matrix.xray_pkg }}.zip
-          rm -f Xray-linux-${{ matrix.xray_pkg }}.zip
-          mv xray xray-linux-${{ matrix.arch_name }}
-          chmod +x xray-linux-${{ matrix.arch_name }}
+          # Download Chitanda Xray-core
+          curl -fL -o x-ui/bin/xray.zip https://github.com/violetaini/chitanda/releases/download/xray-chitanda-v26.3.27/Xray-linux-${{ matrix.xray_pkg }}.zip
+          unzip -o x-ui/bin/xray.zip -d x-ui/bin/
+          rm -f x-ui/bin/xray.zip
+          mv x-ui/bin/xray x-ui/bin/xray-linux-${{ matrix.arch_name }}
+          chmod +x x-ui/bin/xray-linux-${{ matrix.arch_name }}
           
-          cd ../..
           tar -czvf "x-ui-linux-${{ matrix.arch_name }}.tar.gz" x-ui
           mkdir -p dist
           mv "x-ui-linux-${{ matrix.arch_name }}.tar.gz" dist/
 
-      - name: Upload Release Assets
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: x-ui-linux-${{ matrix.arch_name }}
+          path: dist/*
+          retention-days: 1
+
+  publish-release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all_dist
+          merge-multiple: true
+
+      - name: Create / Update Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: "3x-ui-v2.3.11"
           name: "3X-UI v2.3.11 (Native Chitanda Protocol Support)"
           body: |
-            Customized **3X-UI v2.3.11** with full visual UI support for **Chitanda Protocol** (`h2`, `h3`, `auto`, `h1`).
+            Customized **3X-UI v2.3.11** with native visual UI support for **Chitanda Protocol** (`h2`, `h3`, `auto`, `h1`).
             
-            - Built-in Chitanda Inbound configuration forms
-            - One-click 32-byte PSK Key generator
-            - Integrated `xray-chitanda` core
-            - Automatic Subscription & Node Link generation
+            ### Features:
+            - **Visual Chitanda Inbound Form**: Add/Edit Inbound $	o$ Select `chitanda` directly in Protocol dropdown.
+            - **One-Click PSK Generator**: 32-byte secure pre-shared key generator.
+            - **Transport Modes**: `h2` (default), `h3`, `auto`, `h1`.
+            - **Native Node Subscription**: Export Chitanda node links & configs.
+            - **Bundled Core**: Pre-packaged with `xray-chitanda` multi-arch core.
           files: |
-            dist/*
+            all_dist/*
           draft: false
           prerelease: false
           make_latest: false
