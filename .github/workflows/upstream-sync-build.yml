@@ -31,11 +31,9 @@ jobs:
         include:
           - target: "mihomo"
             repo: "MetaCubeX/mihomo"
-            name_prefix: "mihomo-chitanda"
             pkg_path: "."
           - target: "xray"
             repo: "XTLS/Xray-core"
-            name_prefix: "xray-chitanda"
             pkg_path: "./main"
 
     steps:
@@ -64,13 +62,13 @@ jobs:
           echo "upstream_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
           
           # Check if this release tag already exists in our repo
-          RELEASE_EXISTS=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" https://api.github.com/repos/${{ github.repository }}/releases/tags/${{ matrix.name_prefix }}-$LATEST_TAG | jq -r .id)
+          RELEASE_EXISTS=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" https://api.github.com/repos/${{ github.repository }}/releases/tags/$LATEST_TAG | jq -r .id)
           
           if [ "${{ github.event_name }}" == "push" ] || [ "${{ inputs.force_build }}" == "true" ] || [ "$RELEASE_EXISTS" == "null" ] || [ -z "$RELEASE_EXISTS" ]; then
-            echo "Triggering build for ${{ matrix.name_prefix }}-$LATEST_TAG (Event: ${{ github.event_name }}, Force: ${{ inputs.force_build }})..."
+            echo "Triggering build for $LATEST_TAG (Event: ${{ github.event_name }}, Force: ${{ inputs.force_build }})..."
             echo "should_build=true" >> $GITHUB_OUTPUT
           else
-            echo "Release ${{ matrix.name_prefix }}-$LATEST_TAG already exists and no changes forced. Skipping build."
+            echo "Release $LATEST_TAG already exists and no changes forced. Skipping build."
             echo "should_build=false" >> $GITHUB_OUTPUT
           fi
 
@@ -97,8 +95,8 @@ jobs:
           
           TAG="${{ steps.upstream_check.outputs.upstream_tag }}"
           
-          # Targets: Linux AMD64/ARM64, Windows AMD64, macOS ARM64
-          PLATFORMS=("linux/amd64" "linux/arm64" "windows/amd64" "darwin/arm64")
+          # Platforms: Linux AMD64/ARM64, Windows AMD64, macOS ARM64/AMD64
+          PLATFORMS=("linux/amd64" "linux/arm64" "windows/amd64" "darwin/arm64" "darwin/amd64")
           
           for PLATFORM in "${PLATFORMS[@]}"; do
             GOOS=${PLATFORM%/*}
@@ -106,49 +104,45 @@ jobs:
             EXT=""
             if [ "$GOOS" == "windows" ]; then EXT=".exe"; fi
             
-            OUTPUT_NAME="${{ matrix.name_prefix }}-${TAG}-${GOOS}-${GOARCH}${EXT}"
-            echo "Building $OUTPUT_NAME using ${{ matrix.pkg_path }}..."
+            BIN_NAME="${{ matrix.target }}${EXT}"
+            echo "Building $BIN_NAME for $GOOS/$GOARCH..."
             
-            CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH go build -trimpath -ldflags="-s -w" -o "../dist/$OUTPUT_NAME" ${{ matrix.pkg_path }}
+            CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH go build -trimpath -ldflags="-s -w" -o "../dist/$BIN_NAME" ${{ matrix.pkg_path }}
             
             cd ../dist
             
-            # 1. Custom named archives
-            if [ "$GOOS" == "windows" ]; then
-              zip "${OUTPUT_NAME%.exe}.zip" "$OUTPUT_NAME"
-            else
-              tar -czf "${OUTPUT_NAME}.tar.gz" "$OUTPUT_NAME"
-            fi
-            
-            # 2. Ecosystem standard naming
             if [ "${{ matrix.target }}" == "xray" ]; then
-              # Standard Xray package naming: Xray-linux-64.zip, Xray-linux-arm64-v8a.zip, etc.
+              # Standard upstream Xray naming rules:
+              # Xray-linux-64.zip, Xray-linux-arm64-v8a.zip, Xray-windows-64.zip, Xray-macos-arm64-v8a.zip, Xray-macos-64.zip
               XRAY_ARCH="$GOARCH"
               XRAY_OS="$GOOS"
               if [ "$GOARCH" == "amd64" ]; then XRAY_ARCH="64"; fi
               if [ "$GOARCH" == "arm64" ]; then XRAY_ARCH="arm64-v8a"; fi
-              if [ "$GOOS" == "darwin" ]; then XRAY_OS="macos"; fi
+              if [ "$GOOS" == "darwin" ]; then
+                XRAY_OS="macos"
+                if [ "$GOARCH" == "amd64" ]; then XRAY_ARCH="64"; fi
+                if [ "$GOARCH" == "arm64" ]; then XRAY_ARCH="arm64-v8a"; fi
+              fi
               
               STD_ZIP="Xray-${XRAY_OS}-${XRAY_ARCH}.zip"
-              cp "$OUTPUT_NAME" "xray${EXT}"
               zip "$STD_ZIP" "xray${EXT}"
-              rm "xray${EXT}"
+              rm -f "xray${EXT}"
               
-              # Generate .dgst sidecar for 3x-ui and downstream tool checksum verification
+              # Standard .dgst checksum file (SHA256)
               SHA256_VAL=$(sha256sum "$STD_ZIP" | awk '{print $1}')
               echo "SHA256(${STD_ZIP})= ${SHA256_VAL}" > "${STD_ZIP}.dgst"
             elif [ "${{ matrix.target }}" == "mihomo" ]; then
-              # Standard Mihomo package naming: mihomo-linux-amd64-v1.19.30.gz / .zip
+              # Standard upstream Mihomo naming rules:
+              # mihomo-linux-amd64-v1.19.30.gz, mihomo-linux-arm64-v1.19.30.gz, mihomo-windows-amd64-v1.19.30.zip, etc.
               if [ "$GOOS" == "windows" ]; then
-                cp "$OUTPUT_NAME" "mihomo.exe"
                 zip "mihomo-${GOOS}-${GOARCH}-${TAG}.zip" "mihomo.exe"
-                rm "mihomo.exe"
+                rm -f "mihomo.exe"
               else
-                gzip -c "$OUTPUT_NAME" > "mihomo-${GOOS}-${GOARCH}-${TAG}.gz"
+                gzip -c "$BIN_NAME" > "mihomo-${GOOS}-${GOARCH}-${TAG}.gz"
+                rm -f "$BIN_NAME"
               fi
             fi
             
-            rm "$OUTPUT_NAME"
             cd ../upstream_src
           done
           
@@ -160,15 +154,14 @@ jobs:
         if: steps.upstream_check.outputs.should_build == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: "${{ matrix.name_prefix }}-${{ steps.upstream_check.outputs.upstream_tag }}"
-          name: "${{ matrix.name_prefix }} ${{ steps.upstream_check.outputs.upstream_tag }} (Chitanda Protocol Included)"
+          tag_name: "${{ steps.upstream_check.outputs.upstream_tag }}"
+          name: "${{ matrix.target }} ${{ steps.upstream_check.outputs.upstream_tag }}"
           body: |
-            Automated build of **${{ matrix.repo }}** `${{ steps.upstream_check.outputs.upstream_tag }}` with native **Chitanda Protocol (`h2`, `h3`, `auto`, `h1`)** integrated.
+            Automated release of **${{ matrix.repo }}** `${{ steps.upstream_check.outputs.upstream_tag }}` with native **Chitanda Protocol** integrated.
             
-            ### Included Assets:
-            - **Ecosystem Standard Naming**: `Xray-linux-64.zip` (with `.dgst`), `Xray-linux-arm64-v8a.zip`, `mihomo-linux-amd64-...`
-            - **Chitanda Standard Naming**: Multi-platform archives
-            - **Checksums**: `sha256sums.txt`
+            ### Package Standard:
+            - **Strict Ecosystem Alignment**: Identical naming rules to official upstream releases.
+            - **Checksum Sidecars**: `.dgst` sidecars and `sha256sums.txt` included.
             - **Commit**: `${{ github.sha }}`
           files: |
             dist/*
