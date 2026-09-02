@@ -26,8 +26,7 @@ type plainH1Conn struct {
 }
 
 func (c *Client) dialPlainH1(ctx context.Context, target string) (net.Conn, error) {
-	var dialer net.Dialer
-	rawConn, err := dialer.DialContext(ctx, "tcp", c.cfg.Server)
+	rawConn, err := c.dialRaw(ctx, "tcp", c.cfg.Server)
 	if err != nil {
 		return nil, fmt.Errorf("plain-h1 dial server %q: %w", c.cfg.Server, err)
 	}

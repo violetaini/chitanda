@@ -27,15 +27,21 @@ type h2TransportClient struct {
 	activeStreams atomic.Int64
 }
 
-func newH2TransportClient(server, serverName, rootURL, requestURL, path string, psk []byte, insecureSkipVerify bool) (*h2TransportClient, error) {
+func newH2TransportClient(server, serverName, rootURL, requestURL, path string, psk []byte, insecureSkipVerify bool, dialRaw func(ctx context.Context, network, addr string) (net.Conn, error)) (*h2TransportClient, error) {
 	tlsCfg := &tls.Config{
 		MinVersion:         tls.VersionTLS13,
 		ServerName:         serverName,
 		InsecureSkipVerify: insecureSkipVerify,
 	}
 	dialTLS := func(ctx context.Context, network, _ string) (net.Conn, error) {
-		dialer := net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
-		rawConn, err := dialer.DialContext(ctx, network, server)
+		var rawConn net.Conn
+		var err error
+		if dialRaw != nil {
+			rawConn, err = dialRaw(ctx, network, server)
+		} else {
+			dialer := net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+			rawConn, err = dialer.DialContext(ctx, network, server)
+		}
 		if err != nil {
 			return nil, err
 		}

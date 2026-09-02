@@ -71,6 +71,7 @@ func NewChitanda(option ChitandaOption) (*Chitanda, error) {
 		}),
 		option: &option,
 	}
+	c.dialer = option.NewDialer(c.DialOptions())
 
 	return c, nil
 }
@@ -90,13 +91,16 @@ func (c *Chitanda) getClient() (*client.Client, error) {
 	}
 
 	cli, err := client.New(client.Config{
-		Server:       serverAddr,
-		ServerName:   sni,
-		PSK:          []byte(c.option.PSK),
-		Path:         c.option.Path,
-		TCPTransport: c.option.Transport,
+		Server:             serverAddr,
+		ServerName:         sni,
+		PSK:                []byte(c.option.PSK),
+		Path:               c.option.Path,
+		TCPTransport:       c.option.Transport,
 		TCPPoolSize:        c.option.PoolSize,
 		InsecureSkipVerify: c.option.SkipCertVerify,
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return c.dialer.DialContext(ctx, network, addr)
+		},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("init chitanda client sdk: %w", err)

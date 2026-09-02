@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"sync"
@@ -199,8 +198,8 @@ func (h *InboundHandler) Close() error {
 type pipeConn struct {
 	reader      *buf.BufferedReader
 	writer      *buf.BufferedWriter
-	readCloser  io.Closer
-	writeCloser io.Closer
+	readCloser  interface{}
+	writeCloser interface{}
 }
 
 func (c *pipeConn) Read(b []byte) (n int, err error) {

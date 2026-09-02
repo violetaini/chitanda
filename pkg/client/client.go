@@ -57,6 +57,8 @@ type Config struct {
 	SessionCacheFile      string // optional persistent session cache path
 	QUICInitialPacketSize uint16 // 1200 - 1452, default 1452
 	InsecureSkipVerify    bool   // skip TLS certificate verification
+	DialContext           func(ctx context.Context, network, addr string) (net.Conn, error)
+	ListenPacket          func(ctx context.Context, network, addr string) (net.PacketConn, error)
 }
 
 // Client is the MyXray core client engine.
@@ -71,6 +73,14 @@ type Client struct {
 	prober       *h2Prober
 	mu           sync.Mutex
 	closed       bool
+}
+
+func (c *Client) dialRaw(ctx context.Context, network, addr string) (net.Conn, error) {
+	if c.cfg.DialContext != nil {
+		return c.cfg.DialContext(ctx, network, addr)
+	}
+	var dialer net.Dialer
+	return dialer.DialContext(ctx, network, addr)
 }
 
 // New creates and initializes a new MyXray Client.
@@ -129,7 +139,7 @@ func New(cfg Config) (*Client, error) {
 			h2Count = 0
 		}
 		for i := 0; i < h2Count; i++ {
-			h2Cli, err := newH2TransportClient(cfg.Server, cfg.ServerName, rootURL, requestURL, cfg.Path, cfg.PSK, cfg.InsecureSkipVerify)
+			h2Cli, err := newH2TransportClient(cfg.Server, cfg.ServerName, rootURL, requestURL, cfg.Path, cfg.PSK, cfg.InsecureSkipVerify, cfg.DialContext)
 			if err != nil {
 				return nil, fmt.Errorf("init h2 client %d: %w", i, err)
 			}
