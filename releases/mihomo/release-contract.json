@@ -22,7 +22,20 @@
     "channel": "core/meta",
     "archive": "tar.gz",
     "entry": "clash",
-    "pattern": "clash-{openClashArchitecture}.tar.gz"
+    "assets": {
+      "linux-amd64-v1": "clash-linux-amd64-v1.tar.gz",
+      "linux-arm64": "clash-linux-arm64.tar.gz",
+      "linux-armv7": "clash-linux-armv7.tar.gz",
+      "linux-armv6": "clash-linux-armv6.tar.gz",
+      "linux-armv5": "clash-linux-armv5.tar.gz",
+      "linux-386": "clash-linux-386.tar.gz",
+      "linux-mips64le": "clash-linux-mips64le.tar.gz",
+      "linux-mips64": "clash-linux-mips64.tar.gz",
+      "linux-mips-softfloat": "clash-linux-mips-softfloat.tar.gz",
+      "linux-mipsle-softfloat": "clash-linux-mipsle-softfloat.tar.gz",
+      "linux-riscv64": "clash-linux-riscv64.tar.gz",
+      "linux-loong64-abi2": "clash-linux-loong64-abi2.tar.gz"
+    }
   },
   "integrity": {
     "versionedChecksums": "sha256sums.txt",
