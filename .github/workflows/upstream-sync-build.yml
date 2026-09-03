@@ -112,12 +112,28 @@ jobs:
           
           TAG="${{ steps.upstream_check.outputs.upstream_tag }}"
           
-          # Platforms: Linux AMD64/ARM64, Windows AMD64, macOS ARM64/AMD64
-          PLATFORMS=("linux/amd64" "linux/arm64" "windows/amd64" "darwin/arm64" "darwin/amd64")
+          # Xray preserves its existing ecosystem matrix. Mihomo additionally
+          # publishes every sidecar target required by Clash Verge Rev.
+          if [ "${{ matrix.target }}" == "mihomo" ]; then
+            PLATFORMS=(
+              "linux/amd64" "linux/386" "linux/arm" "linux/arm64"
+              "linux/riscv64" "linux/loong64"
+              "windows/amd64" "windows/386" "windows/arm64"
+              "darwin/amd64" "darwin/arm64"
+            )
+          else
+            PLATFORMS=("linux/amd64" "linux/arm64" "windows/amd64" "darwin/arm64" "darwin/amd64")
+          fi
           
           for PLATFORM in "${PLATFORMS[@]}"; do
             GOOS=${PLATFORM%/*}
             GOARCH=${PLATFORM#*/}
+            GOARM_VALUE=""
+            ASSET_ARCH="$GOARCH"
+            if [ "$GOARCH" == "arm" ]; then
+              GOARM_VALUE="7"
+              ASSET_ARCH="armv7"
+            fi
             EXT=""
             if [ "$GOOS" == "windows" ]; then EXT=".exe"; fi
             
@@ -131,7 +147,7 @@ jobs:
               LDFLAGS="-s -w -buildid= -X github.com/metacubex/mihomo/constant.Version=${TAG}"
             fi
             
-            CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH go build $BUILD_FLAGS -trimpath -ldflags="$LDFLAGS" -o "../dist/$BIN_NAME" ${{ matrix.pkg_path }}
+            CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH GOARM=$GOARM_VALUE go build $BUILD_FLAGS -trimpath -ldflags="$LDFLAGS" -o "../dist/$BIN_NAME" ${{ matrix.pkg_path }}
             
             cd ../dist
             
@@ -157,12 +173,13 @@ jobs:
               echo "SHA256(${STD_ZIP})= ${SHA256_VAL}" > "${STD_ZIP}.dgst"
             elif [ "${{ matrix.target }}" == "mihomo" ]; then
               # Standard upstream Mihomo naming rules:
-              # mihomo-linux-amd64-v1.19.30.gz, mihomo-linux-arm64-v1.19.30.gz, mihomo-windows-amd64-v1.19.30.zip, etc.
+              # mihomo-linux-amd64-v1.19.30.gz, mihomo-linux-armv7-v1.19.30.gz,
+              # mihomo-windows-amd64-v1.19.30.zip, etc.
               if [ "$GOOS" == "windows" ]; then
-                zip "mihomo-${GOOS}-${GOARCH}-${TAG}.zip" "mihomo.exe"
+                zip "mihomo-${GOOS}-${ASSET_ARCH}-${TAG}.zip" "mihomo.exe"
                 rm -f "mihomo.exe"
               else
-                gzip -c "$BIN_NAME" > "mihomo-${GOOS}-${GOARCH}-${TAG}.gz"
+                gzip -c "$BIN_NAME" > "mihomo-${GOOS}-${ASSET_ARCH}-${TAG}.gz"
                 rm -f "$BIN_NAME"
               fi
             fi
@@ -172,6 +189,40 @@ jobs:
           
           # Generate consolidated SHA256 checksums
           cd ../dist
+          if [ "${{ matrix.target }}" == "mihomo" ]; then
+            python3 - "$TAG" "$GITHUB_WORKSPACE/releases/mihomo/release-contract.json" <<'PY'
+            import hashlib
+            import json
+            import sys
+            from pathlib import Path
+
+            tag, contract_path = sys.argv[1:]
+            contract = json.loads(Path(contract_path).read_text(encoding="utf-8"))
+            assets = {}
+            for target, pattern in contract["desktopAssets"].items():
+                name = pattern.format(upstreamTag=tag)
+                path = Path(name)
+                if not path.is_file():
+                    raise SystemExit(f"missing required desktop asset: {target} -> {name}")
+                assets[target] = {
+                    "name": name,
+                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                }
+            Path("version.txt").write_text(tag + "\n", encoding="utf-8")
+            Path("manifest.json").write_text(
+                json.dumps(
+                    {
+                        "schema": contract["schema"],
+                        "upstreamTag": tag,
+                        "assets": assets,
+                    },
+                    indent=2,
+                    sort_keys=True,
+                ) + "\n",
+                encoding="utf-8",
+            )
+            PY
+          fi
           sha256sum * > sha256sums.txt
 
       - name: Publish GitHub Release
@@ -190,6 +241,25 @@ jobs:
             - **Commit**: `${{ github.sha }}`
           files: |
             dist/*
+          draft: false
+          prerelease: false
+          make_latest: false
+          clobber: true
+
+      - name: Publish Stable Mihomo Manifest
+        if: steps.upstream_check.outputs.should_build == 'true' && matrix.target == 'mihomo'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "chitanda-mihomo-latest"
+          name: "Chitanda Mihomo stable channel"
+          body: |
+            Stable discovery channel for the most recent fully-built Chitanda Mihomo release.
+
+            Consumers read `version.txt` and `manifest.json`, then download only
+            the pinned versioned asset after verifying its SHA-256 checksum.
+          files: |
+            dist/version.txt
+            dist/manifest.json
           draft: false
           prerelease: false
           make_latest: false
