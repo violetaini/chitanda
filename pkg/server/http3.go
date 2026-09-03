@@ -17,10 +17,10 @@ import (
 	"github.com/quic-go/quic-go/http3"
 	"golang.org/x/net/ipv4"
 
-	"chitanda/internal/auth"
-	"chitanda/internal/frame"
-	"chitanda/internal/quicconfig"
-	"chitanda/internal/target"
+	"github.com/violetaini/chitanda/internal/auth"
+	"github.com/violetaini/chitanda/internal/frame"
+	"github.com/violetaini/chitanda/internal/quicconfig"
+	"github.com/violetaini/chitanda/internal/target"
 )
 
 const (
@@ -180,8 +180,6 @@ func (s *Server) serveHTTP3TCP(w http.ResponseWriter, r *http.Request, targetAdd
 	case <-r.Context().Done():
 	}
 }
-
-
 
 func copyDataFramesToTCP(stream io.Reader, upstream net.Conn) error {
 	for {
@@ -553,5 +551,3 @@ func (r *udpRelay) Close() {
 	r.mu.Unlock()
 	r.waitGroup.Wait()
 }
-
-

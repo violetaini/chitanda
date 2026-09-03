@@ -85,7 +85,7 @@ import (
 	"net"
 	"time"
 
-	"chitanda/pkg/client"
+	"github.com/violetaini/chitanda/pkg/client"
 )
 
 func main() {

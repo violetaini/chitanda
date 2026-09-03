@@ -62,13 +62,14 @@ def inject_xray(xray_dir, chitanda_dir):
     if os.path.exists(go_mod):
         with open(go_mod, "r", encoding="utf-8") as f:
             content = f.read()
-        if 'chitanda' not in content:
+        module_name = 'github.com/violetaini/chitanda'
+        if module_name not in content:
             abs_chitanda = os.path.abspath(chitanda_dir).replace('\\', '/')
-            content += f"\nreplace chitanda => {abs_chitanda}\n"
-            content += "\nrequire (\n\tchitanda v0.0.0-unpublished\n\tgithub.com/quic-go/quic-go v0.59.0\n)\n"
+            content += f"\nreplace {module_name} => {abs_chitanda}\n"
+            content += f"\nrequire (\n\t{module_name} v0.0.0-unpublished\n\tgithub.com/quic-go/quic-go v0.59.0\n)\n"
             with open(go_mod, "w", encoding="utf-8") as f:
                 f.write(content)
-            print(f"  [+] Patched {go_mod} with replace chitanda => {abs_chitanda}")
+            print(f"  [+] Patched {go_mod} with replace {module_name} => {abs_chitanda}")
 
     print("[*] Injection into Xray-core completed successfully!")
 

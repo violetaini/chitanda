@@ -6,12 +6,12 @@ import (
 	"net"
 	"sync"
 
-	"chitanda/pkg/client"
+	"github.com/violetaini/chitanda/pkg/client"
 
+	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/buf"
 	xnet "github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/session"
-	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/features/policy"
 	"github.com/xtls/xray-core/transport"
@@ -40,11 +40,11 @@ func NewOutboundHandler(ctx context.Context, config *OutboundConfig) (*OutboundH
 	}
 
 	cli, err := client.New(client.Config{
-		Server:       config.Server,
-		ServerName:   config.ServerName,
-		PSK:          []byte(config.Psk),
-		Path:         config.Path,
-		TCPTransport: transportMode,
+		Server:             config.Server,
+		ServerName:         config.ServerName,
+		PSK:                []byte(config.Psk),
+		Path:               config.Path,
+		TCPTransport:       transportMode,
 		TCPPoolSize:        int(poolSize),
 		InsecureSkipVerify: true,
 	})

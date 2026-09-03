@@ -17,8 +17,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"chitanda/internal/auth"
-	"chitanda/pkg/client"
+	"github.com/violetaini/chitanda/internal/auth"
+	"github.com/violetaini/chitanda/pkg/client"
 )
 
 func main() {

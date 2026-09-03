@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"chitanda/internal/auth"
+	"github.com/violetaini/chitanda/internal/auth"
 )
 
 // Config represents the server configuration parameters.

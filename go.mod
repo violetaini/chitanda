@@ -1,4 +1,4 @@
-module chitanda
+module github.com/violetaini/chitanda
 
 go 1.24.0
 

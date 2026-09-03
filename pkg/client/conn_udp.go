@@ -14,9 +14,9 @@ import (
 	quic "github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 
-	"chitanda/internal/frame"
-	"chitanda/internal/quicconfig"
-	"chitanda/internal/sessioncache"
+	"github.com/violetaini/chitanda/internal/frame"
+	"github.com/violetaini/chitanda/internal/quicconfig"
+	"github.com/violetaini/chitanda/internal/sessioncache"
 )
 
 type h3Connection struct {
@@ -90,7 +90,7 @@ func (m *h3TransportManager) ensureConnection(ctx context.Context, current **h3C
 	}
 	_ = udpConn.SetReadBuffer(8 << 20)
 	_ = udpConn.SetWriteBuffer(8 << 20)
-	
+
 	quicConn, err := quic.DialEarly(ctx, udpConn, udpAddr, m.tlsConfig.Clone(), m.quicConfig.Clone())
 	if err != nil {
 		_ = udpConn.Close()

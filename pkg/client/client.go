@@ -17,9 +17,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"chitanda/internal/auth"
-	"chitanda/internal/quicconfig"
-	"chitanda/internal/sessioncache"
+	"github.com/violetaini/chitanda/internal/auth"
+	"github.com/violetaini/chitanda/internal/quicconfig"
+	"github.com/violetaini/chitanda/internal/sessioncache"
 )
 
 const (

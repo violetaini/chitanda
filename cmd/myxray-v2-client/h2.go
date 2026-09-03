@@ -15,8 +15,8 @@ import (
 
 	"golang.org/x/net/http2"
 
-	"chitanda/internal/auth"
-	"chitanda/internal/socks5"
+	"github.com/violetaini/chitanda/internal/auth"
+	"github.com/violetaini/chitanda/internal/socks5"
 )
 
 type h2Client struct {

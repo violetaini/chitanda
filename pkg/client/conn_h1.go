@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"chitanda/internal/h1session"
+	"github.com/violetaini/chitanda/internal/h1session"
 )
 
 type plainH1Conn struct {

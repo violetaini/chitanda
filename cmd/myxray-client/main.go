@@ -22,7 +22,7 @@ import (
 
 	"golang.org/x/net/http2"
 
-	"chitanda/internal/auth"
+	"github.com/violetaini/chitanda/internal/auth"
 )
 
 const (

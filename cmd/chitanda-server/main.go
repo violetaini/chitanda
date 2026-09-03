@@ -4,7 +4,7 @@ import (
 	"flag"
 	"log"
 
-	"chitanda/pkg/server"
+	"github.com/violetaini/chitanda/pkg/server"
 )
 
 func main() {

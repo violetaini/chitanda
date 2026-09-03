@@ -10,7 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"chitanda/pkg/server"
+	"github.com/violetaini/chitanda/pkg/server"
 
 	"golang.org/x/net/http2"
 

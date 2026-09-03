@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"chitanda/internal/frame"
+	"github.com/violetaini/chitanda/internal/frame"
 )
 
 func TestPlainUDPRoundTripAndReplay(t *testing.T) {

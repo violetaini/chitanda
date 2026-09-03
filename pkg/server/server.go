@@ -12,10 +12,10 @@ import (
 	"sync"
 	"time"
 
-	"chitanda/internal/auth"
-	"chitanda/internal/frame"
-	"chitanda/internal/h1session"
-	"chitanda/internal/target"
+	"github.com/violetaini/chitanda/internal/auth"
+	"github.com/violetaini/chitanda/internal/frame"
+	"github.com/violetaini/chitanda/internal/h1session"
+	"github.com/violetaini/chitanda/internal/target"
 )
 
 var copyBufferPool = sync.Pool{
@@ -96,7 +96,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err := s.authorize(r, targetAddress, timestamp, nonce, signature); err != nil {
 		if errors.Is(err, errReplayDetected) {
 			// Fast-fail on replays to prevent DoS amplification (don't dial fallback)
-			// Returning standard HTTP error mimics proxy error or fallback error 
+			// Returning standard HTTP error mimics proxy error or fallback error
 			// without the huge cost of a real upstream TLS connection.
 			http.Error(w, "Bad Request", http.StatusBadRequest)
 			return

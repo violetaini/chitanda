@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"chitanda/internal/auth"
-	"chitanda/internal/plainudp"
+	"github.com/violetaini/chitanda/internal/auth"
+	"github.com/violetaini/chitanda/internal/plainudp"
 )
 
 func TestServerAuthorizationAndReplay(t *testing.T) {

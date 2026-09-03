@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"chitanda/internal/auth"
-	"chitanda/internal/frame"
+	"github.com/violetaini/chitanda/internal/auth"
+	"github.com/violetaini/chitanda/internal/frame"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)

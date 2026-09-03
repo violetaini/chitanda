@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"chitanda/internal/auth"
-	"chitanda/pkg/server"
+	"github.com/violetaini/chitanda/internal/auth"
+	"github.com/violetaini/chitanda/pkg/server"
 )
 
 func TestConfigValidation(t *testing.T) {
@@ -207,7 +207,6 @@ func TestPlainH1EndToEnd(t *testing.T) {
 		t.Fatalf("echoed %q != sent %q", string(buf), string(msg))
 	}
 }
-
 
 func TestPlainUDP_ListenPacket(t *testing.T) {
 	psk := []byte(strings.Repeat("u", 32))

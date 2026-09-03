@@ -12,7 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"chitanda/internal/auth"
+	"github.com/violetaini/chitanda/internal/auth"
 )
 
 type h2Prober struct {

@@ -11,8 +11,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"chitanda/internal/frame"
-	"chitanda/internal/plainudp"
+	"github.com/violetaini/chitanda/internal/frame"
+	"github.com/violetaini/chitanda/internal/plainudp"
 )
 
 type plainUDPConn struct {

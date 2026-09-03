@@ -8,9 +8,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"chitanda/internal/frame"
-	"chitanda/internal/plainudp"
-	"chitanda/internal/target"
+	"github.com/violetaini/chitanda/internal/frame"
+	"github.com/violetaini/chitanda/internal/plainudp"
+	"github.com/violetaini/chitanda/internal/target"
 )
 
 const (

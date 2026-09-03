@@ -9,21 +9,21 @@ import (
 	"strconv"
 	"sync"
 
-	"chitanda/pkg/client"
+	"github.com/violetaini/chitanda/pkg/client"
 
 	C "github.com/metacubex/mihomo/constant"
 )
 
 type ChitandaOption struct {
 	BasicOption
-	Name      string `proxy:"name"`
-	Server    string `proxy:"server"`
-	Port      int    `proxy:"port"`
-	PSK       string `proxy:"psk"`
-	Path      string `proxy:"path"`
-	Transport string `proxy:"transport,omitempty"` // "h2" (default), "h3", "auto", "h1"
-	SNI       string `proxy:"sni,omitempty"`
-	PoolSize  int    `proxy:"pool-size,omitempty"`
+	Name           string `proxy:"name"`
+	Server         string `proxy:"server"`
+	Port           int    `proxy:"port"`
+	PSK            string `proxy:"psk"`
+	Path           string `proxy:"path"`
+	Transport      string `proxy:"transport,omitempty"` // "h2" (default), "h3", "auto", "h1"
+	SNI            string `proxy:"sni,omitempty"`
+	PoolSize       int    `proxy:"pool-size,omitempty"`
 	UDP            bool   `proxy:"udp,omitempty"`
 	SkipCertVerify bool   `proxy:"skip-cert-verify,omitempty"`
 }
