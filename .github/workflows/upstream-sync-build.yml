@@ -298,21 +298,12 @@ jobs:
           make_latest: false
           clobber: true
 
-      - name: Publish Stable Mihomo Manifest
+      - name: Update Mihomo version.txt in main branch
         if: steps.upstream_check.outputs.should_build == 'true' && matrix.target == 'mihomo'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: "chitanda-mihomo-latest"
-          name: "Chitanda Mihomo stable channel"
-          body: |
-            Stable discovery channel for the most recent fully-built Chitanda Mihomo release.
-
-            Consumers read `version.txt` and `manifest.json`, then download only
-            the pinned versioned asset after verifying its SHA-256 checksum.
-          files: |
-            dist/version.txt
-            dist/manifest.json
-          draft: false
-          prerelease: false
-          make_latest: false
-          clobber: true
+        run: |
+          mkdir -p releases/mihomo
+          echo "${{ steps.upstream_check.outputs.upstream_tag }}" > releases/mihomo/version.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add releases/mihomo/version.txt
+          git diff --quiet && git diff --staged --quiet || (git commit -m "chore(release): update Mihomo latest version to ${{ steps.upstream_check.outputs.upstream_tag }}" && git push origin main)
