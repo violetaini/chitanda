@@ -191,37 +191,37 @@ jobs:
           cd ../dist
           if [ "${{ matrix.target }}" == "mihomo" ]; then
             python3 - "$TAG" "$GITHUB_WORKSPACE/releases/mihomo/release-contract.json" <<'PY'
-            import hashlib
-            import json
-            import sys
-            from pathlib import Path
+          import hashlib
+          import json
+          import sys
+          from pathlib import Path
 
-            tag, contract_path = sys.argv[1:]
-            contract = json.loads(Path(contract_path).read_text(encoding="utf-8"))
-            assets = {}
-            for target, pattern in contract["desktopAssets"].items():
-                name = pattern.format(upstreamTag=tag)
-                path = Path(name)
-                if not path.is_file():
-                    raise SystemExit(f"missing required desktop asset: {target} -> {name}")
-                assets[target] = {
-                    "name": name,
-                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-                }
-            Path("version.txt").write_text(tag + "\n", encoding="utf-8")
-            Path("manifest.json").write_text(
-                json.dumps(
-                    {
-                        "schema": contract["schema"],
-                        "upstreamTag": tag,
-                        "assets": assets,
-                    },
-                    indent=2,
-                    sort_keys=True,
-                ) + "\n",
-                encoding="utf-8",
-            )
-            PY
+          tag, contract_path = sys.argv[1:]
+          contract = json.loads(Path(contract_path).read_text(encoding="utf-8"))
+          assets = {}
+          for target, pattern in contract["desktopAssets"].items():
+              name = pattern.format(upstreamTag=tag)
+              path = Path(name)
+              if not path.is_file():
+                  raise SystemExit(f"missing required desktop asset: {target} -> {name}")
+              assets[target] = {
+                  "name": name,
+                  "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+              }
+          Path("version.txt").write_text(tag + "\n", encoding="utf-8")
+          Path("manifest.json").write_text(
+              json.dumps(
+                  {
+                      "schema": contract["schema"],
+                      "upstreamTag": tag,
+                      "assets": assets,
+                  },
+                  indent=2,
+                  sort_keys=True,
+              ) + "\n",
+              encoding="utf-8",
+          )
+          PY
           fi
           sha256sum * > sha256sums.txt
 
