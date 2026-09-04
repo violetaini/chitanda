@@ -33,8 +33,7 @@
     <a-form-item label="防重放模式 (Anti-Replay)">
         <a-select :value="getChitandaReplayType()" @change="setChitandaReplayType" :dropdown-class-name="themeSwitcher.currentTheme">
             <a-select-option value="none">⚡ 纯内存模式 (推荐：零磁盘开销，重启重置)</a-select-option>
-            <a-select-option value="default">💾 默认落盘 (/etc/x-ui/replay_chitanda.db)</a-select-option>
-            <a-select-option value="auto_port">📁 端口独立落盘 (/etc/x-ui/replay_[端口].db)</a-select-option>
+            <a-select-option value="auto_port">💾 端口独立落盘 (/etc/x-ui/replay_[端口].db)</a-select-option>
         </a-select>
         <div v-if="!inbound.settings.replay_file" style="font-size: 12px; color: #1890ff; margin-top: 4px;">
             <a-icon type="info-circle" /> 内存滑动窗口防重放（轻量极速，TLS 模式天然免疫外层重放）

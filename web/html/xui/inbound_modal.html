@@ -19,8 +19,7 @@
         dbInbound: new DBInbound(),
         ok() {
             if (inModal.inbound && inModal.inbound.protocol === Protocols.CHITANDA && inModal.inbound.settings) {
-                const rf = inModal.inbound.settings.replay_file;
-                if (rf && rf !== '/etc/x-ui/replay_chitanda.db') {
+                if (inModal.inbound.settings.replay_file) {
                     const port = inModal.inbound.port || 'default';
                     inModal.inbound.settings.replay_file = `/etc/x-ui/replay_${port}.db`;
                 }
@@ -175,17 +174,12 @@
             },
             getChitandaReplayType() {
                 if (!this.inModal.inbound.settings) return 'none';
-                const rf = this.inModal.inbound.settings.replay_file;
-                if (!rf) return 'none';
-                if (rf === '/etc/x-ui/replay_chitanda.db') return 'default';
-                return 'auto_port';
+                return this.inModal.inbound.settings.replay_file ? 'auto_port' : 'none';
             },
             setChitandaReplayType(val) {
                 if (!this.inModal.inbound.settings) return;
                 if (val === 'none') {
                     this.inModal.inbound.settings.replay_file = '';
-                } else if (val === 'default') {
-                    this.inModal.inbound.settings.replay_file = '/etc/x-ui/replay_chitanda.db';
                 } else if (val === 'auto_port') {
                     const port = this.inModal.inbound.port || 'default';
                     this.inModal.inbound.settings.replay_file = `/etc/x-ui/replay_${port}.db`;
