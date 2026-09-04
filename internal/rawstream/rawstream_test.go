@@ -15,10 +15,16 @@ import (
 
 func TestClientServerHandshake(t *testing.T) {
 	psk := []byte("01234567890123456789012345678901") // 32 bytes
+	serverID := "node-alpha"
 	now := time.Now()
 
+	// 0. PSK < 32 bytes must be rejected
+	if _, _, _, err := CreateClientHello([]byte("short-psk"), serverID, now); err == nil {
+		t.Fatalf("expected error for PSK < 32 bytes, got nil")
+	}
+
 	// 1. Client creates ClientHello
-	cHello, clientNonce, ts, err := CreateClientHello(psk, now)
+	cHello, clientNonce, ts, err := CreateClientHello(psk, serverID, now)
 	if err != nil {
 		t.Fatalf("CreateClientHello failed: %v", err)
 	}
@@ -26,8 +32,8 @@ func TestClientServerHandshake(t *testing.T) {
 		t.Fatalf("expected client hello size %d, got %d", ClientHelloSize, len(cHello))
 	}
 
-	// 2. Server verifies ClientHello
-	verifiedNonce, verifiedTs, err := VerifyClientHello(psk, cHello, now)
+	// 2. Server verifies ClientHello with matching serverID
+	verifiedNonce, verifiedTs, err := VerifyClientHello(psk, serverID, cHello, now)
 	if err != nil {
 		t.Fatalf("VerifyClientHello failed: %v", err)
 	}
@@ -35,12 +41,17 @@ func TestClientServerHandshake(t *testing.T) {
 		t.Fatalf("nonce or timestamp mismatch")
 	}
 
+	// 2b. Server with mismatched serverID must reject ClientHello (cross-node replay defense)
+	if _, _, err := VerifyClientHello(psk, "node-beta", cHello, now); err == nil {
+		t.Fatalf("expected VerifyClientHello to reject mismatched serverID, but it passed!")
+	}
+
 	// 3. Keys derivation
-	k0RTTClient, err := Derive0RTTKey(psk, ts, clientNonce)
+	k0RTTClient, err := Derive0RTTKey(psk, serverID, ts, clientNonce)
 	if err != nil {
 		t.Fatalf("Derive0RTTKey client failed: %v", err)
 	}
-	k0RTTServer, err := Derive0RTTKey(psk, verifiedTs, verifiedNonce)
+	k0RTTServer, err := Derive0RTTKey(psk, serverID, verifiedTs, verifiedNonce)
 	if err != nil {
 		t.Fatalf("Derive0RTTKey server failed: %v", err)
 	}
@@ -49,7 +60,7 @@ func TestClientServerHandshake(t *testing.T) {
 	}
 
 	// 4. Server creates ServerHello
-	sHello, serverNonce, err := CreateServerHello(psk, verifiedTs, verifiedNonce)
+	sHello, serverNonce, err := CreateServerHello(psk, serverID, verifiedTs, verifiedNonce)
 	if err != nil {
 		t.Fatalf("CreateServerHello failed: %v", err)
 	}
@@ -58,7 +69,7 @@ func TestClientServerHandshake(t *testing.T) {
 	}
 
 	// 5. Client verifies ServerHello
-	verifiedServerNonce, err := VerifyServerHello(psk, ts, clientNonce, sHello)
+	verifiedServerNonce, err := VerifyServerHello(psk, serverID, ts, clientNonce, sHello)
 	if err != nil {
 		t.Fatalf("VerifyServerHello failed: %v", err)
 	}
@@ -67,11 +78,11 @@ func TestClientServerHandshake(t *testing.T) {
 	}
 
 	// 6. Session keys match
-	c2sClient, s2cClient, err := DeriveSessionKeys(psk, ts, clientNonce, serverNonce)
+	c2sClient, s2cClient, err := DeriveSessionKeys(psk, serverID, ts, clientNonce, serverNonce)
 	if err != nil {
 		t.Fatalf("DeriveSessionKeys client: %v", err)
 	}
-	c2sServer, s2cServer, err := DeriveSessionKeys(psk, verifiedTs, verifiedNonce, verifiedServerNonce)
+	c2sServer, s2cServer, err := DeriveSessionKeys(psk, serverID, verifiedTs, verifiedNonce, verifiedServerNonce)
 	if err != nil {
 		t.Fatalf("DeriveSessionKeys server: %v", err)
 	}
@@ -117,7 +128,7 @@ func TestAntiProbeResistance(t *testing.T) {
 
 	// 1. Scanner sends HTTP GET request
 	httpScan := []byte("GET / HTTP/1.1\r\nHost: example.com\r\nUser-Agent: Mozilla/5.0\r\n\r\n")
-	_, _, err := VerifyClientHello(psk, httpScan, now)
+	_, _, err := VerifyClientHello(psk, "", httpScan, now)
 	if err == nil {
 		t.Fatalf("expected VerifyClientHello to reject HTTP scan request, but it passed!")
 	}
@@ -127,7 +138,7 @@ func TestAntiProbeResistance(t *testing.T) {
 	for i := range junk48 {
 		junk48[i] = 0xAA
 	}
-	_, _, err = VerifyClientHello(psk, junk48, now)
+	_, _, err = VerifyClientHello(psk, "", junk48, now)
 	if err == nil {
 		t.Fatalf("expected VerifyClientHello to reject random junk, but it passed!")
 	}
@@ -286,5 +297,37 @@ func TestAEADStream_SequenceExhaustion(t *testing.T) {
 	_, err = streamDec.DecryptChunk(nil, make([]byte, 32), 32)
 	if !errors.Is(err, ErrSequenceExhausted) {
 		t.Fatalf("expected ErrSequenceExhausted on DecryptChunk, got %v", err)
+	}
+}
+
+func TestFramedWriter_LargeWrite_Batching(t *testing.T) {
+	key := [16]byte{1, 2, 3, 4}
+	encStream, _ := NewAEADStream(key)
+	decStream, _ := NewAEADStream(key)
+
+	r, w := io.Pipe()
+	fw := NewFramedWriter(w, encStream)
+	fr := NewFramedReader(r, decStream)
+
+	largeData := bytes.Repeat([]byte("1234567890abcdef"), 64*1024) // 1 MiB
+
+	errCh := make(chan error, 1)
+	go func() {
+		defer w.Close()
+		_, err := fw.Write(largeData)
+		errCh <- err
+	}()
+
+	readBuf := make([]byte, len(largeData))
+	if _, err := io.ReadFull(fr, readBuf); err != nil {
+		t.Fatalf("ReadFull failed: %v", err)
+	}
+
+	if err := <-errCh; err != nil {
+		t.Fatalf("fw.Write failed: %v", err)
+	}
+
+	if !bytes.Equal(readBuf, largeData) {
+		t.Fatalf("large write data corrupted")
 	}
 }

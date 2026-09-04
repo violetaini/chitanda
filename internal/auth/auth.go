@@ -167,6 +167,21 @@ func (c *ReplayCache) load(now time.Time) error {
 	return err
 }
 
+// Check checks if the nonce is already in the replay cache without committing it.
+func (c *ReplayCache) Check(nonce string, now time.Time) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	for c.expiryQueue.Len() > 0 && !c.expiryQueue[0].expiry.After(now) {
+		expired := heap.Pop(&c.expiryQueue).(replayExpiry)
+		if current, exists := c.expires[expired.nonce]; exists && current.Equal(expired.expiry) {
+			delete(c.expires, expired.nonce)
+		}
+	}
+	_, exists := c.expires[nonce]
+	return exists
+}
+
 func (c *ReplayCache) Accept(nonce string, now time.Time) (bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

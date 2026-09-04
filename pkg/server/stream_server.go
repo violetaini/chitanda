@@ -19,27 +19,52 @@ import (
 // StreamServer handles Chitanda RawStream (TCP) and Native PlainUDP connections.
 // It is hardened for IEPL/transit environments with zero Web footprint (probes receive instant RST/close).
 type StreamServer struct {
-	psk        []byte
-	dialTarget func(ctx context.Context, network, address string) (net.Conn, error)
-	listener   net.Listener
-	udpServer  *PlainUDPServer
-	replays    *auth.ReplayCache
-	closed     atomic.Bool
-	wg         sync.WaitGroup
+	psk          []byte
+	serverID     string
+	dialTarget   func(ctx context.Context, network, address string) (net.Conn, error)
+	listener     net.Listener
+	udpServer    *PlainUDPServer
+	replays      *auth.ReplayCache
+	closed       atomic.Bool
+	wg           sync.WaitGroup
+	maxConns     int
+	activeConns  atomic.Int64
+	handshakeSem chan struct{}
+	ctx          context.Context
+	cancel       context.CancelFunc
 }
 
 // NewStreamServer creates a new StreamServer.
-func NewStreamServer(psk []byte, dialTarget func(ctx context.Context, network, address string) (net.Conn, error)) *StreamServer {
+func NewStreamServer(psk []byte, serverID string, replays *auth.ReplayCache, dialTarget func(ctx context.Context, network, address string) (net.Conn, error)) *StreamServer {
 	if dialTarget == nil {
 		dialTarget = func(ctx context.Context, network, address string) (net.Conn, error) {
 			return target.DialContext(ctx, address)
 		}
 	}
-	return &StreamServer{
-		psk:        psk,
-		dialTarget: dialTarget,
-		replays:    auth.NewReplayCache(),
+	if replays == nil {
+		replays = auth.NewReplayCache()
 	}
+	ctx, cancel := context.WithCancel(context.Background())
+	return &StreamServer{
+		psk:          psk,
+		serverID:     serverID,
+		dialTarget:   dialTarget,
+		replays:      replays,
+		maxConns:     10000,
+		handshakeSem: make(chan struct{}, 512),
+		ctx:          ctx,
+		cancel:       cancel,
+	}
+}
+
+// SetMaxConns sets the maximum number of concurrent connections (for testing or configuration).
+func (s *StreamServer) SetMaxConns(n int) {
+	s.maxConns = n
+}
+
+// SetHandshakeLimit sets the maximum number of concurrent pending handshakes.
+func (s *StreamServer) SetHandshakeLimit(n int) {
+	s.handshakeSem = make(chan struct{}, n)
 }
 
 // SetReplayCache sets an explicit ReplayCache instance (e.g. for persistent storage or tests).
@@ -79,9 +104,25 @@ func (s *StreamServer) Serve(l net.Listener) error {
 			return err
 		}
 
+		if s.maxConns > 0 && s.activeConns.Load() >= int64(s.maxConns) {
+			_ = conn.Close()
+			continue
+		}
+
+		// Enforce bounded concurrent handshakes
+		select {
+		case s.handshakeSem <- struct{}{}:
+		default:
+			// Handshake pool full, shed load immediately
+			_ = conn.Close()
+			continue
+		}
+
+		s.activeConns.Add(1)
 		s.wg.Add(1)
 		go func(c net.Conn) {
 			defer s.wg.Done()
+			defer s.activeConns.Add(-1)
 			s.HandleConn(c)
 		}(conn)
 	}
@@ -93,39 +134,39 @@ func (s *StreamServer) Serve(l net.Listener) error {
 func (s *StreamServer) HandleConn(conn net.Conn) {
 	defer conn.Close()
 
-	if tc, ok := conn.(*net.TCPConn); ok {
-		_ = tc.SetNoDelay(true)
-		_ = tc.SetReadBuffer(4 << 20)
-		_ = tc.SetWriteBuffer(4 << 20)
+	handshakeReleased := false
+	releaseHandshake := func() {
+		if !handshakeReleased {
+			handshakeReleased = true
+			<-s.handshakeSem
+		}
 	}
+	defer releaseHandshake()
 
-	// 5-second deadline for the initial handshake flight
-	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	// 2-second deadline for the initial handshake flight
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
 
 	// 1. Read ClientHello (48 bytes)
 	var clientHelloBuf [rawstream.ClientHelloSize]byte
 	if _, err := io.ReadFull(conn, clientHelloBuf[:]); err != nil {
-		// Probable scanner probe or truncated connection: close immediately
 		return
 	}
 
-	clientNonce, ts, err := rawstream.VerifyClientHello(s.psk, clientHelloBuf[:], time.Now())
+	clientNonce, ts, err := rawstream.VerifyClientHello(s.psk, s.serverID, clientHelloBuf[:], time.Now())
 	if err != nil {
-		// Authentication failed (e.g. GET / HTTP/1.1 sent by scanner):
+		// Authentication failed (e.g. GET / HTTP/1.1 sent by scanner or mismatched serverID):
 		// Close immediately with 0 bytes response. Never speak HTTP.
 		return
 	}
 
-	// Prevent 0-RTT replay and active probe confirmation
+	// 2. Early non-mutating check in replay cache
 	nonceHex := hex.EncodeToString(clientNonce[:])
-	accepted, err := s.replays.Accept(nonceHex, time.Now())
-	if err != nil || !accepted {
-		// Replayed handshake or replay cache failure:
-		// Drop immediately with 0 bytes response to prevent active probing
+	if s.replays.Check(nonceHex, time.Now()) {
+		// Replayed handshake detected: drop immediately with 0 bytes
 		return
 	}
 
-	// 2. Read 2-byte wire length of the 0-RTT frame
+	// 3. Read 2-byte wire length of the 0-RTT frame
 	var lenBuf [2]byte
 	if _, err := io.ReadFull(conn, lenBuf[:]); err != nil {
 		return
@@ -135,47 +176,56 @@ func (s *StreamServer) HandleConn(conn net.Conn) {
 		return
 	}
 
-	// 3. Read encrypted 0-RTT frame
+	// 4. Read encrypted 0-RTT frame
 	encFrame := make([]byte, wireLen)
 	if _, err := io.ReadFull(conn, encFrame); err != nil {
 		return
 	}
 
-	// 4. Derive 0-RTT key and decrypt open frame
-	k0RTT, err := rawstream.Derive0RTTKey(s.psk, ts, clientNonce)
+	// 5. Derive 0-RTT key and decrypt open frame
+	k0RTT, err := rawstream.Derive0RTTKey(s.psk, s.serverID, ts, clientNonce)
 	if err != nil {
 		return
 	}
 
 	openFramePlaintext, err := rawstream.Decrypt0RTTChunk(k0RTT, encFrame)
 	if err != nil {
+		// Decryption failed: drop with 0 bytes, do NOT commit replay cache
 		return
 	}
 
-	// 5. Decode target and optional initial payload (strips dynamic padding)
+	// 6. Decode target and optional initial payload (strips dynamic padding)
 	targetAddr, initialPayload, err := rawstream.Decode0RTTOpenFrame(openFramePlaintext)
 	if err != nil {
+		// Invalid open frame / target: drop with 0 bytes, do NOT commit replay cache
 		return
 	}
 
-	// 6. Generate ServerHello (40 bytes)
-	serverHelloRecord, serverNonce, err := rawstream.CreateServerHello(s.psk, ts, clientNonce)
+	// 7. Both ClientHello and 0-RTT frame validated: commit Nonce to durable replay cache
+	accepted, err := s.replays.Accept(nonceHex, time.Now())
+	if err != nil || !accepted {
+		// Concurrent replay race: drop
+		return
+	}
+
+	// 8. Generate ServerHello (40 bytes)
+	serverHelloRecord, serverNonce, err := rawstream.CreateServerHello(s.psk, s.serverID, ts, clientNonce)
 	if err != nil {
 		return
 	}
 
-	// 7. Write ServerHello to client
+	// 9. Write ServerHello to client
 	if _, err := conn.Write(serverHelloRecord); err != nil {
 		return
 	}
 
-	// 8. Derive bidirectional session keys
-	c2sKey, s2cKey, err := rawstream.DeriveSessionKeys(s.psk, ts, clientNonce, serverNonce)
+	// 10. Derive bidirectional session keys
+	c2sKey, s2cKey, err := rawstream.DeriveSessionKeys(s.psk, s.serverID, ts, clientNonce, serverNonce)
 	if err != nil {
 		return
 	}
 
-	// 9. Dial upstream target
+	// 11. Dial upstream target
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
@@ -185,6 +235,15 @@ func (s *StreamServer) HandleConn(conn net.Conn) {
 	}
 	defer upstream.Close()
 
+	// Handshake successfully completed: release handshake token early
+	releaseHandshake()
+
+	// Upgrade TCP buffer sizes only for authenticated and connected sessions
+	if tc, ok := conn.(*net.TCPConn); ok {
+		_ = tc.SetNoDelay(true)
+		_ = tc.SetReadBuffer(4 << 20)
+		_ = tc.SetWriteBuffer(4 << 20)
+	}
 	if tc, ok := upstream.(*net.TCPConn); ok {
 		_ = tc.SetNoDelay(true)
 		_ = tc.SetReadBuffer(4 << 20)
@@ -194,14 +253,14 @@ func (s *StreamServer) HandleConn(conn net.Conn) {
 	// Clear deadlines for full-duplex proxying
 	_ = conn.SetDeadline(time.Time{})
 
-	// 10. Send initial payload to upstream if present
+	// 12. Send initial payload to upstream if present
 	if len(initialPayload) > 0 {
 		if _, err := upstream.Write(initialPayload); err != nil {
 			return
 		}
 	}
 
-	// 11. Wrap client connection in AEAD StreamConn
+	// 13. Wrap client connection in AEAD StreamConn
 	rStream, err := rawstream.NewAEADStream(c2sKey)
 	if err != nil {
 		return
@@ -212,8 +271,8 @@ func (s *StreamServer) HandleConn(conn net.Conn) {
 	}
 	streamConn := rawstream.NewStreamConn(conn, rStream, wStream)
 
-	// 12. Bidirectional relay
-	relayBidirectional(streamConn, upstream)
+	// 14. Bidirectional relay
+	relayBidirectional(s.ctx, streamConn, upstream)
 }
 
 type closeWriter interface {
@@ -226,9 +285,18 @@ func closeWriteConn(c net.Conn) {
 	}
 }
 
-func relayBidirectional(client, target net.Conn) {
+func relayBidirectional(ctx context.Context, client, target net.Conn) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	var wg sync.WaitGroup
 	wg.Add(2)
+
+	go func() {
+		<-ctx.Done()
+		_ = client.Close()
+		_ = target.Close()
+	}()
 
 	// client -> target
 	go func() {
@@ -237,8 +305,7 @@ func relayBidirectional(client, target net.Conn) {
 		defer copyBufferPool.Put(bufPtr)
 		_, err := io.CopyBuffer(target, client, *bufPtr)
 		if err != nil {
-			_ = target.Close()
-			_ = client.Close()
+			cancel()
 			return
 		}
 		closeWriteConn(target)
@@ -247,14 +314,10 @@ func relayBidirectional(client, target net.Conn) {
 	// target -> client
 	go func() {
 		defer wg.Done()
+		defer cancel()
 		bufPtr := copyBufferPool.Get().(*[]byte)
 		defer copyBufferPool.Put(bufPtr)
-		_, err := io.CopyBuffer(client, target, *bufPtr)
-		if err != nil {
-			_ = client.Close()
-			_ = target.Close()
-			return
-		}
+		_, _ = io.CopyBuffer(client, target, *bufPtr)
 		closeWriteConn(client)
 	}()
 
@@ -264,6 +327,9 @@ func relayBidirectional(client, target net.Conn) {
 // Close gracefully closes the listener, replay cache, and active PlainUDP server.
 func (s *StreamServer) Close() error {
 	s.closed.Store(true)
+	if s.cancel != nil {
+		s.cancel()
+	}
 	var firstErr error
 	if s.listener != nil {
 		if err := s.listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {

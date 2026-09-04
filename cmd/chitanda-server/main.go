@@ -24,6 +24,8 @@ func main() {
 	quicInitialPacketSize := flag.Uint("quic-initial-packet-size", 1452, "QUIC initial packet size (1200-1452)")
 	strictSNI := flag.String("strict-sni", "", "Optional: enforce Strict SNI matching on ClientHello")
 	allowPrivateTargets := flag.Bool("allow-private-targets", false, "Allow dialing private/loopback targets (for testing)")
+	rawstreamListen := flag.String("rawstream-listen", "", "optional RawStream TCP listen address (e.g. :11323)")
+	serverID := flag.String("server-id", "", "optional RawStream server identifier for cross-node replay protection")
 
 	flag.Parse()
 
@@ -41,6 +43,8 @@ func main() {
 		QuicInitialPacketSize: uint16(*quicInitialPacketSize),
 		StrictSNI:             *strictSNI,
 		AllowPrivateTargets:   *allowPrivateTargets,
+		RawStreamListen:       *rawstreamListen,
+		ServerID:              *serverID,
 	}
 
 	log.Printf("Starting chitanda-server componentized version...")

@@ -133,6 +133,35 @@ func Run(config *Config, listenAddr, adminListenAddr, quicListenAddr string) err
 		}
 	}
 
+	var streamServer *StreamServer
+	if config.RawStreamListen != "" {
+		rawstreamLn, err := net.Listen("tcp", config.RawStreamListen)
+		if err != nil {
+			return fmt.Errorf("listen rawstream %q: %w", config.RawStreamListen, err)
+		}
+		streamServer = NewStreamServer(psk, config.ServerID, replays, func(ctx context.Context, network, address string) (net.Conn, error) {
+			return app.dialTarget(ctx, address)
+		})
+
+		// Optionally attach Native UDP on the same rawstream port if not already bound
+		if quicListenAddr != config.RawStreamListen && listenAddr != config.RawStreamListen {
+			if uAddr, err := net.ResolveUDPAddr("udp", config.RawStreamListen); err == nil {
+				if uConn, err := net.ListenUDP("udp", uAddr); err == nil {
+					_ = uConn.SetReadBuffer(8 << 20)
+					_ = uConn.SetWriteBuffer(8 << 20)
+					_ = streamServer.AttachUDP(uConn)
+				}
+			}
+		}
+
+		go func() {
+			log.Printf("public RawStream TCP listener started on %s", config.RawStreamListen)
+			if err := streamServer.Serve(rawstreamLn); err != nil && !errors.Is(err, net.ErrClosed) {
+				log.Fatalf("rawstream server: %v", err)
+			}
+		}()
+	}
+
 	go func() {
 		if config.CertFile == "" || config.KeyFile == "" {
 			log.Printf("public Plain HTTP/1.1 listener started on %s", listenAddr)
@@ -160,6 +189,9 @@ func Run(config *Config, listenAddr, adminListenAddr, quicListenAddr string) err
 	}
 	if plainUDPServer != nil {
 		_ = plainUDPServer.Close()
+	}
+	if streamServer != nil {
+		_ = streamServer.Close()
 	}
 	return nil
 }

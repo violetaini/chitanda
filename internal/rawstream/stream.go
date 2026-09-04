@@ -17,12 +17,14 @@ type FramedWriter struct {
 	buf    []byte
 }
 
+const MaxBatchFlushLen = 128 * 1024 // 128 KiB batch flush ceiling
+
 // NewFramedWriter wraps an io.Writer with an AEAD encryption stream.
 func NewFramedWriter(w io.Writer, stream *AEADStream) *FramedWriter {
 	return &FramedWriter{
 		w:      w,
 		stream: stream,
-		buf:    make([]byte, 0, MaxChunkWireLen+2),
+		buf:    make([]byte, 0, MaxBatchFlushLen+MaxChunkWireLen+2),
 	}
 }
 
@@ -46,12 +48,21 @@ func (fw *FramedWriter) Write(p []byte) (n int, err error) {
 			return n, err
 		}
 		n += chunkSize
+
+		// Flush batch if accumulated buffer exceeds MaxBatchFlushLen
+		if len(fw.buf) >= MaxBatchFlushLen {
+			if _, err := fw.w.Write(fw.buf); err != nil {
+				return n, err
+			}
+			fw.buf = fw.buf[:0]
+		}
 	}
 
 	if len(fw.buf) > 0 {
 		if _, err := fw.w.Write(fw.buf); err != nil {
-			return 0, err
+			return n, err
 		}
+		fw.buf = fw.buf[:0]
 	}
 	return total, nil
 }

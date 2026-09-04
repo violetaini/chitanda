@@ -58,6 +58,7 @@ type Config struct {
 	SessionCacheFile      string // optional persistent session cache path
 	QUICInitialPacketSize uint16 // 1200 - 1452, default 1452
 	InsecureSkipVerify    bool   // skip TLS certificate verification
+	ServerID              string // optional target server ID for RawStream cross-node replay protection
 	DialContext           func(ctx context.Context, network, addr string) (net.Conn, error)
 	ListenPacket          func(ctx context.Context, network, addr string) (net.PacketConn, error)
 }
@@ -87,8 +88,8 @@ func (c *Client) dialRaw(ctx context.Context, network, addr string) (net.Conn, e
 // New creates and initializes a new MyXray Client.
 func New(cfg Config) (*Client, error) {
 	if cfg.TCPTransport == TCPTransportStream {
-		if cfg.Server == "" || len(cfg.PSK) < 16 {
-			return nil, errors.New("server and valid PSK (>=16 bytes) are required for stream")
+		if cfg.Server == "" || len(cfg.PSK) < 32 {
+			return nil, errors.New("server and valid PSK (>=32 bytes) are required for stream")
 		}
 		if cfg.ServerName == "" {
 			cfg.ServerName = cfg.Server

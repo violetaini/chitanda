@@ -22,15 +22,28 @@ func (c *Client) dialRawStream(ctx context.Context, target string) (net.Conn, er
 		_ = tc.SetWriteBuffer(4 << 20)
 	}
 
+	// 1. Map context deadline to connection deadline to prevent indefinite hanging
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = rawConn.SetDeadline(deadline)
+	} else {
+		_ = rawConn.SetDeadline(time.Now().Add(10 * time.Second))
+	}
+
+	// 2. Hook context cancellation to immediately close rawConn if caller aborts
+	stopCancel := context.AfterFunc(ctx, func() {
+		_ = rawConn.Close()
+	})
+	defer stopCancel()
+
 	now := time.Now()
-	clientHello, clientNonce, ts, err := rawstream.CreateClientHello(c.cfg.PSK, now)
+	clientHello, clientNonce, ts, err := rawstream.CreateClientHello(c.cfg.PSK, c.cfg.ServerID, now)
 	if err != nil {
 		_ = rawConn.Close()
 		return nil, fmt.Errorf("create client hello: %w", err)
 	}
 
-	// Derive 0-RTT key
-	k0RTT, err := rawstream.Derive0RTTKey(c.cfg.PSK, ts, clientNonce)
+	// Derive 0-RTT key with serverID binding
+	k0RTT, err := rawstream.Derive0RTTKey(c.cfg.PSK, c.cfg.ServerID, ts, clientNonce)
 	if err != nil {
 		_ = rawConn.Close()
 		return nil, fmt.Errorf("derive 0-rtt key: %w", err)
@@ -71,14 +84,14 @@ func (c *Client) dialRawStream(ctx context.Context, target string) (net.Conn, er
 		return nil, fmt.Errorf("read server hello: %w", err)
 	}
 
-	serverNonce, err := rawstream.VerifyServerHello(c.cfg.PSK, ts, clientNonce, serverHello[:])
+	serverNonce, err := rawstream.VerifyServerHello(c.cfg.PSK, c.cfg.ServerID, ts, clientNonce, serverHello[:])
 	if err != nil {
 		_ = rawConn.Close()
 		return nil, fmt.Errorf("verify server hello: %w", err)
 	}
 
-	// Derive bidirectional session keys
-	c2sKey, s2cKey, err := rawstream.DeriveSessionKeys(c.cfg.PSK, ts, clientNonce, serverNonce)
+	// Derive bidirectional session keys with serverID binding
+	c2sKey, s2cKey, err := rawstream.DeriveSessionKeys(c.cfg.PSK, c.cfg.ServerID, ts, clientNonce, serverNonce)
 	if err != nil {
 		_ = rawConn.Close()
 		return nil, fmt.Errorf("derive session keys: %w", err)
@@ -94,6 +107,9 @@ func (c *Client) dialRawStream(ctx context.Context, target string) (net.Conn, er
 		_ = rawConn.Close()
 		return nil, err
 	}
+
+	// Clear handshake deadline for established full-duplex session
+	_ = rawConn.SetDeadline(time.Time{})
 
 	return rawstream.NewStreamConn(rawConn, rStream, wStream), nil
 }

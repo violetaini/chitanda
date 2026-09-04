@@ -24,6 +24,8 @@ type Config struct {
 	QuicInitialPacketSize uint16
 	StrictSNI             string // The allowed SNI for Strict SNI checking
 	AllowPrivateTargets   bool   // Allow loopback and private IP targets (for local benchmarks)
+	RawStreamListen       string // Optional TCP listen address for RawStream (e.g. ":11323")
+	ServerID              string // Optional server identifier for cross-node replay protection
 }
 
 // Init loads configurations and initialized components

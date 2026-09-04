@@ -46,9 +46,9 @@ var (
 )
 
 // CreateClientHello generates a 48-byte ClientHello record.
-func CreateClientHello(psk []byte, now time.Time) (record []byte, clientNonce [24]byte, timestamp uint64, err error) {
-	if len(psk) < 16 {
-		return nil, clientNonce, 0, errors.New("rawstream: PSK must be at least 16 bytes")
+func CreateClientHello(psk []byte, serverID string, now time.Time) (record []byte, clientNonce [24]byte, timestamp uint64, err error) {
+	if len(psk) < 32 {
+		return nil, clientNonce, 0, errors.New("rawstream: PSK must be at least 32 bytes")
 	}
 	timestamp = uint64(now.Unix())
 	if _, err := io.ReadFull(rand.Reader, clientNonce[:]); err != nil {
@@ -57,6 +57,9 @@ func CreateClientHello(psk []byte, now time.Time) (record []byte, clientNonce [2
 
 	mac := hmac.New(sha256.New, psk)
 	mac.Write([]byte(DomainClientHello))
+	if len(serverID) > 0 {
+		mac.Write([]byte(serverID))
+	}
 	var tsBuf [8]byte
 	binary.BigEndian.PutUint64(tsBuf[:], timestamp)
 	mac.Write(tsBuf[:])
@@ -72,9 +75,9 @@ func CreateClientHello(psk []byte, now time.Time) (record []byte, clientNonce [2
 }
 
 // VerifyClientHello verifies an incoming 48-byte ClientHello record.
-func VerifyClientHello(psk []byte, record []byte, now time.Time) (clientNonce [24]byte, timestamp uint64, err error) {
-	if len(psk) < 16 {
-		return clientNonce, 0, errors.New("rawstream: PSK must be at least 16 bytes")
+func VerifyClientHello(psk []byte, serverID string, record []byte, now time.Time) (clientNonce [24]byte, timestamp uint64, err error) {
+	if len(psk) < 32 {
+		return clientNonce, 0, errors.New("rawstream: PSK must be at least 32 bytes")
 	}
 	if len(record) != ClientHelloSize {
 		return clientNonce, 0, ErrInvalidRecordLen
@@ -92,6 +95,9 @@ func VerifyClientHello(psk []byte, record []byte, now time.Time) (clientNonce [2
 
 	mac := hmac.New(sha256.New, psk)
 	mac.Write([]byte(DomainClientHello))
+	if len(serverID) > 0 {
+		mac.Write([]byte(serverID))
+	}
 	mac.Write(record[0:8])
 	mac.Write(clientNonce[:])
 	expectedFullTag := mac.Sum(nil)
@@ -104,9 +110,12 @@ func VerifyClientHello(psk []byte, record []byte, now time.Time) (clientNonce [2
 }
 
 // Derive0RTTKey derives a 16-byte key for AES-128-GCM 0-RTT frame encryption.
-func Derive0RTTKey(psk []byte, timestamp uint64, clientNonce [24]byte) ([16]byte, error) {
+func Derive0RTTKey(psk []byte, serverID string, timestamp uint64, clientNonce [24]byte) ([16]byte, error) {
 	mac := hmac.New(sha256.New, psk)
 	mac.Write([]byte(Domain0RTTKey))
+	if len(serverID) > 0 {
+		mac.Write([]byte(serverID))
+	}
 	var tsBuf [8]byte
 	binary.BigEndian.PutUint64(tsBuf[:], timestamp)
 	mac.Write(tsBuf[:])
@@ -119,9 +128,12 @@ func Derive0RTTKey(psk []byte, timestamp uint64, clientNonce [24]byte) ([16]byte
 }
 
 // DeriveSessionKeys derives bidirectional 16-byte keys for established AES-128-GCM sessions.
-func DeriveSessionKeys(psk []byte, timestamp uint64, clientNonce, serverNonce [24]byte) (clientKey, serverKey [16]byte, err error) {
+func DeriveSessionKeys(psk []byte, serverID string, timestamp uint64, clientNonce, serverNonce [24]byte) (clientKey, serverKey [16]byte, err error) {
 	mac := hmac.New(sha256.New, psk)
 	mac.Write([]byte(DomainSessionKey))
+	if len(serverID) > 0 {
+		mac.Write([]byte(serverID))
+	}
 	var tsBuf [8]byte
 	binary.BigEndian.PutUint64(tsBuf[:], timestamp)
 	mac.Write(tsBuf[:])
@@ -143,13 +155,16 @@ func DeriveSessionKeys(psk []byte, timestamp uint64, clientNonce, serverNonce [2
 }
 
 // CreateServerHello generates a 40-byte ServerHello response record.
-func CreateServerHello(psk []byte, timestamp uint64, clientNonce [24]byte) (record []byte, serverNonce [24]byte, err error) {
+func CreateServerHello(psk []byte, serverID string, timestamp uint64, clientNonce [24]byte) (record []byte, serverNonce [24]byte, err error) {
 	if _, err := io.ReadFull(rand.Reader, serverNonce[:]); err != nil {
 		return nil, serverNonce, fmt.Errorf("rawstream: server random failed: %w", err)
 	}
 
 	mac := hmac.New(sha256.New, psk)
 	mac.Write([]byte(DomainServerHello))
+	if len(serverID) > 0 {
+		mac.Write([]byte(serverID))
+	}
 	var tsBuf [8]byte
 	binary.BigEndian.PutUint64(tsBuf[:], timestamp)
 	mac.Write(tsBuf[:])
@@ -165,7 +180,7 @@ func CreateServerHello(psk []byte, timestamp uint64, clientNonce [24]byte) (reco
 }
 
 // VerifyServerHello verifies the incoming 40-byte ServerHello record.
-func VerifyServerHello(psk []byte, timestamp uint64, clientNonce [24]byte, record []byte) (serverNonce [24]byte, err error) {
+func VerifyServerHello(psk []byte, serverID string, timestamp uint64, clientNonce [24]byte, record []byte) (serverNonce [24]byte, err error) {
 	if len(record) != ServerHelloSize {
 		return serverNonce, ErrInvalidRecordLen
 	}
@@ -174,6 +189,9 @@ func VerifyServerHello(psk []byte, timestamp uint64, clientNonce [24]byte, recor
 
 	mac := hmac.New(sha256.New, psk)
 	mac.Write([]byte(DomainServerHello))
+	if len(serverID) > 0 {
+		mac.Write([]byte(serverID))
+	}
 	var tsBuf [8]byte
 	binary.BigEndian.PutUint64(tsBuf[:], timestamp)
 	mac.Write(tsBuf[:])
@@ -349,6 +367,8 @@ func Decrypt0RTTChunk(k0RTT [16]byte, ciphertext []byte) ([]byte, error) {
 type AEADStream struct {
 	aead     cipher.AEAD
 	sequence uint64
+	nonceBuf [12]byte
+	lenBuf   [2]byte
 }
 
 // NewAEADStream creates an AEADStream with AES-128-GCM.
@@ -372,18 +392,16 @@ func (s *AEADStream) EncryptChunk(dst, plaintext []byte) ([]byte, error) {
 	if s.sequence == math.MaxUint64 {
 		return nil, ErrSequenceExhausted
 	}
-	var nonce [12]byte
-	binary.BigEndian.PutUint64(nonce[4:12], s.sequence)
+	binary.BigEndian.PutUint64(s.nonceBuf[4:12], s.sequence)
 	s.sequence++
 
 	wirePayloadLen := len(plaintext) + s.aead.Overhead()
 	if dst == nil {
 		dst = make([]byte, 0, 2+wirePayloadLen)
 	}
-	var lenBuf [2]byte
-	binary.BigEndian.PutUint16(lenBuf[:], uint16(wirePayloadLen))
-	dst = append(dst, lenBuf[:]...)
-	dst = s.aead.Seal(dst, nonce[:], plaintext, lenBuf[:])
+	binary.BigEndian.PutUint16(s.lenBuf[:], uint16(wirePayloadLen))
+	dst = append(dst, s.lenBuf[:]...)
+	dst = s.aead.Seal(dst, s.nonceBuf[:], plaintext, s.lenBuf[:])
 	return dst, nil
 }
 
@@ -392,11 +410,9 @@ func (s *AEADStream) DecryptChunk(dst, ciphertext []byte, wireLen uint16) ([]byt
 	if s.sequence == math.MaxUint64 {
 		return nil, ErrSequenceExhausted
 	}
-	var nonce [12]byte
-	binary.BigEndian.PutUint64(nonce[4:12], s.sequence)
+	binary.BigEndian.PutUint64(s.nonceBuf[4:12], s.sequence)
 	s.sequence++
 
-	var lenBuf [2]byte
-	binary.BigEndian.PutUint16(lenBuf[:], wireLen)
-	return s.aead.Open(dst, nonce[:], ciphertext, lenBuf[:])
+	binary.BigEndian.PutUint16(s.lenBuf[:], wireLen)
+	return s.aead.Open(dst, s.nonceBuf[:], ciphertext, s.lenBuf[:])
 }
