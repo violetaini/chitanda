@@ -91,12 +91,13 @@ jobs:
           tag_name: "3x-ui-v2.3.11"
           name: "3X-UI v2.3.11 (Native Chitanda Protocol Support)"
           body: |
-            Customized **3X-UI v2.3.11** with native visual UI support for **Chitanda Protocol** (`h2`, `h3`, `auto`, `h1`).
+            Customized **3X-UI v2.3.11** with native visual UI support for **Chitanda Protocol** (`h2`, `stream`, `h3`, `auto`, `h1`).
             
             ### Features:
-            - **Visual Chitanda Inbound Form**: Add/Edit Inbound $	o$ Select `chitanda` directly in Protocol dropdown.
+            - **Visual Chitanda Inbound Form**: Add/Edit Inbound $\to$ Select `chitanda` directly in Protocol dropdown.
             - **One-Click PSK Generator**: 32-byte secure pre-shared key generator.
-            - **Transport Modes**: `h2` (default), `h3`, `auto`, `h1`.
+            - **Transport Modes**: `h2` (TLS 1.3), `stream` (RawStream 专线高性能), `h3`, `auto`, `h1` (免证书直连).
+            - **Security Controls**: Bind `server_id` anti-replay and optional persistent `replay_file`.
             - **Native Node Subscription**: Export Chitanda node links & configs.
             - **Bundled Core**: Pre-packaged with `xray-chitanda` multi-arch core.
           files: |

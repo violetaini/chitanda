@@ -137,7 +137,7 @@
                 inModal.inbound.stream.xtls.certs[index].keyFile = app.defaultKey;
             },
             onChitandaTransportChange(val) {
-                if (val === 'h1') {
+                if (val === 'h1' || val === 'stream') {
                     this.inModal.inbound.stream.security = 'none';
                 } else {
                     this.inModal.inbound.stream.security = 'tls';

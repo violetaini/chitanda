@@ -437,15 +437,23 @@
           <td>传输模式 (Transport)</td>
           <td><a-tag color="blue">[[ inbound.settings.transport || 'h2' ]]</a-tag></td>
         </tr>
-        <tr class="client-table-odd-row">
+        <tr v-if="inbound.settings.transport !== 'stream'" class="client-table-odd-row">
           <td>请求路径 (Path)</td>
           <td>[[ inbound.settings.path || '/api/v1/sync' ]]</td>
+        </tr>
+        <tr v-if="inbound.settings.server_id">
+          <td>节点标识 (Server ID)</td>
+          <td><a-tag color="cyan">[[ inbound.settings.server_id ]]</a-tag></td>
+        </tr>
+        <tr v-if="inbound.settings.replay_file" class="client-table-odd-row">
+          <td>持久防重放 (Replay File)</td>
+          <td>[[ inbound.settings.replay_file ]]</td>
         </tr>
         <tr v-if="inbound.settings.strict_sni">
           <td>Strict SNI</td>
           <td>[[ inbound.settings.strict_sni ]]</td>
         </tr>
-        <tr v-if="inbound.settings.fallback" class="client-table-odd-row">
+        <tr v-if="inbound.settings.fallback && inbound.settings.transport !== 'stream'" class="client-table-odd-row">
           <td>回退地址 (Fallback)</td>
           <td>[[ inbound.settings.fallback ]]</td>
         </tr>

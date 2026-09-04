@@ -1823,11 +1823,16 @@ class Inbound extends XrayCommonClass {
 
     genChitandaLink(address='', port=this.port, remark='') {
         const psk = encodeURIComponent(this.settings.psk || '');
-        const path = encodeURIComponent(this.settings.path || '/api/v1/sync');
         const transport = this.settings.transport || 'h2';
+        const path = (transport !== 'stream') ? encodeURIComponent(this.settings.path || '/api/v1/sync') : '';
         const sni = (this.stream && this.stream.isTls) ? encodeURIComponent(this.stream.tls.serverName || address) : '';
+        const serverId = this.settings.server_id ? `&server-id=${encodeURIComponent(this.settings.server_id)}` : '';
         const name = encodeURIComponent(remark || 'Chitanda');
-        return `chitanda://${psk}@${address}:${port}?transport=${transport}&path=${path}&sni=${sni}#${name}`;
+        let link = `chitanda://${psk}@${address}:${port}?transport=${transport}`;
+        if (path) link += `&path=${path}`;
+        if (sni) link += `&sni=${sni}`;
+        link += `${serverId}#${name}`;
+        return link;
     }
 
     genLink(address='', port=this.port, forceTls='same', remark='', client) {
@@ -1978,13 +1983,17 @@ Inbound.ChitandaSettings = class extends Inbound.Settings {
                 path='/api/v1/sync',
                 transport='h2',
                 strict_sni='',
-                fallback='default') {
+                fallback='default',
+                server_id='',
+                replay_file='') {
         super(protocol);
         this.psk = psk;
         this.path = path;
         this.transport = transport;
         this.strict_sni = strict_sni;
         this.fallback = fallback;
+        this.server_id = server_id;
+        this.replay_file = replay_file;
     }
 
     static fromJson(json = {}) {
@@ -1995,6 +2004,8 @@ Inbound.ChitandaSettings = class extends Inbound.Settings {
             json.transport || 'h2',
             json.strict_sni || '',
             json.fallback || 'default',
+            json.server_id || '',
+            json.replay_file || '',
         );
     }
 
@@ -2005,6 +2016,8 @@ Inbound.ChitandaSettings = class extends Inbound.Settings {
             transport: this.transport,
             strict_sni: this.strict_sni,
             fallback: this.fallback,
+            server_id: this.server_id,
+            replay_file: this.replay_file,
         };
     }
 };

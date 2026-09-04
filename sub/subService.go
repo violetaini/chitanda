@@ -175,6 +175,7 @@ func (s *SubService) genChitandaLink(inbound *model.Inbound) string {
 	psk, _ := settings["psk"].(string)
 	path, _ := settings["path"].(string)
 	transport, _ := settings["transport"].(string)
+	serverID, _ := settings["server_id"].(string)
 	if transport == "" {
 		transport = "h2"
 	}
@@ -195,10 +196,19 @@ func (s *SubService) genChitandaLink(inbound *model.Inbound) string {
 	if remark == "" {
 		remark = "Chitanda"
 	}
-	return fmt.Sprintf("chitanda://%s@%s:%d?transport=%s&path=%s&sni=%s#%s",
-		url.QueryEscape(psk), s.address, inbound.Port,
-		url.QueryEscape(transport), url.QueryEscape(path), url.QueryEscape(sni),
-		url.QueryEscape(remark))
+	link := fmt.Sprintf("chitanda://%s@%s:%d?transport=%s",
+		url.QueryEscape(psk), s.address, inbound.Port, url.QueryEscape(transport))
+	if transport != "stream" {
+		link += "&path=" + url.QueryEscape(path)
+	}
+	if sni != "" {
+		link += "&sni=" + url.QueryEscape(sni)
+	}
+	if serverID != "" {
+		link += "&server-id=" + url.QueryEscape(serverID)
+	}
+	link += "#" + url.QueryEscape(remark)
+	return link
 }
 
 func (s *SubService) genVmessLink(inbound *model.Inbound, email string) string {

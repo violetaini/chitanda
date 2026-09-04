@@ -16,25 +16,36 @@
     <!-- Transport Mode -->
     <a-form-item label="传输模式 (Transport)">
         <a-select v-model="inbound.settings.transport" :dropdown-class-name="themeSwitcher.currentTheme" @change="onChitandaTransportChange">
-            <a-select-option value="h2">h2 (TLS 1.3 + HTTP/2 多路复用 - 主线推荐)</a-select-option>
+            <a-select-option value="h2">h2 (TLS 1.3 + HTTP/2 多路复用 - 公网主线推荐)</a-select-option>
+            <a-select-option value="stream">stream (RawStream 专线高性能 - 推荐 IEPL/IPLC)</a-select-option>
             <a-select-option value="h3">h3 (TLS 1.3 + QUIC Stream + HTTP/3)</a-select-option>
             <a-select-option value="auto">auto (H2 优先 & 丢包自愈 H3)</a-select-option>
             <a-select-option value="h1">h1 (纯 IP / 免证书 / 全双工 HTTP/1.1)</a-select-option>
         </a-select>
     </a-form-item>
 
-    <!-- Path -->
-    <a-form-item label="请求路径 (Path)">
+    <!-- Server ID (Anti-Replay Node Identity) -->
+    <a-form-item label="节点标识 (Server ID)">
+        <a-input v-model.trim="inbound.settings.server_id" placeholder="如 tokyo-node-01（绑定节点身份，防范跨节点握手重放）"></a-input>
+    </a-form-item>
+
+    <!-- Replay File (Persistent Cache) -->
+    <a-form-item label="持久防重放 (Replay File)">
+        <a-input v-model.trim="inbound.settings.replay_file" placeholder="落盘文件路径，如 /etc/x-ui/replay_tokyo.db（留空则为内存缓存）"></a-input>
+    </a-form-item>
+
+    <!-- Path (Only for HTTP-based modes: h2, h3, auto, h1) -->
+    <a-form-item v-if="inbound.settings.transport !== 'stream'" label="请求路径 (Path)">
         <a-input v-model.trim="inbound.settings.path" placeholder="/api/v1/sync"></a-input>
     </a-form-item>
 
     <!-- Strict SNI (Only for TLS modes: h2, h3, auto) -->
-    <a-form-item v-if="inbound.settings.transport !== 'h1'" label="Strict SNI">
+    <a-form-item v-if="inbound.settings.transport !== 'h1' && inbound.settings.transport !== 'stream'" label="Strict SNI">
         <a-input v-model.trim="inbound.settings.strict_sni" placeholder="严格校验的 SNI 域名（可选，留空则匹配证书中任意域名）"></a-input>
     </a-form-item>
 
-    <!-- Fallback -->
-    <a-form-item label="回退防探测 (Fallback)">
+    <!-- Fallback (Only for HTTP-based modes: h2, h3, auto, h1) -->
+    <a-form-item v-if="inbound.settings.transport !== 'stream'" label="回退防探测 (Fallback)">
         <a-input-group compact style="display: flex;">
             <a-select :value="getChitandaFallbackType()" @change="setChitandaFallbackType" style="width: 45%" :dropdown-class-name="themeSwitcher.currentTheme">
                 <a-select-option value="default">🏢 内置防探测默认页</a-select-option>
@@ -48,6 +59,11 @@
         <div v-if="inbound.settings.fallback === 'default' || inbound.settings.fallback === 'builtin' || !inbound.settings.fallback" style="font-size: 12px; color: #52c41a; margin-top: 4px;">
             <a-icon type="check-circle" /> 已启用 Vanguard Global Operations Hub 内置伪装 ERP 响应式门户
         </div>
+    </a-form-item>
+
+    <!-- Notice for Stream Mode -->
+    <a-form-item v-if="inbound.settings.transport === 'stream'" label="专线与加密">
+        <a-alert message="RawStream 专线极速模式：基于硬件 AES-128-GCM + 动态 Padding 混淆，抗主动 HTTP 嗅探探测（非法嗅探即刻 RST 断开）。无需 SSL 证书。" type="success" show-icon />
     </a-form-item>
 
     <!-- Notice for H1 Mode -->
