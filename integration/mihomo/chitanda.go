@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"strconv"
 	"sync"
 
@@ -104,7 +105,13 @@ func (c *Chitanda) getClient() (*client.Client, error) {
 			return c.dialer.DialContext(ctx, network, addr)
 		},
 		ListenPacket: func(ctx context.Context, network, addr string) (net.PacketConn, error) {
-			return c.dialer.ListenPacket(ctx, network, addr)
+			var rAddr netip.AddrPort
+			if addr != "" {
+				if ap, err := netip.ParseAddrPort(addr); err == nil {
+					rAddr = ap
+				}
+			}
+			return c.dialer.ListenPacket(ctx, network, addr, rAddr)
 		},
 	})
 	if err != nil {
