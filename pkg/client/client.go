@@ -39,6 +39,7 @@ const (
 	TCPTransportH3      = "h3"
 	TCPTransportPlainH1 = "plain-h1"
 	TCPTransportH1      = "h1"
+	TCPTransportStream  = "stream"
 	DefaultTCPTransport = TCPTransportH2
 	DefaultTCPPoolSize  = 4
 
@@ -85,7 +86,14 @@ func (c *Client) dialRaw(ctx context.Context, network, addr string) (net.Conn, e
 
 // New creates and initializes a new MyXray Client.
 func New(cfg Config) (*Client, error) {
-	if cfg.TCPTransport == TCPTransportPlainH1 || cfg.TCPTransport == TCPTransportH1 {
+	if cfg.TCPTransport == TCPTransportStream {
+		if cfg.Server == "" || len(cfg.PSK) < 16 {
+			return nil, errors.New("server and valid PSK (>=16 bytes) are required for stream")
+		}
+		if cfg.ServerName == "" {
+			cfg.ServerName = cfg.Server
+		}
+	} else if cfg.TCPTransport == TCPTransportPlainH1 || cfg.TCPTransport == TCPTransportH1 {
 		if cfg.Server == "" || len(cfg.PSK) < 32 || cfg.Path == "" {
 			return nil, errors.New("server, path, and valid PSK (>=32 bytes) are required for h1")
 		}
@@ -100,8 +108,8 @@ func New(cfg Config) (*Client, error) {
 	if cfg.TCPTransport == "" {
 		cfg.TCPTransport = DefaultTCPTransport
 	}
-	if cfg.TCPTransport != TCPTransportH2 && cfg.TCPTransport != TCPTransportAuto && cfg.TCPTransport != TCPTransportH3 && cfg.TCPTransport != TCPTransportPlainH1 && cfg.TCPTransport != TCPTransportH1 {
-		return nil, fmt.Errorf("invalid tcp transport %q: must be h2, auto, h3, or h1", cfg.TCPTransport)
+	if cfg.TCPTransport != TCPTransportH2 && cfg.TCPTransport != TCPTransportAuto && cfg.TCPTransport != TCPTransportH3 && cfg.TCPTransport != TCPTransportPlainH1 && cfg.TCPTransport != TCPTransportH1 && cfg.TCPTransport != TCPTransportStream {
+		return nil, fmt.Errorf("invalid tcp transport %q: must be h2, auto, h3, h1, or stream", cfg.TCPTransport)
 	}
 	if cfg.TCPPoolSize <= 0 {
 		cfg.TCPPoolSize = DefaultTCPPoolSize
@@ -132,7 +140,7 @@ func New(cfg Config) (*Client, error) {
 	var h2Clients []*h2TransportClient
 	var h3Managers []*h3TransportManager
 
-	if cfg.TCPTransport != TCPTransportPlainH1 && cfg.TCPTransport != TCPTransportH1 {
+	if cfg.TCPTransport != TCPTransportPlainH1 && cfg.TCPTransport != TCPTransportH1 && cfg.TCPTransport != TCPTransportStream {
 		// H2 / H3 initialization
 		h2Count := cfg.TCPPoolSize
 		if cfg.TCPTransport == TCPTransportH3 {
@@ -182,6 +190,10 @@ func (c *Client) DialContext(ctx context.Context, network, address string) (net.
 		return nil, errors.New("client closed")
 	}
 	c.mu.Unlock()
+
+	if c.cfg.TCPTransport == TCPTransportStream {
+		return c.dialRawStream(ctx, address)
+	}
 
 	if c.cfg.TCPTransport == TCPTransportPlainH1 || c.cfg.TCPTransport == TCPTransportH1 {
 		return c.dialPlainH1(ctx, address)
@@ -271,7 +283,7 @@ func (c *Client) ListenPacket(ctx context.Context) (net.PacketConn, error) {
 	}
 	c.mu.Unlock()
 
-	if c.cfg.TCPTransport == TCPTransportPlainH1 || c.cfg.TCPTransport == TCPTransportH1 {
+	if c.cfg.TCPTransport == TCPTransportPlainH1 || c.cfg.TCPTransport == TCPTransportH1 || c.cfg.TCPTransport == TCPTransportStream {
 		return newPlainUDPConn(c.cfg.Server, c.cfg.PSK)
 	}
 

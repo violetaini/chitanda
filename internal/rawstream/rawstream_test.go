@@ -1,0 +1,187 @@
+package rawstream
+
+import (
+	"bytes"
+	"io"
+	"net"
+	"testing"
+	"time"
+)
+
+func TestClientServerHandshake(t *testing.T) {
+	psk := []byte("01234567890123456789012345678901") // 32 bytes
+	now := time.Now()
+
+	// 1. Client creates ClientHello
+	cHello, clientNonce, ts, err := CreateClientHello(psk, now)
+	if err != nil {
+		t.Fatalf("CreateClientHello failed: %v", err)
+	}
+	if len(cHello) != ClientHelloSize {
+		t.Fatalf("expected client hello size %d, got %d", ClientHelloSize, len(cHello))
+	}
+
+	// 2. Server verifies ClientHello
+	verifiedNonce, verifiedTs, err := VerifyClientHello(psk, cHello, now)
+	if err != nil {
+		t.Fatalf("VerifyClientHello failed: %v", err)
+	}
+	if verifiedNonce != clientNonce || verifiedTs != ts {
+		t.Fatalf("nonce or timestamp mismatch")
+	}
+
+	// 3. Keys derivation
+	k0RTTClient, err := Derive0RTTKey(psk, ts, clientNonce)
+	if err != nil {
+		t.Fatalf("Derive0RTTKey client failed: %v", err)
+	}
+	k0RTTServer, err := Derive0RTTKey(psk, verifiedTs, verifiedNonce)
+	if err != nil {
+		t.Fatalf("Derive0RTTKey server failed: %v", err)
+	}
+	if k0RTTClient != k0RTTServer {
+		t.Fatalf("0-RTT key mismatch")
+	}
+
+	// 4. Server creates ServerHello
+	sHello, serverNonce, err := CreateServerHello(psk, verifiedTs, verifiedNonce)
+	if err != nil {
+		t.Fatalf("CreateServerHello failed: %v", err)
+	}
+	if len(sHello) != ServerHelloSize {
+		t.Fatalf("expected server hello size %d, got %d", ServerHelloSize, len(sHello))
+	}
+
+	// 5. Client verifies ServerHello
+	verifiedServerNonce, err := VerifyServerHello(psk, ts, clientNonce, sHello)
+	if err != nil {
+		t.Fatalf("VerifyServerHello failed: %v", err)
+	}
+	if verifiedServerNonce != serverNonce {
+		t.Fatalf("server nonce mismatch")
+	}
+
+	// 6. Session keys match
+	c2sClient, s2cClient, err := DeriveSessionKeys(psk, ts, clientNonce, serverNonce)
+	if err != nil {
+		t.Fatalf("DeriveSessionKeys client: %v", err)
+	}
+	c2sServer, s2cServer, err := DeriveSessionKeys(psk, verifiedTs, verifiedNonce, verifiedServerNonce)
+	if err != nil {
+		t.Fatalf("DeriveSessionKeys server: %v", err)
+	}
+
+	if c2sClient != c2sServer || s2cClient != s2cServer {
+		t.Fatalf("session keys mismatch between client and server")
+	}
+}
+
+func TestDynamicPaddingVariance(t *testing.T) {
+	target := "1.1.1.1:53"
+	payload := []byte("ping payload data")
+
+	lengths := make(map[int]bool)
+	for i := 0; i < 20; i++ {
+		frame, err := Encode0RTTOpenFrame(target, payload, 32, 256)
+		if err != nil {
+			t.Fatalf("Encode0RTTOpenFrame failed: %v", err)
+		}
+		lengths[len(frame)] = true
+
+		decodedTarget, decodedPayload, err := Decode0RTTOpenFrame(frame)
+		if err != nil {
+			t.Fatalf("Decode0RTTOpenFrame failed: %v", err)
+		}
+		if decodedTarget != target {
+			t.Fatalf("expected target %s, got %s", target, decodedTarget)
+		}
+		if !bytes.Equal(decodedPayload, payload) {
+			t.Fatalf("payload mismatch")
+		}
+	}
+
+	// Dynamic padding must yield multiple different wire lengths
+	if len(lengths) < 5 {
+		t.Fatalf("expected at least 5 different wire lengths across 20 samples, got %d", len(lengths))
+	}
+}
+
+func TestAntiProbeResistance(t *testing.T) {
+	psk := []byte("01234567890123456789012345678901")
+	now := time.Now()
+
+	// 1. Scanner sends HTTP GET request
+	httpScan := []byte("GET / HTTP/1.1\r\nHost: example.com\r\nUser-Agent: Mozilla/5.0\r\n\r\n")
+	_, _, err := VerifyClientHello(psk, httpScan, now)
+	if err == nil {
+		t.Fatalf("expected VerifyClientHello to reject HTTP scan request, but it passed!")
+	}
+
+	// 2. Scanner sends random bytes of exact 48 length
+	junk48 := make([]byte, ClientHelloSize)
+	for i := range junk48 {
+		junk48[i] = 0xAA
+	}
+	_, _, err = VerifyClientHello(psk, junk48, now)
+	if err == nil {
+		t.Fatalf("expected VerifyClientHello to reject random junk, but it passed!")
+	}
+}
+
+func TestStreamConnBidirectional(t *testing.T) {
+	keyC2S := [32]byte{1, 2, 3}
+	keyS2C := [32]byte{4, 5, 6}
+
+	cStreamOut, _ := NewAEADStream(keyC2S)
+	cStreamIn, _ := NewAEADStream(keyS2C)
+	sStreamIn, _ := NewAEADStream(keyC2S)
+	sStreamOut, _ := NewAEADStream(keyS2C)
+
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	defer c2.Close()
+
+	clientConn := NewStreamConn(c1, cStreamIn, cStreamOut)
+	serverConn := NewStreamConn(c2, sStreamIn, sStreamOut)
+
+	testData := bytes.Repeat([]byte("abcdef123456"), 5000) // 60KB
+
+	errCh := make(chan error, 2)
+
+	// Server echoes back
+	go func() {
+		buf := make([]byte, len(testData))
+		if _, err := io.ReadFull(serverConn, buf); err != nil {
+			errCh <- err
+			return
+		}
+		if _, err := serverConn.Write(buf); err != nil {
+			errCh <- err
+			return
+		}
+		errCh <- nil
+	}()
+
+	// Client sends and receives
+	go func() {
+		if _, err := clientConn.Write(testData); err != nil {
+			errCh <- err
+			return
+		}
+		buf := make([]byte, len(testData))
+		if _, err := io.ReadFull(clientConn, buf); err != nil {
+			errCh <- err
+			return
+		}
+		if !bytes.Equal(buf, testData) {
+			t.Errorf("echoed data mismatch")
+		}
+		errCh <- nil
+	}()
+
+	for i := 0; i < 2; i++ {
+		if err := <-errCh; err != nil {
+			t.Fatalf("concurrent stream error: %v", err)
+		}
+	}
+}
