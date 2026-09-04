@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"math/big"
 	"net"
 	"strconv"
@@ -34,14 +35,15 @@ const (
 )
 
 var (
-	ErrInvalidRecordLen  = errors.New("rawstream: invalid handshake record length")
-	ErrTimestampExpired  = errors.New("rawstream: timestamp out of acceptable window")
-	ErrInvalidClientAuth = errors.New("rawstream: invalid client authentication tag")
-	ErrInvalidServerAuth = errors.New("rawstream: invalid server authentication tag")
-	ErrDecryptionFailed  = errors.New("rawstream: AEAD chunk decryption failed")
-	ErrChunkTooLarge     = errors.New("rawstream: AEAD chunk length exceeds maximum allowed size")
-	ErrInvalidOpenFrame  = errors.New("rawstream: invalid OPEN frame structure")
-	ErrInvalidAddress    = errors.New("rawstream: unsupported address type in OPEN frame")
+	ErrInvalidRecordLen   = errors.New("rawstream: invalid handshake record length")
+	ErrTimestampExpired   = errors.New("rawstream: timestamp out of acceptable window")
+	ErrInvalidClientAuth  = errors.New("rawstream: invalid client authentication tag")
+	ErrInvalidServerAuth  = errors.New("rawstream: invalid server authentication tag")
+	ErrDecryptionFailed   = errors.New("rawstream: AEAD chunk decryption failed")
+	ErrChunkTooLarge      = errors.New("rawstream: AEAD chunk length exceeds maximum allowed size")
+	ErrInvalidOpenFrame   = errors.New("rawstream: invalid OPEN frame structure")
+	ErrInvalidAddress     = errors.New("rawstream: unsupported address type in OPEN frame")
+	ErrSequenceExhausted  = errors.New("rawstream: AEAD sequence number exhausted")
 )
 
 // CreateClientHello generates a 48-byte ClientHello record.
@@ -304,7 +306,7 @@ func decodeTargetAddress(b []byte) (string, int, error) {
 
 	case 0x03: // Domain
 		domainLen := int(b[1])
-		if len(b) < 2+domainLen+2 {
+		if domainLen == 0 || len(b) < 2+domainLen+2 {
 			return "", 0, ErrInvalidOpenFrame
 		}
 		domain := string(b[2 : 2+domainLen])
@@ -356,6 +358,9 @@ func (s *AEADStream) EncryptChunk(dst, plaintext []byte) ([]byte, error) {
 	if len(plaintext) > MaxChunkPayloadLen {
 		return nil, ErrChunkTooLarge
 	}
+	if s.sequence == math.MaxUint64 {
+		return nil, ErrSequenceExhausted
+	}
 	var nonce [12]byte
 	binary.BigEndian.PutUint64(nonce[4:12], s.sequence)
 	s.sequence++
@@ -373,6 +378,9 @@ func (s *AEADStream) EncryptChunk(dst, plaintext []byte) ([]byte, error) {
 
 // DecryptChunk opens ciphertext with associated 2-byte wire length data.
 func (s *AEADStream) DecryptChunk(dst, ciphertext []byte, wireLen uint16) ([]byte, error) {
+	if s.sequence == math.MaxUint64 {
+		return nil, ErrSequenceExhausted
+	}
 	var nonce [12]byte
 	binary.BigEndian.PutUint64(nonce[4:12], s.sequence)
 	s.sequence++

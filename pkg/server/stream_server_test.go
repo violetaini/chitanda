@@ -3,11 +3,13 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"io"
 	"net"
 	"testing"
 	"time"
 
+	"github.com/violetaini/chitanda/internal/rawstream"
 	"github.com/violetaini/chitanda/pkg/client"
 )
 
@@ -257,5 +259,202 @@ func TestStreamServer_NativeUDP_Echo(t *testing.T) {
 	}
 	if rAddr.String() != echoAddr.String() {
 		t.Fatalf("expected remote addr %s, got %s", echoAddr.String(), rAddr.String())
+	}
+}
+
+func TestStreamServer_AntiReplay(t *testing.T) {
+	psk := []byte("01234567890123456789012345678901")
+
+	echoL, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("echo listen: %v", err)
+	}
+	defer echoL.Close()
+
+	go func() {
+		for {
+			c, err := echoL.Accept()
+			if err != nil {
+				return
+			}
+			go func(conn net.Conn) {
+				defer conn.Close()
+				_, _ = io.Copy(conn, conn)
+			}(c)
+		}
+	}()
+
+	srvL, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("server listen: %v", err)
+	}
+	defer srvL.Close()
+
+	srv := NewStreamServer(psk, func(ctx context.Context, network, address string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, "tcp", echoL.Addr().String())
+	})
+	defer srv.Close()
+
+	go func() {
+		_ = srv.Serve(srvL)
+	}()
+
+	// 1. Build a valid ClientHello + 0-RTT frame
+	now := time.Now()
+	clientHello, clientNonce, ts, err := rawstream.CreateClientHello(psk, now)
+	if err != nil {
+		t.Fatalf("create client hello: %v", err)
+	}
+
+	k0RTT, err := rawstream.Derive0RTTKey(psk, ts, clientNonce)
+	if err != nil {
+		t.Fatalf("derive 0-rtt key: %v", err)
+	}
+
+	openFramePlaintext, err := rawstream.Encode0RTTOpenFrame("1.1.1.1:80", nil, 32, 64)
+	if err != nil {
+		t.Fatalf("encode 0-rtt open frame: %v", err)
+	}
+
+	encrypted0RTT, err := rawstream.Encrypt0RTTChunk(k0RTT, openFramePlaintext)
+	if err != nil {
+		t.Fatalf("encrypt 0-rtt chunk: %v", err)
+	}
+
+	wireLen := len(encrypted0RTT)
+	flight1 := make([]byte, 0, rawstream.ClientHelloSize+2+wireLen)
+	flight1 = append(flight1, clientHello...)
+	var lenBuf [2]byte
+	binary.BigEndian.PutUint16(lenBuf[:], uint16(wireLen))
+	flight1 = append(flight1, lenBuf[:]...)
+	flight1 = append(flight1, encrypted0RTT...)
+
+	// 2. First connection: send flight 1 -> should succeed and receive 40B ServerHello
+	conn1, err := net.Dial("tcp", srvL.Addr().String())
+	if err != nil {
+		t.Fatalf("dial 1: %v", err)
+	}
+
+	if _, err := conn1.Write(flight1); err != nil {
+		_ = conn1.Close()
+		t.Fatalf("write flight 1: %v", err)
+	}
+
+	var sHello [rawstream.ServerHelloSize]byte
+	if _, err := io.ReadFull(conn1, sHello[:]); err != nil {
+		_ = conn1.Close()
+		t.Fatalf("read server hello: %v", err)
+	}
+	if _, err := rawstream.VerifyServerHello(psk, ts, clientNonce, sHello[:]); err != nil {
+		_ = conn1.Close()
+		t.Fatalf("verify server hello: %v", err)
+	}
+	_ = conn1.Close()
+
+	// 3. Second connection (Replay attack): send EXACT same flight 1
+	conn2, err := net.Dial("tcp", srvL.Addr().String())
+	if err != nil {
+		t.Fatalf("dial 2: %v", err)
+	}
+	defer conn2.Close()
+
+	if _, err := conn2.Write(flight1); err != nil {
+		t.Fatalf("replay flight 1: %v", err)
+	}
+
+	// Must be dropped immediately with 0 bytes response
+	recvBuf := make([]byte, 256)
+	_ = conn2.SetReadDeadline(time.Now().Add(2 * time.Second))
+	n, readErr := conn2.Read(recvBuf)
+	if n > 0 {
+		t.Fatalf("AntiReplay failed: server responded with %d bytes to replayed handshake!", n)
+	}
+	if readErr == nil {
+		t.Fatalf("expected EOF or closed connection on replayed handshake, got nil error")
+	}
+}
+
+func TestStreamServer_TCPHalfClose(t *testing.T) {
+	psk := []byte("01234567890123456789012345678901")
+
+	// Upstream Echo Server that only finishes responding when client sends EOF
+	echoL, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("echo listen: %v", err)
+	}
+	defer echoL.Close()
+
+	go func() {
+		for {
+			c, err := echoL.Accept()
+			if err != nil {
+				return
+			}
+			go func(conn net.Conn) {
+				defer conn.Close()
+				_, _ = io.Copy(conn, conn)
+			}(c)
+		}
+	}()
+
+	srvL, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("server listen: %v", err)
+	}
+	defer srvL.Close()
+
+	srv := NewStreamServer(psk, func(ctx context.Context, network, address string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, network, address)
+	})
+	defer srv.Close()
+
+	go func() {
+		_ = srv.Serve(srvL)
+	}()
+
+	cli, err := client.New(client.Config{
+		Server:       srvL.Addr().String(),
+		PSK:          psk,
+		TCPTransport: client.TCPTransportStream,
+	})
+	if err != nil {
+		t.Fatalf("client.New: %v", err)
+	}
+	defer cli.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	conn, err := cli.DialContext(ctx, "tcp", echoL.Addr().String())
+	if err != nil {
+		t.Fatalf("DialContext failed: %v", err)
+	}
+	defer conn.Close()
+
+	// Send data, then CloseWrite
+	payload := bytes.Repeat([]byte("HalfCloseTestData12345"), 500) // 11KB
+	if _, err := conn.Write(payload); err != nil {
+		t.Fatalf("conn.Write: %v", err)
+	}
+
+	// Call CloseWrite on stream conn
+	cw, ok := conn.(interface{ CloseWrite() error })
+	if !ok {
+		t.Fatalf("expected conn to implement CloseWrite")
+	}
+	if err := cw.CloseWrite(); err != nil {
+		t.Fatalf("CloseWrite failed: %v", err)
+	}
+
+	// Verify we can read the entire payload back after CloseWrite!
+	respBuf := make([]byte, len(payload))
+	if _, err := io.ReadFull(conn, respBuf); err != nil {
+		t.Fatalf("ReadFull after CloseWrite failed: %v", err)
+	}
+
+	if !bytes.Equal(respBuf, payload) {
+		t.Fatalf("echo payload mismatch after CloseWrite")
 	}
 }

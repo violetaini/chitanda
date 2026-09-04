@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"io"
 	"net"
@@ -10,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/violetaini/chitanda/internal/auth"
 	"github.com/violetaini/chitanda/internal/rawstream"
 	"github.com/violetaini/chitanda/internal/target"
 )
@@ -21,6 +23,7 @@ type StreamServer struct {
 	dialTarget func(ctx context.Context, network, address string) (net.Conn, error)
 	listener   net.Listener
 	udpServer  *PlainUDPServer
+	replays    *auth.ReplayCache
 	closed     atomic.Bool
 	wg         sync.WaitGroup
 }
@@ -35,6 +38,14 @@ func NewStreamServer(psk []byte, dialTarget func(ctx context.Context, network, a
 	return &StreamServer{
 		psk:        psk,
 		dialTarget: dialTarget,
+		replays:    auth.NewReplayCache(),
+	}
+}
+
+// SetReplayCache sets an explicit ReplayCache instance (e.g. for persistent storage or tests).
+func (s *StreamServer) SetReplayCache(cache *auth.ReplayCache) {
+	if cache != nil {
+		s.replays = cache
 	}
 }
 
@@ -96,6 +107,15 @@ func (s *StreamServer) HandleConn(conn net.Conn) {
 	if err != nil {
 		// Authentication failed (e.g. GET / HTTP/1.1 sent by scanner):
 		// Close immediately with 0 bytes response. Never speak HTTP.
+		return
+	}
+
+	// Prevent 0-RTT replay and active probe confirmation
+	nonceHex := hex.EncodeToString(clientNonce[:])
+	accepted, err := s.replays.Accept(nonceHex, time.Now())
+	if err != nil || !accepted {
+		// Replayed handshake or replay cache failure:
+		// Drop immediately with 0 bytes response to prevent active probing
 		return
 	}
 
@@ -184,33 +204,52 @@ func (s *StreamServer) HandleConn(conn net.Conn) {
 	relayBidirectional(streamConn, upstream)
 }
 
-func relayBidirectional(client, target net.Conn) {
-	errCh := make(chan error, 2)
+type closeWriter interface {
+	CloseWrite() error
+}
 
+func closeWriteConn(c net.Conn) {
+	if cw, ok := c.(closeWriter); ok {
+		_ = cw.CloseWrite()
+	}
+}
+
+func relayBidirectional(client, target net.Conn) {
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// client -> target
 	go func() {
+		defer wg.Done()
 		bufPtr := copyBufferPool.Get().(*[]byte)
 		defer copyBufferPool.Put(bufPtr)
 		_, err := io.CopyBuffer(target, client, *bufPtr)
-		if tc, ok := target.(*net.TCPConn); ok {
-			_ = tc.CloseWrite()
+		if err != nil {
+			_ = target.Close()
+			_ = client.Close()
+			return
 		}
-		errCh <- err
+		closeWriteConn(target)
 	}()
 
+	// target -> client
 	go func() {
+		defer wg.Done()
 		bufPtr := copyBufferPool.Get().(*[]byte)
 		defer copyBufferPool.Put(bufPtr)
 		_, err := io.CopyBuffer(client, target, *bufPtr)
-		if tc, ok := client.(*net.TCPConn); ok {
-			_ = tc.CloseWrite()
+		if err != nil {
+			_ = client.Close()
+			_ = target.Close()
+			return
 		}
-		errCh <- err
+		closeWriteConn(client)
 	}()
 
-	<-errCh
+	wg.Wait()
 }
 
-// Close gracefully closes the listener and active PlainUDP server.
+// Close gracefully closes the listener, replay cache, and active PlainUDP server.
 func (s *StreamServer) Close() error {
 	s.closed.Store(true)
 	var firstErr error
@@ -221,6 +260,9 @@ func (s *StreamServer) Close() error {
 	}
 	if s.udpServer != nil {
 		s.udpServer.Close()
+	}
+	if s.replays != nil {
+		_ = s.replays.Close()
 	}
 	s.wg.Wait()
 	return firstErr

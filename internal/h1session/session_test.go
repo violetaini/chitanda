@@ -147,7 +147,7 @@ func TestH1SessionReplayAndTamper(t *testing.T) {
 		t.Fatal("expected error on tampered ClientHello")
 	}
 
-	expiredTime := now.Add(40 * time.Second)
+	expiredTime := now.Add(100 * time.Second)
 	if _, _, err := VerifyClientHello(psk, clientHello, expiredTime); err == nil {
 		t.Fatal("expected error on expired ClientHello")
 	}

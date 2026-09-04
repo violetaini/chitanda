@@ -2,7 +2,10 @@ package rawstream
 
 import (
 	"bytes"
+	"encoding/binary"
+	"errors"
 	"io"
+	"math"
 	"net"
 	"testing"
 	"time"
@@ -183,5 +186,85 @@ func TestStreamConnBidirectional(t *testing.T) {
 		if err := <-errCh; err != nil {
 			t.Fatalf("concurrent stream error: %v", err)
 		}
+	}
+}
+
+func BenchmarkStreamConn_Throughput(b *testing.B) {
+	keyC2S := [32]byte{1, 2, 3}
+	keyS2C := [32]byte{4, 5, 6}
+
+	cStreamOut, _ := NewAEADStream(keyC2S)
+	cStreamIn, _ := NewAEADStream(keyS2C)
+	sStreamIn, _ := NewAEADStream(keyC2S)
+	sStreamOut, _ := NewAEADStream(keyS2C)
+
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	defer c2.Close()
+
+	clientConn := NewStreamConn(c1, cStreamIn, cStreamOut)
+	serverConn := NewStreamConn(c2, sStreamIn, sStreamOut)
+
+	chunk := make([]byte, 32*1024) // 32KB payload
+	b.SetBytes(int64(len(chunk)))
+	b.ResetTimer()
+
+	go func() {
+		buf := make([]byte, len(chunk))
+		for {
+			_, err := io.ReadFull(serverConn, buf)
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	for i := 0; i < b.N; i++ {
+		if _, err := clientConn.Write(chunk); err != nil {
+			b.Fatalf("write failed: %v", err)
+		}
+	}
+}
+
+func BenchmarkAEADStream_Direct(b *testing.B) {
+	key := [32]byte{1, 2, 3, 4}
+	streamEnc, _ := NewAEADStream(key)
+	streamDec, _ := NewAEADStream(key)
+
+	plaintext := make([]byte, 16384) // 16KB
+	b.SetBytes(int64(len(plaintext)))
+	encBuf := make([]byte, 0, MaxChunkWireLen+2)
+	decBuf := make([]byte, 0, MaxChunkPayloadLen)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		enc, _ := streamEnc.EncryptChunk(encBuf[:0], plaintext)
+		wireLen := binary.BigEndian.Uint16(enc[:2])
+		_, _ = streamDec.DecryptChunk(decBuf[:0], enc[2:], wireLen)
+	}
+}
+
+func TestAEADStream_SequenceExhaustion(t *testing.T) {
+	key := [32]byte{1, 2, 3, 4}
+	streamEnc, err := NewAEADStream(key)
+	if err != nil {
+		t.Fatalf("NewAEADStream: %v", err)
+	}
+	streamEnc.sequence = math.MaxUint64
+
+	_, err = streamEnc.EncryptChunk(nil, []byte("data"))
+	if !errors.Is(err, ErrSequenceExhausted) {
+		t.Fatalf("expected ErrSequenceExhausted on EncryptChunk, got %v", err)
+	}
+
+	streamDec, err := NewAEADStream(key)
+	if err != nil {
+		t.Fatalf("NewAEADStream: %v", err)
+	}
+	streamDec.sequence = math.MaxUint64
+
+	_, err = streamDec.DecryptChunk(nil, make([]byte, 32), 32)
+	if !errors.Is(err, ErrSequenceExhausted) {
+		t.Fatalf("expected ErrSequenceExhausted on DecryptChunk, got %v", err)
 	}
 }
