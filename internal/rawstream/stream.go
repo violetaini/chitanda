@@ -3,6 +3,7 @@ package rawstream
 import (
 	"bufio"
 	"encoding/binary"
+	"errors"
 	"io"
 	"net"
 	"sync"
@@ -30,6 +31,8 @@ func (fw *FramedWriter) Write(p []byte) (n int, err error) {
 	defer fw.mu.Unlock()
 
 	total := len(p)
+	fw.buf = fw.buf[:0]
+
 	for len(p) > 0 {
 		chunkSize := len(p)
 		if chunkSize > MaxChunkPayloadLen {
@@ -38,16 +41,17 @@ func (fw *FramedWriter) Write(p []byte) (n int, err error) {
 		chunk := p[:chunkSize]
 		p = p[chunkSize:]
 
-		fw.buf = fw.buf[:0]
 		fw.buf, err = fw.stream.EncryptChunk(fw.buf, chunk)
 		if err != nil {
 			return n, err
 		}
-
-		if _, err := fw.w.Write(fw.buf); err != nil {
-			return n, err
-		}
 		n += chunkSize
+	}
+
+	if len(fw.buf) > 0 {
+		if _, err := fw.w.Write(fw.buf); err != nil {
+			return 0, err
+		}
 	}
 	return total, nil
 }
@@ -55,6 +59,7 @@ func (fw *FramedWriter) Write(p []byte) (n int, err error) {
 // FramedReader decrypts incoming length-prefixed AEAD chunks into a plaintext byte stream.
 type FramedReader struct {
 	r      io.Reader
+	br     *bufio.Reader
 	stream *AEADStream
 	mu     sync.Mutex
 	hdrBuf [2]byte
@@ -71,6 +76,7 @@ func NewFramedReader(r io.Reader, stream *AEADStream) *FramedReader {
 	}
 	return &FramedReader{
 		r:      br,
+		br:     br,
 		stream: stream,
 		rawBuf: make([]byte, MaxChunkWireLen),
 		decBuf: make([]byte, 0, MaxChunkPayloadLen),
@@ -81,45 +87,69 @@ func (fr *FramedReader) Read(p []byte) (int, error) {
 	fr.mu.Lock()
 	defer fr.mu.Unlock()
 
-	if fr.decOff < len(fr.decBuf) {
-		n := copy(p, fr.decBuf[fr.decOff:])
-		fr.decOff += n
-		return n, nil
+	var totalRead int
+
+	for len(p) > 0 {
+		// 1. Consume any remaining decrypted data from previous chunk
+		if fr.decOff < len(fr.decBuf) {
+			n := copy(p, fr.decBuf[fr.decOff:])
+			fr.decOff += n
+			totalRead += n
+			p = p[n:]
+			if len(p) == 0 {
+				return totalRead, nil
+			}
+		}
+
+		// 2. If we already read some bytes and no further data is buffered in memory,
+		// return immediately so we don't block the caller.
+		if totalRead > 0 && fr.br.Buffered() < 2 {
+			return totalRead, nil
+		}
+
+		fr.decOff = 0
+
+		// Read 2-byte chunk wire length
+		if _, err := io.ReadFull(fr.r, fr.hdrBuf[:]); err != nil {
+			if totalRead > 0 && errors.Is(err, io.EOF) {
+				return totalRead, nil
+			}
+			return totalRead, err
+		}
+		wireLen := int(binary.BigEndian.Uint16(fr.hdrBuf[:]))
+		if wireLen == 0 {
+			if totalRead > 0 {
+				return totalRead, nil
+			}
+			return 0, io.EOF
+		}
+		if wireLen > MaxChunkWireLen {
+			return totalRead, ErrChunkTooLarge
+		}
+
+		if cap(fr.rawBuf) < wireLen {
+			fr.rawBuf = make([]byte, wireLen)
+		} else {
+			fr.rawBuf = fr.rawBuf[:wireLen]
+		}
+
+		if _, err := io.ReadFull(fr.r, fr.rawBuf); err != nil {
+			return totalRead, err
+		}
+
+		var err error
+		fr.decBuf, err = fr.stream.DecryptChunk(fr.decBuf[:0], fr.rawBuf, uint16(wireLen))
+		if err != nil {
+			return totalRead, ErrDecryptionFailed
+		}
+
+		n := copy(p, fr.decBuf)
+		fr.decOff = n
+		totalRead += n
+		p = p[n:]
 	}
 
-	fr.decOff = 0
-
-	// Read 2-byte chunk wire length
-	if _, err := io.ReadFull(fr.r, fr.hdrBuf[:]); err != nil {
-		return 0, err
-	}
-	wireLen := int(binary.BigEndian.Uint16(fr.hdrBuf[:]))
-	if wireLen == 0 {
-		return 0, io.EOF
-	}
-	if wireLen > MaxChunkWireLen {
-		return 0, ErrChunkTooLarge
-	}
-
-	if cap(fr.rawBuf) < wireLen {
-		fr.rawBuf = make([]byte, wireLen)
-	} else {
-		fr.rawBuf = fr.rawBuf[:wireLen]
-	}
-
-	if _, err := io.ReadFull(fr.r, fr.rawBuf); err != nil {
-		return 0, err
-	}
-
-	var err error
-	fr.decBuf, err = fr.stream.DecryptChunk(fr.decBuf[:0], fr.rawBuf, uint16(wireLen))
-	if err != nil {
-		return 0, ErrDecryptionFailed
-	}
-
-	n := copy(p, fr.decBuf)
-	fr.decOff = n
-	return n, nil
+	return totalRead, nil
 }
 
 type closeWriter interface {

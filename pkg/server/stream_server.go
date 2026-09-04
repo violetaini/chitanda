@@ -93,6 +93,12 @@ func (s *StreamServer) Serve(l net.Listener) error {
 func (s *StreamServer) HandleConn(conn net.Conn) {
 	defer conn.Close()
 
+	if tc, ok := conn.(*net.TCPConn); ok {
+		_ = tc.SetNoDelay(true)
+		_ = tc.SetReadBuffer(4 << 20)
+		_ = tc.SetWriteBuffer(4 << 20)
+	}
+
 	// 5-second deadline for the initial handshake flight
 	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 
@@ -178,6 +184,12 @@ func (s *StreamServer) HandleConn(conn net.Conn) {
 		return
 	}
 	defer upstream.Close()
+
+	if tc, ok := upstream.(*net.TCPConn); ok {
+		_ = tc.SetNoDelay(true)
+		_ = tc.SetReadBuffer(4 << 20)
+		_ = tc.SetWriteBuffer(4 << 20)
+	}
 
 	// Clear deadlines for full-duplex proxying
 	_ = conn.SetDeadline(time.Time{})

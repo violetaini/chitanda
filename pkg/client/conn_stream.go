@@ -16,6 +16,11 @@ func (c *Client) dialRawStream(ctx context.Context, target string) (net.Conn, er
 	if err != nil {
 		return nil, fmt.Errorf("rawstream dial server %q: %w", c.cfg.Server, err)
 	}
+	if tc, ok := rawConn.(*net.TCPConn); ok {
+		_ = tc.SetNoDelay(true)
+		_ = tc.SetReadBuffer(4 << 20)
+		_ = tc.SetWriteBuffer(4 << 20)
+	}
 
 	now := time.Now()
 	clientHello, clientNonce, ts, err := rawstream.CreateClientHello(c.cfg.PSK, now)
