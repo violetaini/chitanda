@@ -61,20 +61,6 @@ func NewInboundHandler(ctx context.Context, config *InboundConfig) (*InboundHand
 		fbHandler = fb
 	}
 
-	srv := server.NewServer(config.Path, []byte(config.Psk), replays, fbHandler, 1024)
-	streamSrv := server.NewStreamServer([]byte(config.Psk), config.ServerId, replays, nil)
-
-	inCtx, inCancel := context.WithCancel(context.Background())
-	h := &InboundHandler{
-		config:       config,
-		server:       srv,
-		streamServer: streamSrv,
-		replays:      replays,
-		dispatcher:   dispatcher,
-		ctx:          inCtx,
-		cancel:       inCancel,
-	}
-
 	dialTargetFn := func(ctx context.Context, address string) (net.Conn, error) {
 		dest, err := xnet.ParseDestination("tcp:" + address)
 		if err != nil {
@@ -98,8 +84,23 @@ func NewInboundHandler(ctx context.Context, config *InboundConfig) (*InboundHand
 		}, nil
 	}
 
+	srv := server.NewServer(config.Path, []byte(config.Psk), replays, fbHandler, 1024)
 	srv.SetDialTargetForTest(dialTargetFn)
-	streamSrv.SetDialTargetForTest(dialTargetFn)
+
+	streamSrv := server.NewStreamServer([]byte(config.Psk), config.ServerId, replays, func(ctx context.Context, network, address string) (net.Conn, error) {
+		return dialTargetFn(ctx, address)
+	})
+
+	inCtx, inCancel := context.WithCancel(context.Background())
+	h := &InboundHandler{
+		config:       config,
+		server:       srv,
+		streamServer: streamSrv,
+		replays:      replays,
+		dispatcher:   dispatcher,
+		ctx:          inCtx,
+		cancel:       inCancel,
+	}
 
 	return h, nil
 }
@@ -175,7 +176,8 @@ func (h *InboundHandler) Process(ctx context.Context, network xnet.Network, conn
 	defer conn.Close()
 
 	if h.config.Transport == "stream" {
-		return h.streamServer.HandleConn(conn)
+		h.streamServer.HandleConn(conn)
+		return nil
 	}
 
 	br := bufio.NewReader(conn)
