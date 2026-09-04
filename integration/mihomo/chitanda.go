@@ -104,7 +104,7 @@ func (c *Chitanda) getClient() (*client.Client, error) {
 			return c.dialer.DialContext(ctx, network, addr)
 		},
 		ListenPacket: func(ctx context.Context, network, addr string) (net.PacketConn, error) {
-			return c.dialer.ListenPacket(ctx, network, addr, c.DialOptions()...)
+			return c.dialer.ListenPacket(ctx, network, addr)
 		},
 	})
 	if err != nil {

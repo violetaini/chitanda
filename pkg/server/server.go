@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/violetaini/chitanda/internal/auth"
+	"github.com/violetaini/chitanda/pkg/auth"
 	"github.com/violetaini/chitanda/internal/frame"
 	"github.com/violetaini/chitanda/internal/h1session"
 	"github.com/violetaini/chitanda/internal/target"

@@ -10,7 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/violetaini/chitanda/internal/auth"
+	"github.com/violetaini/chitanda/pkg/auth"
 	"github.com/violetaini/chitanda/pkg/server"
 
 	"golang.org/x/net/http2"
@@ -62,7 +62,7 @@ func NewInboundHandler(ctx context.Context, config *InboundConfig) (*InboundHand
 	}
 
 	srv := server.NewServer(config.Path, []byte(config.Psk), replays, fbHandler, 1024)
-	streamSrv := server.NewStreamServer([]byte(config.Psk), replays, config.ServerId, 10000)
+	streamSrv := server.NewStreamServer([]byte(config.Psk), config.ServerId, replays, nil)
 
 	inCtx, inCancel := context.WithCancel(context.Background())
 	h := &InboundHandler{

@@ -11,7 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/violetaini/chitanda/internal/auth"
+	"github.com/violetaini/chitanda/pkg/auth"
 	"github.com/violetaini/chitanda/internal/rawstream"
 	"github.com/violetaini/chitanda/internal/target"
 )
