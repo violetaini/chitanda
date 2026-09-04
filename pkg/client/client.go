@@ -163,7 +163,7 @@ func New(cfg Config) (*Client, error) {
 		}
 		for i := 0; i < h3Count; i++ {
 			h3Managers = append(h3Managers, newH3TransportManager(
-				cfg.Server, cfg.ServerName, rootURL, requestURL, cfg.Path, cfg.PSK, cache, cfg.QUICInitialPacketSize, cfg.InsecureSkipVerify,
+				cfg.Server, cfg.ServerName, rootURL, requestURL, cfg.Path, cfg.PSK, cache, cfg.QUICInitialPacketSize, cfg.InsecureSkipVerify, cfg.ListenPacket,
 			))
 		}
 	}
@@ -285,7 +285,7 @@ func (c *Client) ListenPacket(ctx context.Context) (net.PacketConn, error) {
 	c.mu.Unlock()
 
 	if c.cfg.TCPTransport == TCPTransportPlainH1 || c.cfg.TCPTransport == TCPTransportH1 || c.cfg.TCPTransport == TCPTransportStream {
-		return newPlainUDPConn(c.cfg.Server, c.cfg.PSK)
+		return newPlainUDPConn(c.cfg.Server, c.cfg.PSK, c.cfg.ListenPacket)
 	}
 
 	h3Mgr := c.reserveH3Manager()

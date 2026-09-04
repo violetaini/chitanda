@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bufio"
 	"context"
 	"io"
 	"net"
@@ -284,5 +285,22 @@ func TestPlainUDP_ListenPacket(t *testing.T) {
 	}
 	if string(recvBuf[:n]) != string(msg) {
 		t.Fatalf("received %q != expected %q", string(recvBuf[:n]), string(msg))
+	}
+}
+
+func TestPlainH1_BoundsProtection(t *testing.T) {
+	// Test chunkedReader rejection of negative chunk length (prevents slice bounds out of range panic)
+	cr := newChunkedReader(bufio.NewReader(strings.NewReader("-10\r\npayload\r\n")))
+	buf := make([]byte, 1024)
+	_, err := cr.Read(buf)
+	if err == nil {
+		t.Fatal("expected error reading negative chunk length, got nil")
+	}
+
+	// Test chunkedReader rejection of oversized chunk length
+	cr2 := newChunkedReader(bufio.NewReader(strings.NewReader("ffffffff\r\npayload\r\n")))
+	_, err = cr2.Read(buf)
+	if err == nil {
+		t.Fatal("expected error reading oversized chunk length, got nil")
 	}
 }

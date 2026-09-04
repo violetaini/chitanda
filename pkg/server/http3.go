@@ -126,7 +126,7 @@ func (s *Server) serveHTTP3TCP(w http.ResponseWriter, r *http.Request, targetAdd
 	}
 	defer upstream.Close()
 
-	useFraming := r.Header.Get(headerFraming) == "1" || r.Header.Get(headerMode) == "tcp-v2" || r.Header.Get(headerMode) == "tcp-h2-framed"
+	useFraming := r.Header.Get(headerFraming) == "1" || r.Header.Get(headerMode) == "tcp-h2-framed"
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set(headerSessionOK, "1")

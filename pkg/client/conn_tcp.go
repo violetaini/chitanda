@@ -123,6 +123,11 @@ func (c *h2TransportClient) dialH2TCP(ctx context.Context, target string) (net.C
 
 func (c *h2TransportClient) dialH2TCPOnce(ctx context.Context, target string) (net.Conn, error) {
 	streamCtx, cancel := context.WithCancel(context.Background())
+	stopCancel := context.AfterFunc(ctx, func() {
+		cancel()
+	})
+	defer stopCancel()
+
 	pipeReader, pipeWriter := io.Pipe()
 
 	request, err := http.NewRequestWithContext(streamCtx, http.MethodPost, c.requestURL, pipeReader)

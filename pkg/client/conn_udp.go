@@ -38,6 +38,7 @@ type h3TransportManager struct {
 	transport     *http3.Transport
 	sessionCache  *sessioncache.Cache
 	activeStreams atomic.Int64
+	listenPacket  func(ctx context.Context, network, addr string) (net.PacketConn, error)
 
 	// Separate physical connections for TCP and UDP
 	currentTCP *h3Connection
@@ -50,6 +51,7 @@ func newH3TransportManager(
 	sessionCache *sessioncache.Cache,
 	initialPacketSize uint16,
 	insecureSkipVerify bool,
+	listenPacket func(ctx context.Context, network, addr string) (net.PacketConn, error),
 ) *h3TransportManager {
 	tlsConfig := &tls.Config{
 		MinVersion:         tls.VersionTLS13,
@@ -71,6 +73,7 @@ func newH3TransportManager(
 		quicConfig:   quicconfig.Client(initialPacketSize),
 		transport:    &http3.Transport{EnableDatagrams: true, DisableCompression: true},
 		sessionCache: sessionCache,
+		listenPacket: listenPacket,
 	}
 }
 
@@ -84,19 +87,26 @@ func (m *h3TransportManager) ensureConnection(ctx context.Context, current **h3C
 	if err != nil {
 		return nil, err
 	}
-	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	var pconn net.PacketConn
+	if m.listenPacket != nil {
+		pconn, err = m.listenPacket(ctx, "udp", ":0")
+	} else {
+		pconn, err = net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	}
 	if err != nil {
 		return nil, err
 	}
-	_ = udpConn.SetReadBuffer(8 << 20)
-	_ = udpConn.SetWriteBuffer(8 << 20)
+	if uc, ok := pconn.(*net.UDPConn); ok {
+		_ = uc.SetReadBuffer(8 << 20)
+		_ = uc.SetWriteBuffer(8 << 20)
+	}
 
-	quicConn, err := quic.DialEarly(ctx, udpConn, udpAddr, m.tlsConfig.Clone(), m.quicConfig.Clone())
+	quicConn, err := quic.DialEarly(ctx, pconn, udpAddr, m.tlsConfig.Clone(), m.quicConfig.Clone())
 	if err != nil {
-		_ = udpConn.Close()
+		_ = pconn.Close()
 		return nil, err
 	}
-	*current = &h3Connection{quic: quicConn, h3: m.transport.NewClientConn(quicConn), pconn: udpConn}
+	*current = &h3Connection{quic: quicConn, h3: m.transport.NewClientConn(quicConn), pconn: pconn}
 	return *current, nil
 }
 
@@ -266,9 +276,10 @@ func (m *h3TransportManager) createPacketConnOnce(ctx context.Context) (net.Pack
 
 	pconnCtx, pconnCancel := context.WithCancel(context.Background())
 	return &quicPacketConn{
-		stream: stream,
-		ctx:    pconnCtx,
-		cancel: pconnCancel,
+		stream:  stream,
+		ctx:     pconnCtx,
+		cancel:  pconnCancel,
+		manager: m,
 	}, nil
 }
 
@@ -370,7 +381,9 @@ type quicPacketConn struct {
 	stream        *http3.RequestStream
 	ctx           context.Context
 	cancel        context.CancelFunc
+	manager       *h3TransportManager
 	sequence      atomic.Uint64
+	readMu        sync.Mutex
 	replay        frame.ReplayWindow
 	decoder       frame.DatagramCache
 	mu            sync.Mutex
@@ -404,10 +417,15 @@ func (c *quicPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 		if err != nil {
 			return 0, nil, err
 		}
-		seq, address, payload, err := c.decoder.Decode(rawPacket)
-		if err != nil || !c.replay.Accept(seq) {
+
+		c.readMu.Lock()
+		seq, address, payload, decodeErr := c.decoder.Decode(rawPacket)
+		accepted := decodeErr == nil && c.replay.Accept(seq)
+		c.readMu.Unlock()
+		if !accepted {
 			continue
 		}
+
 		n = copy(p, payload)
 		udpAddr, _ := net.ResolveUDPAddr("udp", address)
 		if udpAddr == nil {
@@ -447,6 +465,9 @@ func (c *quicPacketConn) Close() error {
 		return nil
 	}
 	c.closed = true
+	if c.manager != nil {
+		c.manager.activeStreams.Add(-1)
+	}
 	c.cancel()
 	c.stream.CancelRead(0)
 	c.stream.CancelWrite(0)

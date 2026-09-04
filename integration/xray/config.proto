@@ -12,6 +12,8 @@ message InboundConfig {
   string fallback = 3;
   string strict_sni = 4;
   string transport = 5;
+  string server_id = 6;
+  string replay_file = 7;
 }
 
 message OutboundConfig {
@@ -21,4 +23,5 @@ message OutboundConfig {
   string path = 4;
   string transport = 5;
   int32 pool_size = 6;
+  string server_id = 7;
 }

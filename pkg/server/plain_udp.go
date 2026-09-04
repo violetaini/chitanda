@@ -39,6 +39,8 @@ type PlainUDPServer struct {
 	codec        *plainudp.Codec
 	conn         *net.UDPConn
 	sessions     sync.Map // uint64(sessionID) -> *plainUDPSession
+	sessionCount atomic.Int64
+	maxSessions  int64
 	workers      []chan udpTask
 	workerWg     sync.WaitGroup
 	resolveUDP   func(ctx context.Context, address string) (*net.UDPAddr, error)
@@ -48,12 +50,13 @@ type PlainUDPServer struct {
 }
 
 type plainUDPSession struct {
-	sessionID  uint64
-	clientAddr atomic.Pointer[net.UDPAddr]
-	targets    sync.Map // string(targetAddr) -> *net.UDPConn
-	lastActive atomic.Int64
-	replayMu   sync.Mutex
-	replay     frame.ReplayWindow
+	sessionID   uint64
+	clientAddr  atomic.Pointer[net.UDPAddr]
+	targets     sync.Map // string(targetAddr) -> *net.UDPConn
+	targetCount atomic.Int64
+	lastActive  atomic.Int64
+	replayMu    sync.Mutex
+	replay      frame.ReplayWindow
 }
 
 // NewPlainUDPServer creates a new plain-udp listener with a bounded worker pool and memory budget.
@@ -80,6 +83,7 @@ func NewPlainUDPServer(conn *net.UDPConn, psk []byte) (*PlainUDPServer, error) {
 		conn:         conn,
 		workers:      workers,
 		maxMemBudget: DefaultUDPMemoryBudget,
+		maxSessions:  10000,
 		resolveUDP:   target.ResolveUDPAddr,
 	}, nil
 }
@@ -125,11 +129,11 @@ func (s *PlainUDPServer) Serve(ctx context.Context) error {
 		}
 
 		now := time.Now()
-		sessionID, targetAddr, payload, _, seq, err := s.codec.DecodePacket((*rawBufPtr)[:n], now)
+		sessionID, targetAddr, payload, _, seq, err := s.codec.DecodePacket((*rawBufPtr)[:n], plainudp.DirClientToServer, now)
 		if err != nil {
 			s.inFlightMem.Add(-bufCap)
 			udpTaskPool.Put(rawBufPtr)
-			continue // Drop invalid / tampered / expired packets
+			continue // Drop invalid / tampered / expired / wrong direction packets
 		}
 
 		workerIdx := sessionID % uint64(len(s.workers))
@@ -180,9 +184,18 @@ func (s *PlainUDPServer) workerLoop(ctx context.Context, workerID int, tasks <-c
 }
 
 func (s *PlainUDPServer) processTask(ctx context.Context, task udpTask) {
-	val, _ := s.sessions.LoadOrStore(task.sessionID, &plainUDPSession{
-		sessionID: task.sessionID,
-	})
+	val, loaded := s.sessions.Load(task.sessionID)
+	if !loaded {
+		if s.maxSessions > 0 && s.sessionCount.Load() >= s.maxSessions {
+			return // Session limit reached, drop task
+		}
+		newSession := &plainUDPSession{sessionID: task.sessionID}
+		actual, loadedActual := s.sessions.LoadOrStore(task.sessionID, newSession)
+		if !loadedActual {
+			s.sessionCount.Add(1)
+		}
+		val = actual
+	}
 	session := val.(*plainUDPSession)
 
 	// Anti-Replay verification MUST succeed BEFORE updating clientAddr
@@ -199,6 +212,9 @@ func (s *PlainUDPServer) processTask(ctx context.Context, task udpTask) {
 	targetConnVal, ok := session.targets.Load(task.targetAddr)
 	var upstreamConn *net.UDPConn
 	if !ok {
+		if session.targetCount.Load() >= 32 {
+			return // Max targets reached for this session
+		}
 		resolved, err := s.resolveUDP(ctx, task.targetAddr)
 		if err != nil {
 			return
@@ -216,6 +232,7 @@ func (s *PlainUDPServer) processTask(ctx context.Context, task udpTask) {
 			_ = upConn.Close()
 			upstreamConn = actual.(*net.UDPConn)
 		} else {
+			session.targetCount.Add(1)
 			upstreamConn = upConn
 			go s.listenUpstream(ctx, session, task.targetAddr, upstreamConn)
 		}
@@ -235,13 +252,15 @@ func (s *PlainUDPServer) listenUpstream(ctx context.Context, session *plainUDPSe
 		_ = upstreamConn.SetReadDeadline(time.Now().Add(60 * time.Second))
 		n, err := upstreamConn.Read(buf)
 		if err != nil {
-			session.targets.Delete(targetAddr)
+			if _, deleted := session.targets.LoadAndDelete(targetAddr); deleted {
+				session.targetCount.Add(-1)
+			}
 			_ = upstreamConn.Close()
 			return
 		}
 
 		session.lastActive.Store(time.Now().Unix())
-		encrypted, err := s.codec.EncodePacket(nil, session.sessionID, targetAddr, buf[:n], time.Now())
+		encrypted, err := s.codec.EncodePacket(nil, plainudp.DirServerToClient, session.sessionID, targetAddr, buf[:n], time.Now())
 		if err != nil {
 			continue
 		}
@@ -271,6 +290,7 @@ func (s *PlainUDPServer) cleaner(ctx context.Context) {
 						return true
 					})
 					s.sessions.Delete(key)
+					s.sessionCount.Add(-1)
 				}
 				return true
 			})

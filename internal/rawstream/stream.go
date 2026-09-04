@@ -3,7 +3,6 @@ package rawstream
 import (
 	"bufio"
 	"encoding/binary"
-	"errors"
 	"io"
 	"net"
 	"sync"
@@ -32,8 +31,8 @@ func (fw *FramedWriter) Write(p []byte) (n int, err error) {
 	fw.mu.Lock()
 	defer fw.mu.Unlock()
 
-	total := len(p)
 	fw.buf = fw.buf[:0]
+	unflushedPlaintext := 0
 
 	for len(p) > 0 {
 		chunkSize := len(p)
@@ -47,13 +46,15 @@ func (fw *FramedWriter) Write(p []byte) (n int, err error) {
 		if err != nil {
 			return n, err
 		}
-		n += chunkSize
+		unflushedPlaintext += chunkSize
 
 		// Flush batch if accumulated buffer exceeds MaxBatchFlushLen
 		if len(fw.buf) >= MaxBatchFlushLen {
 			if _, err := fw.w.Write(fw.buf); err != nil {
 				return n, err
 			}
+			n += unflushedPlaintext
+			unflushedPlaintext = 0
 			fw.buf = fw.buf[:0]
 		}
 	}
@@ -62,21 +63,24 @@ func (fw *FramedWriter) Write(p []byte) (n int, err error) {
 		if _, err := fw.w.Write(fw.buf); err != nil {
 			return n, err
 		}
+		n += unflushedPlaintext
+		unflushedPlaintext = 0
 		fw.buf = fw.buf[:0]
 	}
-	return total, nil
+	return n, nil
 }
 
 // FramedReader decrypts incoming length-prefixed AEAD chunks into a plaintext byte stream.
 type FramedReader struct {
-	r      io.Reader
-	br     *bufio.Reader
-	stream *AEADStream
-	mu     sync.Mutex
-	hdrBuf [2]byte
-	rawBuf []byte
-	decBuf []byte
-	decOff int
+	r          io.Reader
+	br         *bufio.Reader
+	stream     *AEADStream
+	mu         sync.Mutex
+	hdrBuf     [2]byte
+	rawBuf     []byte
+	decBuf     []byte
+	decOff     int
+	eofReached bool
 }
 
 // NewFramedReader wraps an io.Reader with an AEAD decryption stream.
@@ -98,6 +102,10 @@ func (fr *FramedReader) Read(p []byte) (int, error) {
 	fr.mu.Lock()
 	defer fr.mu.Unlock()
 
+	if fr.eofReached && fr.decOff >= len(fr.decBuf) {
+		return 0, io.EOF
+	}
+
 	var totalRead int
 
 	for len(p) > 0 {
@@ -112,23 +120,30 @@ func (fr *FramedReader) Read(p []byte) (int, error) {
 			}
 		}
 
-		// 2. If we already read some bytes and no further data is buffered in memory,
+		if fr.eofReached {
+			if totalRead > 0 {
+				return totalRead, nil
+			}
+			return 0, io.EOF
+		}
+
+		// 2. If we already read some bytes and no further header is buffered in memory,
 		// return immediately so we don't block the caller.
 		if totalRead > 0 && fr.br.Buffered() < 2 {
 			return totalRead, nil
 		}
 
-		fr.decOff = 0
-
 		// Read 2-byte chunk wire length
 		if _, err := io.ReadFull(fr.r, fr.hdrBuf[:]); err != nil {
-			if totalRead > 0 && errors.Is(err, io.EOF) {
+			fr.eofReached = true
+			if totalRead > 0 {
 				return totalRead, nil
 			}
-			return totalRead, err
+			return 0, err
 		}
 		wireLen := int(binary.BigEndian.Uint16(fr.hdrBuf[:]))
 		if wireLen == 0 {
+			fr.eofReached = true
 			if totalRead > 0 {
 				return totalRead, nil
 			}
@@ -145,7 +160,11 @@ func (fr *FramedReader) Read(p []byte) (int, error) {
 		}
 
 		if _, err := io.ReadFull(fr.r, fr.rawBuf); err != nil {
-			return totalRead, err
+			fr.eofReached = true
+			if totalRead > 0 {
+				return totalRead, nil
+			}
+			return 0, err
 		}
 
 		var err error
@@ -154,6 +173,7 @@ func (fr *FramedReader) Read(p []byte) (int, error) {
 			return totalRead, ErrDecryptionFailed
 		}
 
+		fr.decOff = 0
 		n := copy(p, fr.decBuf)
 		fr.decOff = n
 		totalRead += n

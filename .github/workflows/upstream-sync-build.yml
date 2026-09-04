@@ -6,6 +6,7 @@ on:
     paths:
       - 'integration/**'
       - 'pkg/**'
+      - 'internal/**'
       - 'scripts/**'
       - 'go.mod'
       - '.github/workflows/upstream-sync-build.yml'

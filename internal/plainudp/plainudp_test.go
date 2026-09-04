@@ -32,12 +32,12 @@ func TestPlainUDPRoundTripAndReplay(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		packet, err := codec.EncodePacket(nil, sessionID, tc.target, []byte(tc.payload), now)
+		packet, err := codec.EncodePacket(nil, DirClientToServer, sessionID, tc.target, []byte(tc.payload), now)
 		if err != nil {
 			t.Fatalf("EncodePacket(%q): %v", tc.target, err)
 		}
 
-		decodedSessionID, decodedTarget, decodedPayload, ts, seq, err := codec.DecodePacket(packet, now)
+		decodedSessionID, decodedTarget, decodedPayload, ts, seq, err := codec.DecodePacket(packet, DirClientToServer, now)
 		if err != nil {
 			t.Fatalf("DecodePacket(%q): %v", tc.target, err)
 		}
@@ -70,6 +70,29 @@ func TestPlainUDPRoundTripAndReplay(t *testing.T) {
 	}
 }
 
+func TestPlainUDPReflectionProtection(t *testing.T) {
+	psk := []byte(strings.Repeat("u", 32))
+	codec, err := NewCodec(psk)
+	if err != nil {
+		t.Fatalf("NewCodec: %v", err)
+	}
+	now := time.Now()
+
+	// Client sends a request to server (DirClientToServer)
+	reqPacket, err := codec.EncodePacket(nil, DirClientToServer, 0x55aa, "1.1.1.1:53", []byte("dns request"), now)
+	if err != nil {
+		t.Fatalf("EncodePacket: %v", err)
+	}
+
+	// Attacker/Echo server reflects the EXACT SAME packet back to client.
+	// Client expects DirServerToClient.
+	// This MUST fail decryption with ErrDecryptionFailed!
+	_, _, _, _, _, err = codec.DecodePacket(reqPacket, DirServerToClient, now)
+	if err != ErrDecryptionFailed {
+		t.Fatalf("expected ErrDecryptionFailed on reflected packet, got: %v", err)
+	}
+}
+
 func TestUnauthenticatedPacketCannotPoisonReplayWindow(t *testing.T) {
 	psk := []byte(strings.Repeat("u", 32))
 	codec, err := NewCodec(psk)
@@ -86,7 +109,7 @@ func TestUnauthenticatedPacketCannotPoisonReplayWindow(t *testing.T) {
 	binary.BigEndian.PutUint64(fakePacket[8:16], math.MaxUint64)
 
 	// Decode must fail immediately due to AEAD decryption failure
-	_, _, _, _, _, err = codec.DecodePacket(fakePacket, now)
+	_, _, _, _, _, err = codec.DecodePacket(fakePacket, DirClientToServer, now)
 	if err != ErrDecryptionFailed {
 		t.Fatalf("expected ErrDecryptionFailed, got %v", err)
 	}
@@ -106,7 +129,7 @@ func TestPlainUDPTamperAndExpire(t *testing.T) {
 	}
 	now := time.Now()
 
-	packet, err := codec.EncodePacket(nil, 0x1234, "1.1.1.1:53", []byte("hello"), now)
+	packet, err := codec.EncodePacket(nil, DirClientToServer, 0x1234, "1.1.1.1:53", []byte("hello"), now)
 	if err != nil {
 		t.Fatalf("EncodePacket: %v", err)
 	}
@@ -115,13 +138,13 @@ func TestPlainUDPTamperAndExpire(t *testing.T) {
 	tampered := make([]byte, len(packet))
 	copy(tampered, packet)
 	tampered[len(tampered)-1] ^= 0xff
-	if _, _, _, _, _, err := codec.DecodePacket(tampered, now); err == nil {
+	if _, _, _, _, _, err := codec.DecodePacket(tampered, DirClientToServer, now); err == nil {
 		t.Fatal("expected decryption error on tampered packet")
 	}
 
 	// Expired packet (>30s)
 	future := now.Add(45 * time.Second)
-	if _, _, _, _, _, err := codec.DecodePacket(packet, future); err != ErrTimestampExpired {
+	if _, _, _, _, _, err := codec.DecodePacket(packet, DirClientToServer, future); err != ErrTimestampExpired {
 		t.Fatalf("expected ErrTimestampExpired on out-of-window packet, got %v", err)
 	}
 }

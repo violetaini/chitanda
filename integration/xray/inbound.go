@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/violetaini/chitanda/internal/auth"
 	"github.com/violetaini/chitanda/pkg/server"
 
 	"golang.org/x/net/http2"
@@ -25,39 +26,56 @@ import (
 
 // InboundHandler implements proxy.Inbound for Chitanda protocol in Xray
 type InboundHandler struct {
-	config     *InboundConfig
-	server     *server.Server
-	dispatcher routing.Dispatcher
-	ctx        context.Context
-	cancel     context.CancelFunc
-	mu         sync.Mutex
+	config       *InboundConfig
+	server       *server.Server
+	streamServer *server.StreamServer
+	replays      *auth.ReplayCache
+	dispatcher   routing.Dispatcher
+	ctx          context.Context
+	cancel       context.CancelFunc
+	mu           sync.Mutex
 }
 
 func NewInboundHandler(ctx context.Context, config *InboundConfig) (*InboundHandler, error) {
 	v := core.MustFromContext(ctx)
 	dispatcher := v.GetFeature(routing.DispatcherType()).(routing.Dispatcher)
 
+	var replays *auth.ReplayCache
+	var err error
+	if config.ReplayFile != "" {
+		replays, err = auth.OpenReplayCache(config.ReplayFile, time.Now())
+		if err != nil {
+			return nil, fmt.Errorf("open replay cache: %w", err)
+		}
+	} else {
+		replays = auth.NewReplayCache()
+	}
+
 	var fbHandler http.Handler
 	if config.Fallback != "" {
 		fb, err := server.NewFallback(config.Fallback, config.StrictSni)
 		if err != nil {
+			_ = replays.Close()
 			return nil, fmt.Errorf("init fallback handler: %w", err)
 		}
 		fbHandler = fb
 	}
 
-	srv := server.NewServer(config.Path, []byte(config.Psk), nil, fbHandler, 1024)
+	srv := server.NewServer(config.Path, []byte(config.Psk), replays, fbHandler, 1024)
+	streamSrv := server.NewStreamServer([]byte(config.Psk), replays, config.ServerId, 10000)
 
 	inCtx, inCancel := context.WithCancel(context.Background())
 	h := &InboundHandler{
-		config:     config,
-		server:     srv,
-		dispatcher: dispatcher,
-		ctx:        inCtx,
-		cancel:     inCancel,
+		config:       config,
+		server:       srv,
+		streamServer: streamSrv,
+		replays:      replays,
+		dispatcher:   dispatcher,
+		ctx:          inCtx,
+		cancel:       inCancel,
 	}
 
-	srv.SetDialTargetForTest(func(ctx context.Context, address string) (net.Conn, error) {
+	dialTargetFn := func(ctx context.Context, address string) (net.Conn, error) {
 		dest, err := xnet.ParseDestination("tcp:" + address)
 		if err != nil {
 			return nil, err
@@ -78,7 +96,10 @@ func NewInboundHandler(ctx context.Context, config *InboundConfig) (*InboundHand
 			readCloser:  link.Reader,
 			writeCloser: link.Writer,
 		}, nil
-	})
+	}
+
+	srv.SetDialTargetForTest(dialTargetFn)
+	streamSrv.SetDialTargetForTest(dialTargetFn)
 
 	return h, nil
 }
@@ -153,6 +174,10 @@ func (h *InboundHandler) Process(ctx context.Context, network xnet.Network, conn
 	}
 	defer conn.Close()
 
+	if h.config.Transport == "stream" {
+		return h.streamServer.HandleConn(conn)
+	}
+
 	br := bufio.NewReader(conn)
 	prefix, err := br.Peek(4)
 	if err != nil {
@@ -192,6 +217,12 @@ func (h *InboundHandler) Process(ctx context.Context, network xnet.Network, conn
 
 func (h *InboundHandler) Close() error {
 	h.cancel()
+	if h.streamServer != nil {
+		_ = h.streamServer.Close()
+	}
+	if h.replays != nil {
+		_ = h.replays.Close()
+	}
 	return nil
 }
 

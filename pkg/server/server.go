@@ -125,13 +125,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		flusher.Flush()
 	}
 
-	done := make(chan struct{}, 2)
+	uploadDone := make(chan struct{}, 1)
+	downloadDone := make(chan struct{}, 1)
+
 	go func() {
 		bufPtr := copyBufferPool.Get().(*[]byte)
 		defer copyBufferPool.Put(bufPtr)
 		_, _ = io.CopyBuffer(upstream, r.Body, *bufPtr)
-		_ = upstream.Close()
-		done <- struct{}{}
+		closeWriteConn(upstream)
+		uploadDone <- struct{}{}
 	}()
 
 	go func() {
@@ -142,11 +144,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			defer copyBufferPool.Put(bufPtr)
 			_, _ = io.CopyBuffer(flushWriter{w: w}, upstream, *bufPtr)
 		}
-		done <- struct{}{}
+		downloadDone <- struct{}{}
 	}()
 
 	select {
-	case <-done:
+	case <-downloadDone:
 	case <-r.Context().Done():
 	}
 	_ = upstream.Close()
@@ -280,24 +282,25 @@ func (s *Server) servePlainH1(w http.ResponseWriter, r *http.Request) {
 	framedReader := h1session.NewFramedReader(r.Body, decStream)
 	framedWriter := h1session.NewFramedWriter(w, encStream)
 
-	done := make(chan struct{}, 2)
+	uploadDone := make(chan struct{}, 1)
+	downloadDone := make(chan struct{}, 1)
 	go func() {
 		bufPtr := copyBufferPool.Get().(*[]byte)
 		defer copyBufferPool.Put(bufPtr)
 		_, _ = io.CopyBuffer(upstream, framedReader, *bufPtr)
-		_ = upstream.Close()
-		done <- struct{}{}
+		closeWriteConn(upstream)
+		uploadDone <- struct{}{}
 	}()
 
 	go func() {
 		bufPtr := copyBufferPool.Get().(*[]byte)
 		defer copyBufferPool.Put(bufPtr)
 		_, _ = io.CopyBuffer(framedWriter, upstream, *bufPtr)
-		done <- struct{}{}
+		downloadDone <- struct{}{}
 	}()
 
 	select {
-	case <-done:
+	case <-downloadDone:
 	case <-r.Context().Done():
 	}
 	_ = upstream.Close()

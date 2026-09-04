@@ -18,14 +18,21 @@ import (
 	"golang.org/x/crypto/chacha20poly1305"
 )
 
+type Direction byte
+
 const (
-	// Header: Timestamp (8B) + Sequence (8B) + Nonce (12B) = 28B
-	HeaderSize       = 28
+	DirClientToServer Direction = 0x01
+	DirServerToClient Direction = 0x02
+)
+
+const (
+	// Header: Timestamp (8B) + Sequence (8B) + Nonce (24B) = 40B
+	HeaderSize       = 40
 	MaxPacketSize    = 64 << 10 // 64KB max datagram buffer
 	MaxTimestampSkew = 30 * time.Second
 
-	SaltUDP = "MYXRAY-PLAIN-UDP-SALT-V1"
-	InfoUDP = "MYXRAY-PLAIN-UDP-KEY-V1"
+	SaltUDP = "MYXRAY-PLAIN-UDP-SALT-V2"
+	InfoUDP = "MYXRAY-PLAIN-UDP-KEY-V2"
 )
 
 var (
@@ -35,6 +42,7 @@ var (
 	ErrDecryptionFailed   = errors.New("plainudp: AEAD packet decryption failed")
 	ErrInvalidAddressType = errors.New("plainudp: unsupported SOCKS5 address type")
 	ErrInvalidAddress     = errors.New("plainudp: malformed address in packet")
+	ErrInvalidDirection   = errors.New("plainudp: invalid or unexpected direction")
 )
 
 var packetPool = sync.Pool{
@@ -44,44 +52,51 @@ var packetPool = sync.Pool{
 	},
 }
 
-// DeriveKey derives a 32-byte key for plain UDP datagrams.
-func DeriveKey(psk []byte) [32]byte {
+// DeriveDirectionalKeys derives independent 32-byte keys for Client-to-Server and Server-to-Client.
+func DeriveDirectionalKeys(psk []byte) (c2sKey, s2cKey [32]byte) {
 	extractor := hmac.New(sha256.New, []byte(SaltUDP))
 	extractor.Write(psk)
 	prk := extractor.Sum(nil)
 
-	expander := hmac.New(sha256.New, prk)
-	expander.Write([]byte(InfoUDP))
-	expander.Write([]byte{0x01})
-	out := expander.Sum(nil)
+	h1 := hmac.New(sha256.New, prk)
+	h1.Write([]byte(InfoUDP))
+	h1.Write([]byte("C2S"))
+	copy(c2sKey[:], h1.Sum(nil))
 
-	var key [32]byte
-	copy(key[:], out[0:32])
-	return key
+	h2 := hmac.New(sha256.New, prk)
+	h2.Write([]byte(InfoUDP))
+	h2.Write([]byte("S2C"))
+	copy(s2cKey[:], h2.Sum(nil))
+
+	return c2sKey, s2cKey
 }
 
-// Codec provides stateless ChaCha20-Poly1305 AEAD encryption and decryption.
+// Codec provides bidirectional XChaCha20-Poly1305 AEAD encryption and decryption.
 type Codec struct {
-	key      [32]byte
-	aead     cipher.AEAD
-	sequence atomic.Uint64
+	c2sAEAD   cipher.AEAD
+	s2cAEAD   cipher.AEAD
+	sequence  atomic.Uint64
 }
 
-// NewCodec creates a persistent Codec instance holding the initialized AEAD cipher.
+// NewCodec creates a persistent Codec instance holding initialized C2S and S2C AEAD ciphers.
 func NewCodec(psk []byte) (*Codec, error) {
-	key := DeriveKey(psk)
-	aead, err := chacha20poly1305.New(key[:])
+	c2sKey, s2cKey := DeriveDirectionalKeys(psk)
+	c2sAEAD, err := chacha20poly1305.NewX(c2sKey[:])
+	if err != nil {
+		return nil, err
+	}
+	s2cAEAD, err := chacha20poly1305.NewX(s2cKey[:])
 	if err != nil {
 		return nil, err
 	}
 	return &Codec{
-		key:  key,
-		aead: aead,
+		c2sAEAD:  c2sAEAD,
+		s2cAEAD:  s2cAEAD,
 	}, nil
 }
 
 // EncodePacket encrypts sessionID, target address and payload into a plain-udp datagram.
-func (c *Codec) EncodePacket(dst []byte, sessionID uint64, targetAddr string, payload []byte, now time.Time) ([]byte, error) {
+func (c *Codec) EncodePacket(dst []byte, dir Direction, sessionID uint64, targetAddr string, payload []byte, now time.Time) ([]byte, error) {
 	bufPtr := packetPool.Get().(*[]byte)
 	defer packetPool.Put(bufPtr)
 
@@ -99,30 +114,45 @@ func (c *Codec) EncodePacket(dst []byte, sessionID uint64, targetAddr string, pa
 
 	seq := c.sequence.Add(1)
 
-	var nonce [12]byte
-	if _, err := io.ReadFull(rand.Reader, nonce[:4]); err != nil {
+	// XChaCha20-Poly1305 takes 24-byte Nonce:
+	// [8B SessionID] [8B Monotonic Sequence] [8B Crypto Random Suffix]
+	// Eliminates cross-session and cross-restart collision completely.
+	var nonce [24]byte
+	binary.BigEndian.PutUint64(nonce[0:8], sessionID)
+	binary.BigEndian.PutUint64(nonce[8:16], seq)
+	if _, err := io.ReadFull(rand.Reader, nonce[16:24]); err != nil {
 		return nil, fmt.Errorf("plainudp: random nonce failed: %w", err)
 	}
-	binary.BigEndian.PutUint64(nonce[4:12], seq)
 
 	ts := uint64(now.Unix())
-	var ad [16]byte
+	// AD: [Timestamp (8B)] [Sequence (8B)] [Direction (1B)]
+	var ad [17]byte
 	binary.BigEndian.PutUint64(ad[0:8], ts)
 	binary.BigEndian.PutUint64(ad[8:16], seq)
+	ad[16] = byte(dir)
 
-	// Wire: [Timestamp (8B)] [Sequence (8B)] [Nonce (12B)] [Ciphertext + Tag (16B)]
-	if dst == nil {
-		dst = make([]byte, 0, HeaderSize+len(plaintext)+c.aead.Overhead())
+	var aead cipher.AEAD
+	if dir == DirClientToServer {
+		aead = c.c2sAEAD
+	} else if dir == DirServerToClient {
+		aead = c.s2cAEAD
+	} else {
+		return nil, ErrInvalidDirection
 	}
-	dst = append(dst, ad[:]...)
-	dst = append(dst, nonce[:]...)
-	dst = c.aead.Seal(dst, nonce[:], plaintext, ad[:])
+
+	// Wire: [Timestamp (8B)] [Sequence (8B)] [Nonce (24B)] [Ciphertext + Tag (16B)]
+	if dst == nil {
+		dst = make([]byte, 0, HeaderSize+len(plaintext)+aead.Overhead())
+	}
+	dst = append(dst, ad[0:16]...) // Wire header has Timestamp + Sequence
+	dst = append(dst, nonce[:]...)  // 24B Nonce
+	dst = aead.Seal(dst, nonce[:], plaintext, ad[:])
 
 	return dst, nil
 }
 
 // DecodePacket decrypts a plain-udp datagram, authenticates via AEAD, and extracts sessionID, target address and payload.
-func (c *Codec) DecodePacket(packet []byte, now time.Time) (sessionID uint64, targetAddr string, payload []byte, timestamp uint64, seq uint64, err error) {
+func (c *Codec) DecodePacket(packet []byte, expectedDir Direction, now time.Time) (sessionID uint64, targetAddr string, payload []byte, timestamp uint64, seq uint64, err error) {
 	if len(packet) < HeaderSize+8+1+4+2+16 {
 		return 0, "", nil, 0, 0, ErrPacketTooShort
 	}
@@ -135,11 +165,23 @@ func (c *Codec) DecodePacket(packet []byte, now time.Time) (sessionID uint64, ta
 	}
 
 	seq = binary.BigEndian.Uint64(packet[8:16])
-	ad := packet[0:16]
-	nonce := packet[16:28]
-	ciphertextWithTag := packet[28:]
+	nonce := packet[16:40] // 24B Nonce
+	ciphertextWithTag := packet[40:]
 
-	plaintext, err := c.aead.Open(nil, nonce, ciphertextWithTag, ad)
+	var ad [17]byte
+	copy(ad[0:16], packet[0:16])
+	ad[16] = byte(expectedDir)
+
+	var aead cipher.AEAD
+	if expectedDir == DirClientToServer {
+		aead = c.c2sAEAD
+	} else if expectedDir == DirServerToClient {
+		aead = c.s2cAEAD
+	} else {
+		return 0, "", nil, timestamp, seq, ErrInvalidDirection
+	}
+
+	plaintext, err := aead.Open(nil, nonce, ciphertextWithTag, ad[:])
 	if err != nil {
 		return 0, "", nil, timestamp, seq, ErrDecryptionFailed
 	}

@@ -28,6 +28,8 @@ type InboundConfig struct {
 	Fallback      string                 `protobuf:"bytes,3,opt,name=fallback,proto3" json:"fallback,omitempty"`
 	StrictSni     string                 `protobuf:"bytes,4,opt,name=strict_sni,json=strictSni,proto3" json:"strict_sni,omitempty"`
 	Transport     string                 `protobuf:"bytes,5,opt,name=transport,proto3" json:"transport,omitempty"`
+	ServerId      string                 `protobuf:"bytes,6,opt,name=server_id,json=serverId,proto3" json:"server_id,omitempty"`
+	ReplayFile    string                 `protobuf:"bytes,7,opt,name=replay_file,json=replayFile,proto3" json:"replay_file,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -97,6 +99,20 @@ func (x *InboundConfig) GetTransport() string {
 	return ""
 }
 
+func (x *InboundConfig) GetServerId() string {
+	if x != nil {
+		return x.ServerId
+	}
+	return ""
+}
+
+func (x *InboundConfig) GetReplayFile() string {
+	if x != nil {
+		return x.ReplayFile
+	}
+	return ""
+}
+
 type OutboundConfig struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Server        string                 `protobuf:"bytes,1,opt,name=server,proto3" json:"server,omitempty"`
@@ -105,6 +121,7 @@ type OutboundConfig struct {
 	Path          string                 `protobuf:"bytes,4,opt,name=path,proto3" json:"path,omitempty"`
 	Transport     string                 `protobuf:"bytes,5,opt,name=transport,proto3" json:"transport,omitempty"`
 	PoolSize      int32                  `protobuf:"varint,6,opt,name=pool_size,json=poolSize,proto3" json:"pool_size,omitempty"`
+	ServerId      string                 `protobuf:"bytes,7,opt,name=server_id,json=serverId,proto3" json:"server_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -179,6 +196,13 @@ func (x *OutboundConfig) GetPoolSize() int32 {
 		return x.PoolSize
 	}
 	return 0
+}
+
+func (x *OutboundConfig) GetServerId() string {
+	if x != nil {
+		return x.ServerId
+	}
+	return ""
 }
 
 var File_config_proto protoreflect.FileDescriptor

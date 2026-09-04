@@ -116,20 +116,26 @@ func (c *Client) dialPlainH1(ctx context.Context, target string) (net.Conn, erro
 	}
 	chunkLenHex := strings.TrimSpace(chunkLenLine)
 	chunkLen, err := strconv.ParseInt(chunkLenHex, 16, 64)
-	if err != nil || chunkLen < h1session.ServerHelloSize {
+	if err != nil || chunkLen < h1session.ServerHelloSize || chunkLen > h1session.ServerHelloSize+1024 {
 		_ = rawConn.Close()
 		return nil, fmt.Errorf("invalid server hello chunk length %q: %w", chunkLenHex, err)
 	}
 
-	serverHello := make([]byte, h1session.ServerHelloSize)
-	if _, err := io.ReadFull(reader, serverHello); err != nil {
+	var serverHello [h1session.ServerHelloSize]byte
+	if _, err := io.ReadFull(reader, serverHello[:]); err != nil {
 		_ = rawConn.Close()
 		return nil, fmt.Errorf("read server hello: %w", err)
 	}
 
+	clientKey, serverKey, err := h1session.VerifyServerHello(c.cfg.PSK, clientNonce, serverHello[:])
+	if err != nil {
+		_ = rawConn.Close()
+		return nil, fmt.Errorf("verify server hello failed: %w", err)
+	}
+
 	if chunkLen > h1session.ServerHelloSize {
-		remainder := make([]byte, chunkLen-h1session.ServerHelloSize)
-		if _, err := io.ReadFull(reader, remainder); err != nil {
+		// Authenticated! Drain any remaining chunk padding safely without allocating dynamic slice
+		if _, err := io.CopyN(io.Discard, reader, chunkLen-h1session.ServerHelloSize); err != nil {
 			_ = rawConn.Close()
 			return nil, fmt.Errorf("read server hello remainder: %w", err)
 		}
@@ -138,12 +144,6 @@ func (c *Client) dialPlainH1(ctx context.Context, target string) (net.Conn, erro
 	if _, err := io.ReadFull(reader, crlf[:]); err != nil {
 		_ = rawConn.Close()
 		return nil, fmt.Errorf("read chunk crlf: %w", err)
-	}
-
-	clientKey, serverKey, err := h1session.VerifyServerHello(c.cfg.PSK, clientNonce, serverHello)
-	if err != nil {
-		_ = rawConn.Close()
-		return nil, fmt.Errorf("verify server hello failed: %w", err)
 	}
 
 	encStream, err := h1session.NewAEADStream(clientKey, h1session.DirClientToServer)
@@ -239,7 +239,7 @@ func (cr *chunkedReader) Read(p []byte) (int, error) {
 			line = strings.TrimSpace(line)
 		}
 		chunkLen, err := strconv.ParseInt(line, 16, 64)
-		if err != nil {
+		if err != nil || chunkLen < 0 || chunkLen > int64(h1session.MaxChunkWireLen) {
 			return 0, fmt.Errorf("invalid chunk length %q: %w", line, err)
 		}
 		if chunkLen == 0 {
@@ -277,8 +277,8 @@ func (c *plainH1Conn) Write(b []byte) (n int, err error) {
 func (c *plainH1Conn) Close() error {
 	c.closeOnce.Do(func() {
 		close(c.closed)
-		_ = c.chunkWriter.Close()
 		_ = c.raw.Close()
+		_ = c.chunkWriter.Close()
 	})
 	return nil
 }

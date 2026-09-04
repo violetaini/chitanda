@@ -221,7 +221,7 @@ func TestPlainUDPServer(t *testing.T) {
 
 	payload := []byte("UDP ping message")
 	codec, _ := plainudp.NewCodec(psk)
-	pkt, err := codec.EncodePacket(nil, 0x8899aabbccddeeff, echoLn.LocalAddr().String(), payload, time.Now())
+	pkt, err := codec.EncodePacket(nil, plainudp.DirClientToServer, 0x8899aabbccddeeff, echoLn.LocalAddr().String(), payload, time.Now())
 	if err != nil {
 		t.Fatalf("EncodePacket: %v", err)
 	}
@@ -238,7 +238,7 @@ func TestPlainUDPServer(t *testing.T) {
 		t.Fatalf("ReadFromUDP response: %v", err)
 	}
 
-	_, targetAddr, decodedPayload, _, _, err := codec.DecodePacket(recvBuf[:n], time.Now())
+	_, targetAddr, decodedPayload, _, _, err := codec.DecodePacket(recvBuf[:n], plainudp.DirServerToClient, time.Now())
 	if err != nil {
 		t.Fatalf("DecodePacket response: %v", err)
 	}
@@ -248,5 +248,22 @@ func TestPlainUDPServer(t *testing.T) {
 	}
 	if string(decodedPayload) != string(payload) {
 		t.Fatalf("decodedPayload = %q, want %q", string(decodedPayload), string(payload))
+	}
+}
+
+func TestHTTP3_TCPFramingFlag(t *testing.T) {
+	// ModeTCPv2 without X-Session-Framing MUST NOT enable private framing in H3 (must be raw streaming)
+	req := httptest.NewRequest(http.MethodGet, "/path", nil)
+	req.Header.Set(headerMode, modeTCPv2)
+	useFraming := req.Header.Get(headerFraming) == "1" || req.Header.Get(headerMode) == "tcp-h2-framed"
+	if useFraming {
+		t.Fatal("expected useFraming=false for standard tcp-v2 in H3 to match client SDK")
+	}
+
+	// Explicit framing mode
+	req.Header.Set(headerFraming, "1")
+	useFraming = req.Header.Get(headerFraming) == "1" || req.Header.Get(headerMode) == "tcp-h2-framed"
+	if !useFraming {
+		t.Fatal("expected useFraming=true when X-Session-Framing: 1")
 	}
 }

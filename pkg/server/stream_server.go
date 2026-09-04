@@ -314,10 +314,13 @@ func relayBidirectional(ctx context.Context, client, target net.Conn) {
 	// target -> client
 	go func() {
 		defer wg.Done()
-		defer cancel()
 		bufPtr := copyBufferPool.Get().(*[]byte)
 		defer copyBufferPool.Put(bufPtr)
-		_, _ = io.CopyBuffer(client, target, *bufPtr)
+		_, err := io.CopyBuffer(client, target, *bufPtr)
+		if err != nil {
+			cancel()
+			return
+		}
 		closeWriteConn(client)
 	}()
 

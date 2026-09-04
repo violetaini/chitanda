@@ -331,3 +331,70 @@ func TestFramedWriter_LargeWrite_Batching(t *testing.T) {
 		t.Fatalf("large write data corrupted")
 	}
 }
+
+func TestFramedReader_EOFRepeat(t *testing.T) {
+	key := [16]byte{1, 2, 3, 4}
+	encStream, _ := NewAEADStream(key)
+	decStream, _ := NewAEADStream(key)
+
+	r, w := io.Pipe()
+	fw := NewFramedWriter(w, encStream)
+	fr := NewFramedReader(r, decStream)
+
+	msg := []byte("hello world payload")
+	go func() {
+		_, _ = fw.Write(msg)
+		_ = w.Close()
+	}()
+
+	buf := make([]byte, 64)
+	n, err := fr.Read(buf)
+	if err != nil && !errors.Is(err, io.EOF) {
+		t.Fatalf("unexpected read error: %v", err)
+	}
+	if !bytes.Equal(buf[:n], msg) {
+		t.Fatalf("expected %q, got %q", msg, buf[:n])
+	}
+
+	// Read again: must return (0, io.EOF)
+	n2, err2 := fr.Read(buf)
+	if n2 != 0 || !errors.Is(err2, io.EOF) {
+		t.Fatalf("expected (0, io.EOF) on subsequent read, got (%d, %v)", n2, err2)
+	}
+
+	// Third read: still must return (0, io.EOF), NEVER stale data!
+	n3, err3 := fr.Read(buf)
+	if n3 != 0 || !errors.Is(err3, io.EOF) {
+		t.Fatalf("expected (0, io.EOF) on 3rd read, got (%d, %v)", n3, err3)
+	}
+}
+
+type errWriter struct {
+	failAfter int
+	written   int
+}
+
+func (ew *errWriter) Write(p []byte) (int, error) {
+	if ew.written >= ew.failAfter {
+		return 0, errors.New("underlying network write failed")
+	}
+	ew.written += len(p)
+	return len(p), nil
+}
+
+func TestFramedWriter_ShortWriteError(t *testing.T) {
+	key := [16]byte{1, 2, 3, 4}
+	encStream, _ := NewAEADStream(key)
+
+	ew := &errWriter{failAfter: 0}
+	fw := NewFramedWriter(ew, encStream)
+
+	data := []byte("some test data")
+	n, err := fw.Write(data)
+	if err == nil {
+		t.Fatal("expected error from faulty writer")
+	}
+	if n != 0 {
+		t.Fatalf("expected 0 written plaintext on early failure, got %d", n)
+	}
+}

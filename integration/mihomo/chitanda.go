@@ -21,8 +21,9 @@ type ChitandaOption struct {
 	Port           int    `proxy:"port"`
 	PSK            string `proxy:"psk"`
 	Path           string `proxy:"path"`
-	Transport      string `proxy:"transport,omitempty"` // "h2" (default), "h3", "auto", "h1"
+	Transport      string `proxy:"transport,omitempty"` // "h2" (default), "h3", "auto", "h1", "stream", "plain-h1"
 	SNI            string `proxy:"sni,omitempty"`
+	ServerID       string `proxy:"server-id,omitempty"`
 	PoolSize       int    `proxy:"pool-size,omitempty"`
 	UDP            bool   `proxy:"udp,omitempty"`
 	SkipCertVerify bool   `proxy:"skip-cert-verify,omitempty"`
@@ -93,6 +94,7 @@ func (c *Chitanda) getClient() (*client.Client, error) {
 	cli, err := client.New(client.Config{
 		Server:             serverAddr,
 		ServerName:         sni,
+		ServerID:           c.option.ServerID,
 		PSK:                []byte(c.option.PSK),
 		Path:               c.option.Path,
 		TCPTransport:       c.option.Transport,
@@ -100,6 +102,9 @@ func (c *Chitanda) getClient() (*client.Client, error) {
 		InsecureSkipVerify: c.option.SkipCertVerify,
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			return c.dialer.DialContext(ctx, network, addr)
+		},
+		ListenPacket: func(ctx context.Context, network, addr string) (net.PacketConn, error) {
+			return c.dialer.ListenPacket(ctx, network, addr, c.DialOptions()...)
 		},
 	})
 	if err != nil {
@@ -155,6 +160,7 @@ func (c *Chitanda) MarshalJSON() ([]byte, error) {
 		"path":      c.option.Path,
 		"transport": c.option.Transport,
 		"sni":       c.option.SNI,
+		"server-id": c.option.ServerID,
 		"udp":       c.option.UDP,
 	})
 }

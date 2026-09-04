@@ -70,7 +70,10 @@ func (p *h2Prober) pingH2() (time.Duration, error) {
 	if h2Cli == nil {
 		return 0, io.EOF
 	}
-	req, err := http.NewRequestWithContext(p.ctx, http.MethodHead, p.client.requestURL, nil)
+	probeCtx, cancel := context.WithTimeout(p.ctx, 2500*time.Millisecond)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(probeCtx, http.MethodHead, p.client.requestURL, nil)
 	if err != nil {
 		return 0, err
 	}

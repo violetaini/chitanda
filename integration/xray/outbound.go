@@ -42,6 +42,7 @@ func NewOutboundHandler(ctx context.Context, config *OutboundConfig) (*OutboundH
 	cli, err := client.New(client.Config{
 		Server:             config.Server,
 		ServerName:         config.ServerName,
+		ServerID:           config.ServerId,
 		PSK:                []byte(config.Psk),
 		Path:               config.Path,
 		TCPTransport:       transportMode,
