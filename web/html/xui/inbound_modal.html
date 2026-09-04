@@ -166,6 +166,26 @@
                     this.inModal.inbound.settings.fallback = '/var/www/html';
                 }
             },
+            getChitandaReplayType() {
+                if (!this.inModal.inbound.settings) return 'none';
+                const rf = this.inModal.inbound.settings.replay_file;
+                if (!rf) return 'none';
+                if (rf === '/etc/x-ui/replay_chitanda.db') return 'default';
+                const port = this.inModal.inbound.port;
+                if (port && rf === `/etc/x-ui/replay_${port}.db`) return 'auto_port';
+                return 'custom';
+            },
+            setChitandaReplayType(val) {
+                if (!this.inModal.inbound.settings) return;
+                if (val === 'none') {
+                    this.inModal.inbound.settings.replay_file = '';
+                } else if (val === 'default') {
+                    this.inModal.inbound.settings.replay_file = '/etc/x-ui/replay_chitanda.db';
+                } else if (val === 'auto_port') {
+                    const port = this.inModal.inbound.port || 'default';
+                    this.inModal.inbound.settings.replay_file = `/etc/x-ui/replay_${port}.db`;
+                }
+            },
             async getNewX25519Cert() {
                 inModal.loading(true);
                 const msg = await HttpUtil.post('/server/getNewX25519Cert');

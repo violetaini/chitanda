@@ -31,7 +31,21 @@
 
     <!-- Replay File (Persistent Cache) -->
     <a-form-item label="持久防重放 (Replay File)">
-        <a-input v-model.trim="inbound.settings.replay_file" placeholder="落盘文件路径，如 /etc/x-ui/replay_tokyo.db（留空则为内存缓存）"></a-input>
+        <a-input-group compact style="display: flex;">
+            <a-select :value="getChitandaReplayType()" @change="setChitandaReplayType" style="width: 45%" :dropdown-class-name="themeSwitcher.currentTheme">
+                <a-select-option value="none">⚡ 纯内存 (默认推荐)</a-select-option>
+                <a-select-option value="default">💾 默认落盘 (/etc/x-ui/replay_chitanda.db)</a-select-option>
+                <a-select-option value="auto_port">📁 端口独立落盘 (/etc/x-ui/replay_[port].db)</a-select-option>
+                <a-select-option value="custom">✏️ 自定义路径</a-select-option>
+            </a-select>
+            <a-input v-model.trim="inbound.settings.replay_file" style="width: 55%" placeholder="留空则仅内存缓存"></a-input>
+        </a-input-group>
+        <div v-if="!inbound.settings.replay_file" style="font-size: 12px; color: #1890ff; margin-top: 4px;">
+            <a-icon type="info-circle" /> 内存布隆过滤器 + 滑动窗口防重放（重启后清空，单节点最轻量高性能）
+        </div>
+        <div v-else style="font-size: 12px; color: #52c41a; margin-top: 4px;">
+            <a-icon type="check-circle" /> 已启用持久化落盘防重放（重启依然免疫历史重放探测）
+        </div>
     </a-form-item>
 
     <!-- Path (Only for HTTP-based modes: h2, h3, auto, h1) -->
