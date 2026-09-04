@@ -1,6 +1,7 @@
 package rawstream
 
 import (
+	"crypto/aes"
 	"crypto/cipher"
 	"crypto/hmac"
 	"crypto/rand"
@@ -21,12 +22,17 @@ import (
 const (
 	ClientHelloSize    = 48 // 8B Timestamp + 24B ClientNonce + 16B AuthTag
 	ServerHelloSize    = 40 // 24B ServerNonce + 16B ServerAuthTag
-	MaxChunkPayloadLen = 16384
-	MaxChunkWireLen    = MaxChunkPayloadLen + 16 // 16B Poly1305 tag
+	MaxChunkPayloadLen = 32768
+	MaxChunkWireLen    = MaxChunkPayloadLen + 16 // 16B Poly1305 / GCM tag
 	MaxTimestampSkew   = 90 * time.Second
 
 	DefaultMinPadding = 32
 	DefaultMaxPadding = 256
+
+	CipherChaCha20Poly1305 byte = 0x01
+	CipherAES128GCM        byte = 0x02
+	CipherAES256GCM        byte = 0x03
+	DefaultCipher               = CipherAES128GCM
 
 	DomainClientHello = "CHITANDA-RAWSTREAM-CLIENT-V1"
 	DomainServerHello = "CHITANDA-RAWSTREAM-SERVER-V1"
@@ -44,6 +50,7 @@ var (
 	ErrInvalidOpenFrame   = errors.New("rawstream: invalid OPEN frame structure")
 	ErrInvalidAddress     = errors.New("rawstream: unsupported address type in OPEN frame")
 	ErrSequenceExhausted  = errors.New("rawstream: AEAD sequence number exhausted")
+	ErrUnsupportedCipher  = errors.New("rawstream: unsupported AEAD cipher")
 )
 
 // CreateClientHello generates a 48-byte ClientHello record.
@@ -189,10 +196,10 @@ func VerifyServerHello(psk []byte, timestamp uint64, clientNonce [24]byte, recor
 	return serverNonce, nil
 }
 
-// Encode0RTTOpenFrame encodes target address and initial payload with dynamic random padding.
+// Encode0RTTOpenFrame encodes cipher type, target address and initial payload with dynamic random padding.
 // Plaintext structure:
-// [2B PaddingLen] [PaddingBytes] [TargetAddr (SOCKS5)] [InitialPayload]
-func Encode0RTTOpenFrame(target string, initialPayload []byte, minPad, maxPad int) ([]byte, error) {
+// [2B PaddingLen] [PaddingBytes] [1B CipherType] [TargetAddr (SOCKS5)] [InitialPayload]
+func Encode0RTTOpenFrame(cipherType byte, target string, initialPayload []byte, minPad, maxPad int) ([]byte, error) {
 	if minPad < 0 {
 		minPad = DefaultMinPadding
 	}
@@ -217,10 +224,12 @@ func Encode0RTTOpenFrame(target string, initialPayload []byte, minPad, maxPad in
 		return nil, err
 	}
 
-	buf := make([]byte, 2+paddingLen+len(targetBytes)+len(initialPayload))
+	buf := make([]byte, 2+paddingLen+1+len(targetBytes)+len(initialPayload))
 	binary.BigEndian.PutUint16(buf[0:2], uint16(paddingLen))
 	copy(buf[2:2+paddingLen], padding)
 	offset := 2 + paddingLen
+	buf[offset] = cipherType
+	offset++
 	copy(buf[offset:offset+len(targetBytes)], targetBytes)
 	offset += len(targetBytes)
 	copy(buf[offset:], initialPayload)
@@ -228,24 +237,31 @@ func Encode0RTTOpenFrame(target string, initialPayload []byte, minPad, maxPad in
 	return buf, nil
 }
 
-// Decode0RTTOpenFrame decodes target address and initial payload, stripping dynamic padding.
-func Decode0RTTOpenFrame(plaintext []byte) (target string, initialPayload []byte, err error) {
+// Decode0RTTOpenFrame decodes cipher type, target address and initial payload, stripping dynamic padding.
+func Decode0RTTOpenFrame(plaintext []byte) (cipherType byte, target string, initialPayload []byte, err error) {
 	if len(plaintext) < 2 {
-		return "", nil, ErrInvalidOpenFrame
+		return 0, "", nil, ErrInvalidOpenFrame
 	}
 	paddingLen := int(binary.BigEndian.Uint16(plaintext[0:2]))
-	if len(plaintext) < 2+paddingLen {
-		return "", nil, ErrInvalidOpenFrame
+	if len(plaintext) < 2+paddingLen+1 {
+		return 0, "", nil, ErrInvalidOpenFrame
 	}
 
-	rest := plaintext[2+paddingLen:]
+	cipherType = plaintext[2+paddingLen]
+	switch cipherType {
+	case CipherChaCha20Poly1305, CipherAES128GCM, CipherAES256GCM:
+	default:
+		return 0, "", nil, ErrUnsupportedCipher
+	}
+
+	rest := plaintext[2+paddingLen+1:]
 	target, consumed, err := decodeTargetAddress(rest)
 	if err != nil {
-		return "", nil, err
+		return 0, "", nil, err
 	}
 
 	initialPayload = rest[consumed:]
-	return target, initialPayload, nil
+	return cipherType, target, initialPayload, nil
 }
 
 func encodeTargetAddress(address string) ([]byte, error) {
@@ -344,9 +360,30 @@ type AEADStream struct {
 	sequence uint64
 }
 
-// NewAEADStream creates an AEADStream with ChaCha20-Poly1305.
-func NewAEADStream(key [32]byte) (*AEADStream, error) {
-	aead, err := chacha20poly1305.New(key[:])
+// NewAEADStream creates an AEADStream for the specified cipher type.
+func NewAEADStream(cipherType byte, key [32]byte) (*AEADStream, error) {
+	var aead cipher.AEAD
+	var err error
+
+	switch cipherType {
+	case CipherAES128GCM:
+		block, bErr := aes.NewCipher(key[:16])
+		if bErr != nil {
+			return nil, bErr
+		}
+		aead, err = cipher.NewGCM(block)
+	case CipherAES256GCM:
+		block, bErr := aes.NewCipher(key[:32])
+		if bErr != nil {
+			return nil, bErr
+		}
+		aead, err = cipher.NewGCM(block)
+	case CipherChaCha20Poly1305:
+		aead, err = chacha20poly1305.New(key[:])
+	default:
+		return nil, ErrUnsupportedCipher
+	}
+
 	if err != nil {
 		return nil, err
 	}

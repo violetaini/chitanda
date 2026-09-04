@@ -146,8 +146,8 @@ func (s *StreamServer) HandleConn(conn net.Conn) {
 		return
 	}
 
-	// 5. Decode target and optional initial payload (strips dynamic padding)
-	targetAddr, initialPayload, err := rawstream.Decode0RTTOpenFrame(openFramePlaintext)
+	// 5. Decode cipher type, target, and optional initial payload (strips dynamic padding)
+	cipherType, targetAddr, initialPayload, err := rawstream.Decode0RTTOpenFrame(openFramePlaintext)
 	if err != nil {
 		return
 	}
@@ -190,11 +190,11 @@ func (s *StreamServer) HandleConn(conn net.Conn) {
 	}
 
 	// 11. Wrap client connection in AEAD StreamConn
-	rStream, err := rawstream.NewAEADStream(c2sKey)
+	rStream, err := rawstream.NewAEADStream(cipherType, c2sKey)
 	if err != nil {
 		return
 	}
-	wStream, err := rawstream.NewAEADStream(s2cKey)
+	wStream, err := rawstream.NewAEADStream(cipherType, s2cKey)
 	if err != nil {
 		return
 	}

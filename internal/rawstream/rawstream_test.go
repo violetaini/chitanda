@@ -2,6 +2,8 @@ package rawstream
 
 import (
 	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
 	"encoding/binary"
 	"errors"
 	"io"
@@ -85,15 +87,18 @@ func TestDynamicPaddingVariance(t *testing.T) {
 
 	lengths := make(map[int]bool)
 	for i := 0; i < 20; i++ {
-		frame, err := Encode0RTTOpenFrame(target, payload, 32, 256)
+		frame, err := Encode0RTTOpenFrame(DefaultCipher, target, payload, 32, 256)
 		if err != nil {
 			t.Fatalf("Encode0RTTOpenFrame failed: %v", err)
 		}
 		lengths[len(frame)] = true
 
-		decodedTarget, decodedPayload, err := Decode0RTTOpenFrame(frame)
+		cipherType, decodedTarget, decodedPayload, err := Decode0RTTOpenFrame(frame)
 		if err != nil {
 			t.Fatalf("Decode0RTTOpenFrame failed: %v", err)
+		}
+		if cipherType != DefaultCipher {
+			t.Fatalf("expected cipher %d, got %d", DefaultCipher, cipherType)
 		}
 		if decodedTarget != target {
 			t.Fatalf("expected target %s, got %s", target, decodedTarget)
@@ -135,10 +140,10 @@ func TestStreamConnBidirectional(t *testing.T) {
 	keyC2S := [32]byte{1, 2, 3}
 	keyS2C := [32]byte{4, 5, 6}
 
-	cStreamOut, _ := NewAEADStream(keyC2S)
-	cStreamIn, _ := NewAEADStream(keyS2C)
-	sStreamIn, _ := NewAEADStream(keyC2S)
-	sStreamOut, _ := NewAEADStream(keyS2C)
+	cStreamOut, _ := NewAEADStream(DefaultCipher, keyC2S)
+	cStreamIn, _ := NewAEADStream(DefaultCipher, keyS2C)
+	sStreamIn, _ := NewAEADStream(DefaultCipher, keyC2S)
+	sStreamOut, _ := NewAEADStream(DefaultCipher, keyS2C)
 
 	c1, c2 := net.Pipe()
 	defer c1.Close()
@@ -193,10 +198,47 @@ func BenchmarkStreamConn_Throughput(b *testing.B) {
 	keyC2S := [32]byte{1, 2, 3}
 	keyS2C := [32]byte{4, 5, 6}
 
-	cStreamOut, _ := NewAEADStream(keyC2S)
-	cStreamIn, _ := NewAEADStream(keyS2C)
-	sStreamIn, _ := NewAEADStream(keyC2S)
-	sStreamOut, _ := NewAEADStream(keyS2C)
+	cStreamOut, _ := NewAEADStream(CipherChaCha20Poly1305, keyC2S)
+	cStreamIn, _ := NewAEADStream(CipherChaCha20Poly1305, keyS2C)
+	sStreamIn, _ := NewAEADStream(CipherChaCha20Poly1305, keyC2S)
+	sStreamOut, _ := NewAEADStream(CipherChaCha20Poly1305, keyS2C)
+
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	defer c2.Close()
+
+	clientConn := NewStreamConn(c1, cStreamIn, cStreamOut)
+	serverConn := NewStreamConn(c2, sStreamIn, sStreamOut)
+
+	chunk := make([]byte, 32*1024) // 32KB payload
+	b.SetBytes(int64(len(chunk)))
+	b.ResetTimer()
+
+	go func() {
+		buf := make([]byte, len(chunk))
+		for {
+			_, err := io.ReadFull(serverConn, buf)
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	for i := 0; i < b.N; i++ {
+		if _, err := clientConn.Write(chunk); err != nil {
+			b.Fatalf("write failed: %v", err)
+		}
+	}
+}
+
+func BenchmarkStreamConn_AES128GCM_Throughput(b *testing.B) {
+	keyC2S := [32]byte{1, 2, 3}
+	keyS2C := [32]byte{4, 5, 6}
+
+	cStreamOut, _ := NewAEADStream(CipherAES128GCM, keyC2S)
+	cStreamIn, _ := NewAEADStream(CipherAES128GCM, keyS2C)
+	sStreamIn, _ := NewAEADStream(CipherAES128GCM, keyC2S)
+	sStreamOut, _ := NewAEADStream(CipherAES128GCM, keyS2C)
 
 	c1, c2 := net.Pipe()
 	defer c1.Close()
@@ -228,8 +270,8 @@ func BenchmarkStreamConn_Throughput(b *testing.B) {
 
 func BenchmarkAEADStream_Direct(b *testing.B) {
 	key := [32]byte{1, 2, 3, 4}
-	streamEnc, _ := NewAEADStream(key)
-	streamDec, _ := NewAEADStream(key)
+	streamEnc, _ := NewAEADStream(DefaultCipher, key)
+	streamDec, _ := NewAEADStream(DefaultCipher, key)
 
 	plaintext := make([]byte, 16384) // 16KB
 	b.SetBytes(int64(len(plaintext)))
@@ -244,9 +286,45 @@ func BenchmarkAEADStream_Direct(b *testing.B) {
 	}
 }
 
+func BenchmarkAES128GCM_Direct(b *testing.B) {
+	key := make([]byte, 16)
+	block, _ := aes.NewCipher(key)
+	gcm, _ := cipher.NewGCM(block)
+
+	plaintext := make([]byte, 16384)
+	b.SetBytes(int64(len(plaintext)))
+	nonce := make([]byte, 12)
+	encBuf := make([]byte, 0, 16384+16)
+	decBuf := make([]byte, 0, 16384)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		enc := gcm.Seal(encBuf[:0], nonce, plaintext, nil)
+		_, _ = gcm.Open(decBuf[:0], nonce, enc, nil)
+	}
+}
+
+func BenchmarkAES256GCM_Direct(b *testing.B) {
+	key := make([]byte, 32)
+	block, _ := aes.NewCipher(key)
+	gcm, _ := cipher.NewGCM(block)
+
+	plaintext := make([]byte, 16384)
+	b.SetBytes(int64(len(plaintext)))
+	nonce := make([]byte, 12)
+	encBuf := make([]byte, 0, 16384+16)
+	decBuf := make([]byte, 0, 16384)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		enc := gcm.Seal(encBuf[:0], nonce, plaintext, nil)
+		_, _ = gcm.Open(decBuf[:0], nonce, enc, nil)
+	}
+}
+
 func TestAEADStream_SequenceExhaustion(t *testing.T) {
 	key := [32]byte{1, 2, 3, 4}
-	streamEnc, err := NewAEADStream(key)
+	streamEnc, err := NewAEADStream(DefaultCipher, key)
 	if err != nil {
 		t.Fatalf("NewAEADStream: %v", err)
 	}
@@ -257,7 +335,7 @@ func TestAEADStream_SequenceExhaustion(t *testing.T) {
 		t.Fatalf("expected ErrSequenceExhausted on EncryptChunk, got %v", err)
 	}
 
-	streamDec, err := NewAEADStream(key)
+	streamDec, err := NewAEADStream(DefaultCipher, key)
 	if err != nil {
 		t.Fatalf("NewAEADStream: %v", err)
 	}

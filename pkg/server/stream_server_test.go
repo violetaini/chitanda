@@ -312,7 +312,7 @@ func TestStreamServer_AntiReplay(t *testing.T) {
 		t.Fatalf("derive 0-rtt key: %v", err)
 	}
 
-	openFramePlaintext, err := rawstream.Encode0RTTOpenFrame("1.1.1.1:80", nil, 32, 64)
+	openFramePlaintext, err := rawstream.Encode0RTTOpenFrame(rawstream.DefaultCipher, "1.1.1.1:80", nil, 32, 64)
 	if err != nil {
 		t.Fatalf("encode 0-rtt open frame: %v", err)
 	}

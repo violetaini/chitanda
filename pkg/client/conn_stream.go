@@ -31,8 +31,18 @@ func (c *Client) dialRawStream(ctx context.Context, target string) (net.Conn, er
 		return nil, fmt.Errorf("derive 0-rtt key: %w", err)
 	}
 
+	cipherType := rawstream.DefaultCipher
+	switch c.cfg.StreamCipher {
+	case "chacha20-poly1305":
+		cipherType = rawstream.CipherChaCha20Poly1305
+	case "aes-256-gcm":
+		cipherType = rawstream.CipherAES256GCM
+	case "aes-128-gcm", "":
+		cipherType = rawstream.CipherAES128GCM
+	}
+
 	// Encode open frame with dynamic padding (32 to 256 bytes)
-	openFramePlaintext, err := rawstream.Encode0RTTOpenFrame(target, nil, rawstream.DefaultMinPadding, rawstream.DefaultMaxPadding)
+	openFramePlaintext, err := rawstream.Encode0RTTOpenFrame(cipherType, target, nil, rawstream.DefaultMinPadding, rawstream.DefaultMaxPadding)
 	if err != nil {
 		_ = rawConn.Close()
 		return nil, fmt.Errorf("encode 0-rtt open frame: %w", err)
@@ -79,12 +89,12 @@ func (c *Client) dialRawStream(ctx context.Context, target string) (net.Conn, er
 		return nil, fmt.Errorf("derive session keys: %w", err)
 	}
 
-	wStream, err := rawstream.NewAEADStream(c2sKey)
+	wStream, err := rawstream.NewAEADStream(cipherType, c2sKey)
 	if err != nil {
 		_ = rawConn.Close()
 		return nil, err
 	}
-	rStream, err := rawstream.NewAEADStream(s2cKey)
+	rStream, err := rawstream.NewAEADStream(cipherType, s2cKey)
 	if err != nil {
 		_ = rawConn.Close()
 		return nil, err
