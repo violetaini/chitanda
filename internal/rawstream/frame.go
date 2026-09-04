@@ -15,24 +15,17 @@ import (
 	"net"
 	"strconv"
 	"time"
-
-	"golang.org/x/crypto/chacha20poly1305"
 )
 
 const (
 	ClientHelloSize    = 48 // 8B Timestamp + 24B ClientNonce + 16B AuthTag
 	ServerHelloSize    = 40 // 24B ServerNonce + 16B ServerAuthTag
 	MaxChunkPayloadLen = 32768
-	MaxChunkWireLen    = MaxChunkPayloadLen + 16 // 16B Poly1305 / GCM tag
+	MaxChunkWireLen    = MaxChunkPayloadLen + 16 // 16B AES-GCM tag
 	MaxTimestampSkew   = 90 * time.Second
 
 	DefaultMinPadding = 32
 	DefaultMaxPadding = 256
-
-	CipherChaCha20Poly1305 byte = 0x01
-	CipherAES128GCM        byte = 0x02
-	CipherAES256GCM        byte = 0x03
-	DefaultCipher               = CipherAES128GCM
 
 	DomainClientHello = "CHITANDA-RAWSTREAM-CLIENT-V1"
 	DomainServerHello = "CHITANDA-RAWSTREAM-SERVER-V1"
@@ -50,7 +43,6 @@ var (
 	ErrInvalidOpenFrame   = errors.New("rawstream: invalid OPEN frame structure")
 	ErrInvalidAddress     = errors.New("rawstream: unsupported address type in OPEN frame")
 	ErrSequenceExhausted  = errors.New("rawstream: AEAD sequence number exhausted")
-	ErrUnsupportedCipher  = errors.New("rawstream: unsupported AEAD cipher")
 )
 
 // CreateClientHello generates a 48-byte ClientHello record.
@@ -111,8 +103,8 @@ func VerifyClientHello(psk []byte, record []byte, now time.Time) (clientNonce [2
 	return clientNonce, timestamp, nil
 }
 
-// Derive0RTTKey derives a 32-byte key for 0-RTT frame encryption.
-func Derive0RTTKey(psk []byte, timestamp uint64, clientNonce [24]byte) ([32]byte, error) {
+// Derive0RTTKey derives a 16-byte key for AES-128-GCM 0-RTT frame encryption.
+func Derive0RTTKey(psk []byte, timestamp uint64, clientNonce [24]byte) ([16]byte, error) {
 	mac := hmac.New(sha256.New, psk)
 	mac.Write([]byte(Domain0RTTKey))
 	var tsBuf [8]byte
@@ -121,13 +113,13 @@ func Derive0RTTKey(psk []byte, timestamp uint64, clientNonce [24]byte) ([32]byte
 	mac.Write(clientNonce[:])
 	sum := mac.Sum(nil)
 
-	var key [32]byte
-	copy(key[:], sum[:32])
+	var key [16]byte
+	copy(key[:], sum[:16])
 	return key, nil
 }
 
-// DeriveSessionKeys derives bidirectional 32-byte keys for established sessions.
-func DeriveSessionKeys(psk []byte, timestamp uint64, clientNonce, serverNonce [24]byte) (clientKey, serverKey [32]byte, err error) {
+// DeriveSessionKeys derives bidirectional 16-byte keys for established AES-128-GCM sessions.
+func DeriveSessionKeys(psk []byte, timestamp uint64, clientNonce, serverNonce [24]byte) (clientKey, serverKey [16]byte, err error) {
 	mac := hmac.New(sha256.New, psk)
 	mac.Write([]byte(DomainSessionKey))
 	var tsBuf [8]byte
@@ -137,15 +129,15 @@ func DeriveSessionKeys(psk []byte, timestamp uint64, clientNonce, serverNonce [2
 	mac.Write(serverNonce[:])
 	prk := mac.Sum(nil)
 
-	// Client to Server key
+	// Client to Server key (AES-128: 16 bytes)
 	h1 := hmac.New(sha256.New, prk)
 	h1.Write([]byte("C2S"))
-	copy(clientKey[:], h1.Sum(nil)[:32])
+	copy(clientKey[:], h1.Sum(nil)[:16])
 
-	// Server to Client key
+	// Server to Client key (AES-128: 16 bytes)
 	h2 := hmac.New(sha256.New, prk)
 	h2.Write([]byte("S2C"))
-	copy(serverKey[:], h2.Sum(nil)[:32])
+	copy(serverKey[:], h2.Sum(nil)[:16])
 
 	return clientKey, serverKey, nil
 }
@@ -196,10 +188,10 @@ func VerifyServerHello(psk []byte, timestamp uint64, clientNonce [24]byte, recor
 	return serverNonce, nil
 }
 
-// Encode0RTTOpenFrame encodes cipher type, target address and initial payload with dynamic random padding.
+// Encode0RTTOpenFrame encodes target address and initial payload with dynamic random padding.
 // Plaintext structure:
-// [2B PaddingLen] [PaddingBytes] [1B CipherType] [TargetAddr (SOCKS5)] [InitialPayload]
-func Encode0RTTOpenFrame(cipherType byte, target string, initialPayload []byte, minPad, maxPad int) ([]byte, error) {
+// [2B PaddingLen] [PaddingBytes] [TargetAddr (SOCKS5)] [InitialPayload]
+func Encode0RTTOpenFrame(target string, initialPayload []byte, minPad, maxPad int) ([]byte, error) {
 	if minPad < 0 {
 		minPad = DefaultMinPadding
 	}
@@ -224,12 +216,10 @@ func Encode0RTTOpenFrame(cipherType byte, target string, initialPayload []byte, 
 		return nil, err
 	}
 
-	buf := make([]byte, 2+paddingLen+1+len(targetBytes)+len(initialPayload))
+	buf := make([]byte, 2+paddingLen+len(targetBytes)+len(initialPayload))
 	binary.BigEndian.PutUint16(buf[0:2], uint16(paddingLen))
 	copy(buf[2:2+paddingLen], padding)
 	offset := 2 + paddingLen
-	buf[offset] = cipherType
-	offset++
 	copy(buf[offset:offset+len(targetBytes)], targetBytes)
 	offset += len(targetBytes)
 	copy(buf[offset:], initialPayload)
@@ -237,31 +227,24 @@ func Encode0RTTOpenFrame(cipherType byte, target string, initialPayload []byte, 
 	return buf, nil
 }
 
-// Decode0RTTOpenFrame decodes cipher type, target address and initial payload, stripping dynamic padding.
-func Decode0RTTOpenFrame(plaintext []byte) (cipherType byte, target string, initialPayload []byte, err error) {
+// Decode0RTTOpenFrame decodes target address and initial payload, stripping dynamic padding.
+func Decode0RTTOpenFrame(plaintext []byte) (target string, initialPayload []byte, err error) {
 	if len(plaintext) < 2 {
-		return 0, "", nil, ErrInvalidOpenFrame
+		return "", nil, ErrInvalidOpenFrame
 	}
 	paddingLen := int(binary.BigEndian.Uint16(plaintext[0:2]))
-	if len(plaintext) < 2+paddingLen+1 {
-		return 0, "", nil, ErrInvalidOpenFrame
+	if len(plaintext) < 2+paddingLen {
+		return "", nil, ErrInvalidOpenFrame
 	}
 
-	cipherType = plaintext[2+paddingLen]
-	switch cipherType {
-	case CipherChaCha20Poly1305, CipherAES128GCM, CipherAES256GCM:
-	default:
-		return 0, "", nil, ErrUnsupportedCipher
-	}
-
-	rest := plaintext[2+paddingLen+1:]
+	rest := plaintext[2+paddingLen:]
 	target, consumed, err := decodeTargetAddress(rest)
 	if err != nil {
-		return 0, "", nil, err
+		return "", nil, err
 	}
 
 	initialPayload = rest[consumed:]
-	return cipherType, target, initialPayload, nil
+	return target, initialPayload, nil
 }
 
 func encodeTargetAddress(address string) ([]byte, error) {
@@ -334,9 +317,13 @@ func decodeTargetAddress(b []byte) (string, int, error) {
 	}
 }
 
-// Encrypt0RTTChunk encrypts plaintext using the 0-RTT key.
-func Encrypt0RTTChunk(k0RTT [32]byte, plaintext []byte) ([]byte, error) {
-	aead, err := chacha20poly1305.New(k0RTT[:])
+// Encrypt0RTTChunk encrypts plaintext using AES-128-GCM with the 0-RTT key.
+func Encrypt0RTTChunk(k0RTT [16]byte, plaintext []byte) ([]byte, error) {
+	block, err := aes.NewCipher(k0RTT[:])
+	if err != nil {
+		return nil, err
+	}
+	aead, err := cipher.NewGCM(block)
 	if err != nil {
 		return nil, err
 	}
@@ -344,9 +331,13 @@ func Encrypt0RTTChunk(k0RTT [32]byte, plaintext []byte) ([]byte, error) {
 	return aead.Seal(nil, nonce[:], plaintext, nil), nil
 }
 
-// Decrypt0RTTChunk decrypts ciphertext using the 0-RTT key.
-func Decrypt0RTTChunk(k0RTT [32]byte, ciphertext []byte) ([]byte, error) {
-	aead, err := chacha20poly1305.New(k0RTT[:])
+// Decrypt0RTTChunk decrypts ciphertext using AES-128-GCM with the 0-RTT key.
+func Decrypt0RTTChunk(k0RTT [16]byte, ciphertext []byte) ([]byte, error) {
+	block, err := aes.NewCipher(k0RTT[:])
+	if err != nil {
+		return nil, err
+	}
+	aead, err := cipher.NewGCM(block)
 	if err != nil {
 		return nil, err
 	}
@@ -360,30 +351,13 @@ type AEADStream struct {
 	sequence uint64
 }
 
-// NewAEADStream creates an AEADStream for the specified cipher type.
-func NewAEADStream(cipherType byte, key [32]byte) (*AEADStream, error) {
-	var aead cipher.AEAD
-	var err error
-
-	switch cipherType {
-	case CipherAES128GCM:
-		block, bErr := aes.NewCipher(key[:16])
-		if bErr != nil {
-			return nil, bErr
-		}
-		aead, err = cipher.NewGCM(block)
-	case CipherAES256GCM:
-		block, bErr := aes.NewCipher(key[:32])
-		if bErr != nil {
-			return nil, bErr
-		}
-		aead, err = cipher.NewGCM(block)
-	case CipherChaCha20Poly1305:
-		aead, err = chacha20poly1305.New(key[:])
-	default:
-		return nil, ErrUnsupportedCipher
+// NewAEADStream creates an AEADStream with AES-128-GCM.
+func NewAEADStream(key [16]byte) (*AEADStream, error) {
+	block, err := aes.NewCipher(key[:])
+	if err != nil {
+		return nil, err
 	}
-
+	aead, err := cipher.NewGCM(block)
 	if err != nil {
 		return nil, err
 	}

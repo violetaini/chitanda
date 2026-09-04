@@ -58,7 +58,6 @@ type Config struct {
 	SessionCacheFile      string // optional persistent session cache path
 	QUICInitialPacketSize uint16 // 1200 - 1452, default 1452
 	InsecureSkipVerify    bool   // skip TLS certificate verification
-	StreamCipher          string // "aes-128-gcm" (default, hardware AES-NI 10G+), "chacha20-poly1305", "aes-256-gcm"
 	DialContext           func(ctx context.Context, network, addr string) (net.Conn, error)
 	ListenPacket          func(ctx context.Context, network, addr string) (net.PacketConn, error)
 }
