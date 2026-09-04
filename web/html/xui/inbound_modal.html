@@ -18,6 +18,13 @@
         inbound: new Inbound(),
         dbInbound: new DBInbound(),
         ok() {
+            if (inModal.inbound && inModal.inbound.protocol === Protocols.CHITANDA && inModal.inbound.settings) {
+                const rf = inModal.inbound.settings.replay_file;
+                if (rf && rf !== '/etc/x-ui/replay_chitanda.db') {
+                    const port = inModal.inbound.port || 'default';
+                    inModal.inbound.settings.replay_file = `/etc/x-ui/replay_${port}.db`;
+                }
+            }
             ObjectUtil.execute(inModal.confirm, inModal.inbound, inModal.dbInbound);
         },
         show({ title = '', okText = '{{ i18n "sure" }}', inbound = null, dbInbound = null, confirm = (inbound, dbInbound) => {}, isEdit = false }) {
@@ -171,9 +178,7 @@
                 const rf = this.inModal.inbound.settings.replay_file;
                 if (!rf) return 'none';
                 if (rf === '/etc/x-ui/replay_chitanda.db') return 'default';
-                const port = this.inModal.inbound.port;
-                if (port && rf === `/etc/x-ui/replay_${port}.db`) return 'auto_port';
-                return 'custom';
+                return 'auto_port';
             },
             setChitandaReplayType(val) {
                 if (!this.inModal.inbound.settings) return;
@@ -195,6 +200,15 @@
                 }
                 inModal.inbound.stream.reality.privateKey = msg.obj.privateKey;
                 inModal.inbound.stream.reality.settings.publicKey = msg.obj.publicKey;
+            }
+        },
+        watch: {
+            'inModal.inbound.port'(newPort) {
+                if (this.inModal.inbound && this.inModal.inbound.protocol === Protocols.CHITANDA && this.inModal.inbound.settings) {
+                    if (this.getChitandaReplayType() === 'auto_port') {
+                        this.inModal.inbound.settings.replay_file = `/etc/x-ui/replay_${newPort || 'default'}.db`;
+                    }
+                }
             }
         },
     });
