@@ -150,6 +150,11 @@ func Run(config *Config, listenAddr, adminListenAddr, quicListenAddr string) err
 					_ = uConn.SetReadBuffer(8 << 20)
 					_ = uConn.SetWriteBuffer(8 << 20)
 					_ = streamServer.AttachUDP(uConn)
+					if config.AllowPrivateTargets && streamServer.UDPServer() != nil {
+						streamServer.UDPServer().SetResolveUDPForTest(func(ctx context.Context, address string) (*net.UDPAddr, error) {
+							return net.ResolveUDPAddr("udp", address)
+						})
+					}
 				}
 			}
 		}

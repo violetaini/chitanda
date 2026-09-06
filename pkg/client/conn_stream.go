@@ -18,8 +18,6 @@ func (c *Client) dialRawStream(ctx context.Context, target string) (net.Conn, er
 	}
 	if tc, ok := rawConn.(*net.TCPConn); ok {
 		_ = tc.SetNoDelay(true)
-		_ = tc.SetReadBuffer(4 << 20)
-		_ = tc.SetWriteBuffer(4 << 20)
 	}
 
 	// 1. Map context deadline to connection deadline to prevent indefinite hanging

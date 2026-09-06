@@ -38,6 +38,7 @@ func main() {
 	poolSize := flag.Int("pool-size", 4, "TCP physical carrier connection pool size")
 	sessionCacheFile := flag.String("session-cache-file", "", "optional persistent session cache")
 	cpuProfile := flag.String("cpu-profile", "", "optional CPU profile output path")
+	serverID := flag.String("server-id", "", "optional RawStream server identifier")
 	flag.Parse()
 
 	if *cpuProfile != "" {
@@ -90,6 +91,7 @@ func main() {
 		PSK:              psk,
 		Path:             p,
 		TCPTransport:     *tcpTransport,
+		ServerID:         *serverID,
 		TCPPoolSize:      *poolSize,
 		SessionCacheFile: *sessionCacheFile,
 	})
@@ -155,10 +157,6 @@ func runEchoServer(listenAddr string) {
 		}
 		go func(c net.Conn) {
 			defer c.Close()
-			if tcp, ok := c.(*net.TCPConn); ok {
-				_ = tcp.SetReadBuffer(4 << 20)
-				_ = tcp.SetWriteBuffer(4 << 20)
-			}
 			buf := make([]byte, 1<<20)
 			_, _ = io.CopyBuffer(c, c, buf)
 		}(conn)
@@ -228,9 +226,6 @@ func runSinkServer(listenAddr string) {
 		}
 		go func(c net.Conn) {
 			defer c.Close()
-			if tcp, ok := c.(*net.TCPConn); ok {
-				_ = tcp.SetReadBuffer(4 << 20)
-			}
 			_, _ = io.Copy(io.Discard, c)
 		}(conn)
 	}

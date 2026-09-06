@@ -238,16 +238,12 @@ func (s *StreamServer) HandleConn(conn net.Conn) {
 	// Handshake successfully completed: release handshake token early
 	releaseHandshake()
 
-	// Upgrade TCP buffer sizes only for authenticated and connected sessions
+	// Upgrade TCP settings: enable NoDelay and rely on OS auto-tuning for window scaling
 	if tc, ok := conn.(*net.TCPConn); ok {
 		_ = tc.SetNoDelay(true)
-		_ = tc.SetReadBuffer(4 << 20)
-		_ = tc.SetWriteBuffer(4 << 20)
 	}
 	if tc, ok := upstream.(*net.TCPConn); ok {
 		_ = tc.SetNoDelay(true)
-		_ = tc.SetReadBuffer(4 << 20)
-		_ = tc.SetWriteBuffer(4 << 20)
 	}
 
 	// Clear deadlines for full-duplex proxying
