@@ -308,3 +308,20 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add releases/mihomo/version.txt
           git diff --quiet && git diff --staged --quiet || (git commit -m "chore(release): update Mihomo latest version to ${{ steps.upstream_check.outputs.upstream_tag }}" && git push origin main)
+
+      - name: Trigger Downstream CMFA Build
+        if: steps.upstream_check.outputs.should_build == 'true' && matrix.target == 'mihomo'
+        env:
+          DISPATCH_TOKEN: ${{ secrets.DISPATCH_TOKEN || secrets.GH_PAT || secrets.PERSONAL_ACCESS_TOKEN }}
+        run: |
+          if [ -n "$DISPATCH_TOKEN" ]; then
+            echo "Triggering chitanda-cmfa build via repository_dispatch..."
+            curl -s -X POST \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $DISPATCH_TOKEN" \
+              "https://api.github.com/repos/${{ github.repository_owner }}/chitanda-cmfa/dispatches" \
+              -d '{"event_type":"chitanda-core-updated","client_payload":{"upstream_tag":"${{ steps.upstream_check.outputs.upstream_tag }}","commit":"${{ github.sha }}"}}'
+            echo "Dispatched event to chitanda-cmfa."
+          else
+            echo "Notice: DISPATCH_TOKEN secret is not configured in this repo. CMFA will auto-sync via its watch workflow."
+          fi
