@@ -87,6 +87,9 @@ type Status struct {
 
 type Release struct {
 	TagName string `json:"tag_name"`
+	Assets  []struct {
+		Name string `json:"name"`
+	} `json:"assets"`
 }
 
 type ServerService struct {
@@ -249,29 +252,43 @@ func (s *ServerService) GetStatus(lastStatus *Status) *Status {
 
 func (s *ServerService) GetXrayVersions() ([]string, error) {
 	url := "https://api.github.com/repos/violetaini/chitanda/releases"
-	resp, err := http.Get(url)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
-		return nil, err
+		return []string{"v26.3.27"}, nil
 	}
-
-	defer resp.Body.Close()
-	buffer := bytes.NewBuffer(make([]byte, 8192))
-	buffer.Reset()
-	_, err = buffer.ReadFrom(resp.Body)
+	req.Header.Set("User-Agent", "Mozilla/5.0 (3x-ui)")
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return []string{"v26.3.27"}, nil
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return []string{"v26.3.27"}, nil
 	}
 
 	releases := make([]Release, 0)
-	err = json.Unmarshal(buffer.Bytes(), &releases)
+	err = json.Unmarshal(body, &releases)
 	if err != nil {
-		return nil, err
+		return []string{"v26.3.27"}, nil
 	}
 	var versions []string
 	for _, release := range releases {
-		if strings.HasPrefix(release.TagName, "v") {
+		hasXray := false
+		for _, asset := range release.Assets {
+			if strings.HasPrefix(asset.Name, "Xray-") {
+				hasXray = true
+				break
+			}
+		}
+		if hasXray && strings.HasPrefix(release.TagName, "v") {
 			versions = append(versions, release.TagName)
 		}
+	}
+	if len(versions) == 0 {
+		versions = append(versions, "v26.3.27")
 	}
 	return versions, nil
 }
