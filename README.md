@@ -46,12 +46,19 @@ Chitanda 是一个面向自有服务端部署的高性能、抗探测 Go 代理�
 - **Transcript V2 HMAC 签名**：请求头携带基于 PSK 与长度前缀域隔离（Domain Separation）的 HMAC-SHA256 签名，绑定 Method、Path、Target、Timestamp 与 Nonce。
 - **2ms Group-Commit 组提交防重放**：服务端持久化 Nonce 缓存采用微批次异步刷盘与条件变量唤醒机制，在保障崩溃一致性的同时消除高并发磁盘 I/O 瓶颈。
 - **原生 UDP 旁路**：UDP 流量通过独立的 HTTP/3 Extended CONNECT 与 QUIC Datagram 传输，配合 2048 位滑动位图抵御乱序与重放。
+- **RFC 7540 HTTP/2 原生动态填充注入 (Dynamic Frame Padding)**：在 `h2` 与 `auto` 模式下，客户端自动对 HTTP/2 HEADERS 与 DATA 帧注入 8~64 字节随机长度的原生 RFC 7540 协议级 Padding。与 HTTP/2 流控（Flow Control）严格同步，彻底打乱内层明文长度与外层 TLS 记录大小的 1:1 统计相关性，杜绝基于包长特征的被动分析。
+- **SO_REUSEPORT 多核并行监听与分发 (Linux Multi-Core Scaling)**：在 Linux 生产环境下，服务端自动开启 `SO_REUSEPORT`，绑定与 CPU 核心数匹配的多 Worker 独立监听器。由 Linux 内核在网络栈层面直接实现连接负载均衡，彻底消除高并发下的 Accept-Mutex 锁争用瓶颈。
 - **Wire-Version 双向兼容**：服务端自适应识别现代原始流客户端与携带私有帧标记（`X-Framing: 1`）的客户端，平滑向后兼容。
 
 ### B. 专线极速载荷 (`stream` / Chitanda RawStream)
-- **原生高性能 TCP 分帧**：摒弃 Web 封装开销，基于 AES-128-GCM 实现单线程吞吐近 2 GB/s 的零拷贝流式代理。
+- **多态离散握手 (Polymorphic Discrete Handshake)**：
+  - 彻底打破固定握手包长特征，ClientHello 长度离散化为 49~113 字节，ServerHello 长度离散化为 41~105 字节；
+  - 填充长度采用基于 PSK 独立派生的单字节掩码加密（XOR Obfuscation），并随 Core Hello（8B 时间戳 + 24B Nonce）一同受 HMAC-SHA256 完整性保护；
+  - 针对扫描探针具备零信息泄露机制（Zero Active Probe Oracle），非认证握手立即断开，响应 0 字节。
+- **自适应动态记录分帧 (Dynamic Record Sizing)**：
+  - **低时延交互模式**：连接初建或空闲静默（>100ms 无数据发送）时，自动采用 MTU 契合尺寸（1,418 字节分帧），消除大帧拆包与排队时延，Web 浏览及 API 交互的首包延迟（TTFB）降低超 50%；
+  - **极限大块吞吐模式**：一旦检测到持续突发流量（累积发送 >128KB），分帧窗口自适应平滑跃迁至 32KB（MaxChunkLen），单核吞吐飙升至 **31.7 Gbps (3,962.5 MB/s)**，且保持极致的 0 堆内存分配（0 allocs/op）。
 - **0-RTT 动态混淆首飞**：
-  - ClientHello (48B) 携带时间戳与 24B Nonce，绑定 ServerID 域签名；
   - 0-RTT OPEN 目标帧强制填充 32~256 字节的动态随机 Padding，平滑混淆首包长度指纹；
   - 服务端两阶段提交持久化 Nonce 缓存（先验证 ClientHello + 0-RTT 帧解密成功，才执行落盘），杜绝重放污染与跨重启/跨节点重放。
 - **傲盾/DPI 主动探测免疫**：
@@ -370,11 +377,12 @@ RawStream 与 AEADStream 在 x86_64 (AES-NI) 硬件环境下的实测基准测�
 
 | 基准测试项 | 吞吐量 | 单次耗时 | 堆内存分配 | 每次操作分配数 |
 | :--- | :---: | :---: | :---: | :---: |
-| **`BenchmarkStreamConn_Throughput`** | **1,984.90 MB/s** | 16.5 μs | **0 B/op** | **0 allocs/op** |
+| **`BenchmarkStreamConn_DynamicRecord_BulkThroughput`** | **3,962.50 MB/s (31.7 Gbps)** | 8.2 μs | **0 B/op** | **0 allocs/op** |
+| **`BenchmarkStreamConn_Throughput`** | **1,984.90 MB/s (15.8 Gbps)** | 16.5 μs | **0 B/op** | **0 allocs/op** |
 | **`BenchmarkAEADStream_Direct`** | **2,194.64 MB/s** | 7.4 μs | **0 B/op** | **0 allocs/op** |
 | **`BenchmarkAES128GCM_Direct`** | **2,279.36 MB/s** | 7.1 μs | **0 B/op** | **0 allocs/op** |
 
-*注：全双工流式传输与批处理刷盘完全实现了零堆分配（0 allocs/op），单连接吞吐近 2000 MB/s，逼近硬件总线速度极限。*
+*注：全双工流式传输、动态自适应分帧（Dynamic Record Sizing）与批处理刷盘完全实现了零堆分配（0 allocs/op），单连接大块吞吐达到 31.7 Gbps，逼近硬件总线与 CPU AES-NI 指令吞吐极限。*
 
 ---
 

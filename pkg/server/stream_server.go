@@ -169,7 +169,10 @@ func (s *StreamServer) HandleConn(conn net.Conn) {
 	releaseHandshake := func() {
 		if !handshakeReleased {
 			handshakeReleased = true
-			<-s.handshakeSem
+			select {
+			case <-s.handshakeSem:
+			default:
+			}
 		}
 	}
 	defer releaseHandshake()
