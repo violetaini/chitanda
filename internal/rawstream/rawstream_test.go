@@ -92,6 +92,150 @@ func TestClientServerHandshake(t *testing.T) {
 	}
 }
 
+func TestPolymorphicHandshake(t *testing.T) {
+	psk := []byte("01234567890123456789012345678901") // 32 bytes
+	serverID := "node-poly-1"
+	now := time.Now()
+
+	// 0. PSK < 32 bytes must be rejected
+	if _, _, _, err := CreatePolymorphicClientHello([]byte("short-psk"), serverID, now); err == nil {
+		t.Fatalf("expected error for PSK < 32 bytes, got nil")
+	}
+
+	clientLengths := make(map[int]bool)
+	serverLengths := make(map[int]bool)
+
+	for i := 0; i < 100; i++ {
+		// 1. Client creates Polymorphic ClientHello
+		cHello, clientNonce, ts, err := CreatePolymorphicClientHello(psk, serverID, now)
+		if err != nil {
+			t.Fatalf("iteration %d: CreatePolymorphicClientHello failed: %v", i, err)
+		}
+		if len(cHello) < 49 || len(cHello) > 1+MaxPolymorphicPadding+ClientHelloSize {
+			t.Fatalf("iteration %d: unexpected client hello length %d", i, len(cHello))
+		}
+		clientLengths[len(cHello)] = true
+
+		// 2. Server verifies via slice
+		vNonce, vTs, err := VerifyPolymorphicClientHello(psk, serverID, cHello, now)
+		if err != nil {
+			t.Fatalf("iteration %d: VerifyPolymorphicClientHello failed: %v", i, err)
+		}
+		if vNonce != clientNonce || vTs != ts {
+			t.Fatalf("iteration %d: nonce or timestamp mismatch", i)
+		}
+
+		// 3. Server verifies via io.Reader (stream simulation)
+		vNonceStream, vTsStream, err := ReadAndVerifyPolymorphicClientHello(bytes.NewReader(cHello), psk, serverID, now)
+		if err != nil {
+			t.Fatalf("iteration %d: ReadAndVerifyPolymorphicClientHello failed: %v", i, err)
+		}
+		if vNonceStream != clientNonce || vTsStream != ts {
+			t.Fatalf("iteration %d: stream reader nonce or timestamp mismatch", i)
+		}
+
+		// 4. Server creates Polymorphic ServerHello
+		sHello, serverNonce, err := CreatePolymorphicServerHello(psk, serverID, vTs, vNonce)
+		if err != nil {
+			t.Fatalf("iteration %d: CreatePolymorphicServerHello failed: %v", i, err)
+		}
+		if len(sHello) < 41 || len(sHello) > 1+MaxPolymorphicPadding+ServerHelloSize {
+			t.Fatalf("iteration %d: unexpected server hello length %d", i, len(sHello))
+		}
+		serverLengths[len(sHello)] = true
+
+		// 5. Client verifies via slice
+		vServerNonce, err := VerifyPolymorphicServerHello(psk, serverID, ts, clientNonce, sHello)
+		if err != nil {
+			t.Fatalf("iteration %d: VerifyPolymorphicServerHello failed: %v", i, err)
+		}
+		if vServerNonce != serverNonce {
+			t.Fatalf("iteration %d: server nonce mismatch", i)
+		}
+
+		// 6. Client verifies via io.Reader
+		vServerNonceStream, err := ReadAndVerifyPolymorphicServerHello(bytes.NewReader(sHello), psk, serverID, ts, clientNonce)
+		if err != nil {
+			t.Fatalf("iteration %d: ReadAndVerifyPolymorphicServerHello failed: %v", i, err)
+		}
+		if vServerNonceStream != serverNonce {
+			t.Fatalf("iteration %d: stream reader server nonce mismatch", i)
+		}
+
+		// 7. Derive session keys
+		c2sClient, s2cClient, err := DeriveSessionKeys(psk, serverID, ts, clientNonce, serverNonce)
+		if err != nil {
+			t.Fatalf("DeriveSessionKeys client: %v", err)
+		}
+		c2sServer, s2cServer, err := DeriveSessionKeys(psk, serverID, vTs, vNonce, vServerNonce)
+		if err != nil {
+			t.Fatalf("DeriveSessionKeys server: %v", err)
+		}
+		if c2sClient != c2sServer || s2cClient != s2cServer {
+			t.Fatalf("iteration %d: session keys mismatch", i)
+		}
+	}
+
+	// Verify polymorphic distribution: at least 15 distinct lengths across 100 samples
+	if len(clientLengths) < 15 {
+		t.Fatalf("expected high client length entropy, got only %d distinct lengths", len(clientLengths))
+	}
+	if len(serverLengths) < 15 {
+		t.Fatalf("expected high server length entropy, got only %d distinct lengths", len(serverLengths))
+	}
+}
+
+func TestPolymorphicHandshakeAttacks(t *testing.T) {
+	psk := []byte("01234567890123456789012345678901") // 32 bytes
+	serverID := "node-poly-secure"
+	now := time.Now()
+
+	// Attack 1: Plain HTTP probe (GET / HTTP/1.1)
+	httpProbe := []byte("GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")
+	if _, _, err := ReadAndVerifyPolymorphicClientHello(bytes.NewReader(httpProbe), psk, serverID, now); err == nil {
+		t.Fatalf("expected HTTP probe to be rejected immediately, but it passed!")
+	}
+
+	// Attack 2: Mismatched serverID
+	cHello, _, _, err := CreatePolymorphicClientHello(psk, serverID, now)
+	if err != nil {
+		t.Fatalf("CreatePolymorphicClientHello failed: %v", err)
+	}
+	if _, _, err := ReadAndVerifyPolymorphicClientHello(bytes.NewReader(cHello), psk, "other-node", now); err == nil {
+		t.Fatalf("expected mismatched serverID to be rejected")
+	}
+
+	// Attack 3: Tampered padding byte
+	clientMask, _ := DerivePolymorphicMasks(psk, serverID)
+	padLen := int(cHello[0] ^ clientMask)
+	if padLen > 0 {
+		tampered := make([]byte, len(cHello))
+		copy(tampered, cHello)
+		tampered[1] ^= 0xFF // flip bit in padding
+		if _, _, err := ReadAndVerifyPolymorphicClientHello(bytes.NewReader(tampered), psk, serverID, now); err == nil {
+			t.Fatalf("expected tampered padding to fail HMAC verification")
+		}
+	}
+
+	// Attack 4: Tampered core tag
+	tamperedTag := make([]byte, len(cHello))
+	copy(tamperedTag, cHello)
+	tamperedTag[len(tamperedTag)-1] ^= 0x01
+	if _, _, err := ReadAndVerifyPolymorphicClientHello(bytes.NewReader(tamperedTag), psk, serverID, now); err == nil {
+		t.Fatalf("expected tampered HMAC tag to be rejected")
+	}
+
+	// Attack 5: Expired timestamp
+	oldTime := now.Add(-5 * time.Minute)
+	oldHello, _, _, err := CreatePolymorphicClientHello(psk, serverID, oldTime)
+	if err != nil {
+		t.Fatalf("CreatePolymorphicClientHello failed: %v", err)
+	}
+	if _, _, err := ReadAndVerifyPolymorphicClientHello(bytes.NewReader(oldHello), psk, serverID, now); !errors.Is(err, ErrTimestampExpired) {
+		t.Fatalf("expected ErrTimestampExpired, got: %v", err)
+	}
+}
+
 func TestDynamicPaddingVariance(t *testing.T) {
 	target := "1.1.1.1:53"
 	payload := []byte("ping payload data")

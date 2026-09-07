@@ -152,6 +152,10 @@ type Transport struct {
 	// The errType consists of only ASCII word characters.
 	CountError func(errType string)
 
+	// MaxDataPadding, if positive, enables pseudo-random padding on HTTP/2 DATA frames (RFC 7540).
+	// Bounded in range [0, 255].
+	MaxDataPadding int
+
 	// Internal state, differs between wrapped and non-wrapped implementations.
 	transportInternal
 }

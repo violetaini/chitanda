@@ -22,7 +22,8 @@ type StreamServer struct {
 	psk          []byte
 	serverID     string
 	dialTarget   func(ctx context.Context, network, address string) (net.Conn, error)
-	listener     net.Listener
+	listenersMu  sync.Mutex
+	listeners    []net.Listener
 	udpServer    *PlainUDPServer
 	replays      *auth.ReplayCache
 	closed       atomic.Bool
@@ -92,40 +93,70 @@ func (s *StreamServer) UDPServer() *PlainUDPServer {
 	return s.udpServer
 }
 
-// Serve starts accepting connections on the provided TCP listener.
-func (s *StreamServer) Serve(l net.Listener) error {
-	s.listener = l
-	for {
-		conn, err := l.Accept()
-		if err != nil {
-			if s.closed.Load() {
-				return nil
+// Serve starts accepting connections on one or more TCP listeners.
+// When multiple listeners are provided (e.g. via SO_REUSEPORT on Linux),
+// connections are accepted in parallel across all listeners.
+func (s *StreamServer) Serve(listeners ...net.Listener) error {
+	if len(listeners) == 0 {
+		return errors.New("no listeners provided")
+	}
+	s.listenersMu.Lock()
+	s.listeners = append(s.listeners, listeners...)
+	s.listenersMu.Unlock()
+
+	var lnWg sync.WaitGroup
+	errCh := make(chan error, len(listeners))
+
+	for _, l := range listeners {
+		lnWg.Add(1)
+		go func(ln net.Listener) {
+			defer lnWg.Done()
+			for {
+				conn, err := ln.Accept()
+				if err != nil {
+					if s.closed.Load() {
+						return
+					}
+					errCh <- err
+					return
+				}
+
+				if s.maxConns > 0 && s.activeConns.Load() >= int64(s.maxConns) {
+					_ = conn.Close()
+					continue
+				}
+
+				// Enforce bounded concurrent handshakes
+				select {
+				case s.handshakeSem <- struct{}{}:
+				default:
+					// Handshake pool full, shed load immediately
+					_ = conn.Close()
+					continue
+				}
+
+				s.activeConns.Add(1)
+				s.wg.Add(1)
+				go func(c net.Conn) {
+					defer s.wg.Done()
+					defer s.activeConns.Add(-1)
+					s.HandleConn(c)
+				}(conn)
 			}
+		}(l)
+	}
+
+	lnWg.Wait()
+	close(errCh)
+	if s.closed.Load() {
+		return nil
+	}
+	for err := range errCh {
+		if err != nil && !errors.Is(err, net.ErrClosed) {
 			return err
 		}
-
-		if s.maxConns > 0 && s.activeConns.Load() >= int64(s.maxConns) {
-			_ = conn.Close()
-			continue
-		}
-
-		// Enforce bounded concurrent handshakes
-		select {
-		case s.handshakeSem <- struct{}{}:
-		default:
-			// Handshake pool full, shed load immediately
-			_ = conn.Close()
-			continue
-		}
-
-		s.activeConns.Add(1)
-		s.wg.Add(1)
-		go func(c net.Conn) {
-			defer s.wg.Done()
-			defer s.activeConns.Add(-1)
-			s.HandleConn(c)
-		}(conn)
 	}
+	return nil
 }
 
 // HandleConn processes an incoming raw TCP connection.
@@ -146,15 +177,10 @@ func (s *StreamServer) HandleConn(conn net.Conn) {
 	// 2-second deadline for the initial handshake flight
 	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
 
-	// 1. Read ClientHello (48 bytes)
-	var clientHelloBuf [rawstream.ClientHelloSize]byte
-	if _, err := io.ReadFull(conn, clientHelloBuf[:]); err != nil {
-		return
-	}
-
-	clientNonce, ts, err := rawstream.VerifyClientHello(s.psk, s.serverID, clientHelloBuf[:], time.Now())
+	// 1. Read and verify polymorphic ClientHello (49-113 bytes)
+	clientNonce, ts, err := rawstream.ReadAndVerifyPolymorphicClientHello(conn, s.psk, s.serverID, time.Now())
 	if err != nil {
-		// Authentication failed (e.g. GET / HTTP/1.1 sent by scanner or mismatched serverID):
+		// Authentication failed (e.g. GET / HTTP/1.1 sent by scanner, invalid padding, or mismatched serverID):
 		// Close immediately with 0 bytes response. Never speak HTTP.
 		return
 	}
@@ -208,8 +234,8 @@ func (s *StreamServer) HandleConn(conn net.Conn) {
 		return
 	}
 
-	// 8. Generate ServerHello (40 bytes)
-	serverHelloRecord, serverNonce, err := rawstream.CreateServerHello(s.psk, s.serverID, ts, clientNonce)
+	// 8. Generate polymorphic ServerHello (41-105 bytes)
+	serverHelloRecord, serverNonce, err := rawstream.CreatePolymorphicServerHello(s.psk, s.serverID, ts, clientNonce)
 	if err != nil {
 		return
 	}
@@ -330,11 +356,16 @@ func (s *StreamServer) Close() error {
 		s.cancel()
 	}
 	var firstErr error
-	if s.listener != nil {
-		if err := s.listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
-			firstErr = err
+	s.listenersMu.Lock()
+	for _, ln := range s.listeners {
+		if ln != nil {
+			if err := ln.Close(); err != nil && !errors.Is(err, net.ErrClosed) && firstErr == nil {
+				firstErr = err
+			}
 		}
 	}
+	s.listeners = nil
+	s.listenersMu.Unlock()
 	if s.udpServer != nil {
 		s.udpServer.Close()
 	}

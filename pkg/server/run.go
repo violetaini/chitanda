@@ -135,7 +135,7 @@ func Run(config *Config, listenAddr, adminListenAddr, quicListenAddr string) err
 
 	var streamServer *StreamServer
 	if config.RawStreamListen != "" {
-		rawstreamLn, err := net.Listen("tcp", config.RawStreamListen)
+		rawstreamLns, err := ListenTCPMulti(config.RawStreamListen)
 		if err != nil {
 			return fmt.Errorf("listen rawstream %q: %w", config.RawStreamListen, err)
 		}
@@ -160,26 +160,32 @@ func Run(config *Config, listenAddr, adminListenAddr, quicListenAddr string) err
 		}
 
 		go func() {
-			log.Printf("public RawStream TCP listener started on %s", config.RawStreamListen)
-			if err := streamServer.Serve(rawstreamLn); err != nil && !errors.Is(err, net.ErrClosed) {
+			log.Printf("public RawStream TCP listener started on %s (%d listeners)", config.RawStreamListen, len(rawstreamLns))
+			if err := streamServer.Serve(rawstreamLns...); err != nil && !errors.Is(err, net.ErrClosed) {
 				log.Fatalf("rawstream server: %v", err)
 			}
 		}()
 	}
 
-	go func() {
-		if config.CertFile == "" || config.KeyFile == "" {
-			log.Printf("public Plain HTTP/1.1 listener started on %s", listenAddr)
-			if err := public.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				log.Fatalf("public plain server: %v", err)
+	publicLns, err := ListenTCPMulti(listenAddr)
+	if err != nil {
+		return fmt.Errorf("listen public %q: %w", listenAddr, err)
+	}
+	for _, ln := range publicLns {
+		go func(l net.Listener) {
+			if config.CertFile == "" || config.KeyFile == "" {
+				log.Printf("public Plain HTTP/1.1 listener started on %s", listenAddr)
+				if err := public.Serve(l); err != nil && err != http.ErrServerClosed {
+					log.Fatalf("public plain server: %v", err)
+				}
+			} else {
+				log.Printf("public TLS listener started on %s", listenAddr)
+				if err := public.ServeTLS(l, config.CertFile, config.KeyFile); err != nil && err != http.ErrServerClosed {
+					log.Fatalf("public server: %v", err)
+				}
 			}
-		} else {
-			log.Printf("public TLS listener started on %s", listenAddr)
-			if err := public.ListenAndServeTLS(config.CertFile, config.KeyFile); err != nil && err != http.ErrServerClosed {
-				log.Fatalf("public server: %v", err)
-			}
-		}
-	}()
+		}(ln)
+	}
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)

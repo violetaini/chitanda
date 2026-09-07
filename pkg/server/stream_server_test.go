@@ -304,9 +304,9 @@ func TestStreamServer_AntiReplay(t *testing.T) {
 
 	// 1. Build a valid ClientHello + 0-RTT frame
 	now := time.Now()
-	clientHello, clientNonce, ts, err := rawstream.CreateClientHello(psk, "", now)
+	clientHello, clientNonce, ts, err := rawstream.CreatePolymorphicClientHello(psk, "", now)
 	if err != nil {
-		t.Fatalf("create client hello: %v", err)
+		t.Fatalf("create polymorphic client hello: %v", err)
 	}
 
 	k0RTT, err := rawstream.Derive0RTTKey(psk, "", ts, clientNonce)
@@ -325,14 +325,14 @@ func TestStreamServer_AntiReplay(t *testing.T) {
 	}
 
 	wireLen := len(encrypted0RTT)
-	flight1 := make([]byte, 0, rawstream.ClientHelloSize+2+wireLen)
+	flight1 := make([]byte, 0, len(clientHello)+2+wireLen)
 	flight1 = append(flight1, clientHello...)
 	var lenBuf [2]byte
 	binary.BigEndian.PutUint16(lenBuf[:], uint16(wireLen))
 	flight1 = append(flight1, lenBuf[:]...)
 	flight1 = append(flight1, encrypted0RTT...)
 
-	// 2. First connection: send flight 1 -> should succeed and receive 40B ServerHello
+	// 2. First connection: send flight 1 -> should succeed and receive polymorphic ServerHello
 	conn1, err := net.Dial("tcp", srvL.Addr().String())
 	if err != nil {
 		t.Fatalf("dial 1: %v", err)
@@ -343,14 +343,9 @@ func TestStreamServer_AntiReplay(t *testing.T) {
 		t.Fatalf("write flight 1: %v", err)
 	}
 
-	var sHello [rawstream.ServerHelloSize]byte
-	if _, err := io.ReadFull(conn1, sHello[:]); err != nil {
+	if _, err := rawstream.ReadAndVerifyPolymorphicServerHello(conn1, psk, "", ts, clientNonce); err != nil {
 		_ = conn1.Close()
 		t.Fatalf("read server hello: %v", err)
-	}
-	if _, err := rawstream.VerifyServerHello(psk, "", ts, clientNonce, sHello[:]); err != nil {
-		_ = conn1.Close()
-		t.Fatalf("verify server hello: %v", err)
 	}
 	_ = conn1.Close()
 
@@ -507,16 +502,16 @@ func TestStreamServer_PersistentReplay_SurvivesRestart(t *testing.T) {
 
 	// Build Flight 1
 	now := time.Now()
-	clientHello, clientNonce, ts, err := rawstream.CreateClientHello(psk, "", now)
+	clientHello, clientNonce, ts, err := rawstream.CreatePolymorphicClientHello(psk, "", now)
 	if err != nil {
-		t.Fatalf("create client hello: %v", err)
+		t.Fatalf("create polymorphic client hello: %v", err)
 	}
 	k0RTT, _ := rawstream.Derive0RTTKey(psk, "", ts, clientNonce)
 	openFramePlaintext, _ := rawstream.Encode0RTTOpenFrame("1.1.1.1:80", nil, 32, 64)
 	encrypted0RTT, _ := rawstream.Encrypt0RTTChunk(k0RTT, openFramePlaintext)
 
 	wireLen := len(encrypted0RTT)
-	flight1 := make([]byte, 0, rawstream.ClientHelloSize+2+wireLen)
+	flight1 := make([]byte, 0, len(clientHello)+2+wireLen)
 	flight1 = append(flight1, clientHello...)
 	var lenBuf [2]byte
 	binary.BigEndian.PutUint16(lenBuf[:], uint16(wireLen))
@@ -531,8 +526,7 @@ func TestStreamServer_PersistentReplay_SurvivesRestart(t *testing.T) {
 	if _, err := conn1.Write(flight1); err != nil {
 		t.Fatalf("write flight 1: %v", err)
 	}
-	var sHello [rawstream.ServerHelloSize]byte
-	if _, err := io.ReadFull(conn1, sHello[:]); err != nil {
+	if _, err := rawstream.ReadAndVerifyPolymorphicServerHello(conn1, psk, "", ts, clientNonce); err != nil {
 		t.Fatalf("read server hello: %v", err)
 	}
 	_ = conn1.Close()
@@ -545,10 +539,10 @@ func TestStreamServer_PersistentReplay_SurvivesRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenReplayCache 2: %v", err)
 	}
-	defer replays2.Close()
 
 	srvL2, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
+		_ = replays2.Close()
 		t.Fatalf("server listen 2: %v", err)
 	}
 	defer srvL2.Close()
@@ -557,20 +551,21 @@ func TestStreamServer_PersistentReplay_SurvivesRestart(t *testing.T) {
 		var d net.Dialer
 		return d.DialContext(ctx, "tcp", echoL.Addr().String())
 	})
-	defer srv2.Close()
 
 	go func() {
 		_ = srv2.Serve(srvL2)
 	}()
 
-	// Attacker replays captured flight 1 to the restarted server
+	// Connect to server 2 and REPLAY flight 1
 	conn2, err := net.Dial("tcp", srvL2.Addr().String())
 	if err != nil {
+		_ = srv2.Close()
 		t.Fatalf("dial 2: %v", err)
 	}
 	defer conn2.Close()
 
 	if _, err := conn2.Write(flight1); err != nil {
+		_ = srv2.Close()
 		t.Fatalf("write replay flight: %v", err)
 	}
 
@@ -578,11 +573,14 @@ func TestStreamServer_PersistentReplay_SurvivesRestart(t *testing.T) {
 	respBuf := make([]byte, 128)
 	n, readErr := conn2.Read(respBuf)
 	if n > 0 {
+		_ = srv2.Close()
 		t.Fatalf("REPLAY ATTACK SUCCEEDED after restart! Server returned %d bytes: %x", n, respBuf[:n])
 	}
 	if readErr == nil {
+		_ = srv2.Close()
 		t.Fatalf("expected EOF or reset on replayed connection, got nil error")
 	}
+	_ = srv2.Close()
 }
 
 func TestStreamServer_CrossNodeReplay_DifferentServerID(t *testing.T) {
@@ -603,9 +601,9 @@ func TestStreamServer_CrossNodeReplay_DifferentServerID(t *testing.T) {
 	}()
 
 	// Attacker sends ClientHello crafted for "node-singapore" (sharing the same PSK)
-	clientHello, _, _, err := rawstream.CreateClientHello(psk, "node-singapore", time.Now())
+	clientHello, _, _, err := rawstream.CreatePolymorphicClientHello(psk, "node-singapore", time.Now())
 	if err != nil {
-		t.Fatalf("CreateClientHello: %v", err)
+		t.Fatalf("CreatePolymorphicClientHello: %v", err)
 	}
 
 	conn, err := net.Dial("tcp", srvL.Addr().String())

@@ -2,13 +2,19 @@ package client
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"crypto/tls"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/net/http2"
 
 	"github.com/violetaini/chitanda/internal/auth"
 	"github.com/violetaini/chitanda/pkg/server"
@@ -302,5 +308,179 @@ func TestPlainH1_BoundsProtection(t *testing.T) {
 	_, err = cr2.Read(buf)
 	if err == nil {
 		t.Fatal("expected error reading oversized chunk length, got nil")
+	}
+}
+
+func TestRawStreamEndToEnd(t *testing.T) {
+	psk := []byte(strings.Repeat("k", 32))
+	replays := auth.NewReplayCache()
+	defer replays.Close()
+
+	// 1. Upstream TCP echo server
+	echoLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen echo: %v", err)
+	}
+	defer echoLn.Close()
+	go func() {
+		for {
+			c, err := echoLn.Accept()
+			if err != nil {
+				return
+			}
+			go func(conn net.Conn) {
+				defer conn.Close()
+				_, _ = io.Copy(conn, conn)
+			}(c)
+		}
+	}()
+
+	// 2. Start RawStream server
+	streamLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen rawstream: %v", err)
+	}
+	defer streamLn.Close()
+
+	srv := server.NewStreamServer(psk, "test-node", replays, func(ctx context.Context, network, address string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, "tcp", address)
+	})
+	defer srv.Close()
+
+	go func() {
+		_ = srv.Serve(streamLn)
+	}()
+
+	// 3. Client in RawStream mode
+	c, err := New(Config{
+		Server:       streamLn.Addr().String(),
+		ServerID:     "test-node",
+		PSK:          psk,
+		TCPTransport: TCPTransportStream,
+	})
+	if err != nil {
+		t.Fatalf("New rawstream client: %v", err)
+	}
+	defer c.Close()
+
+	// 4. Dial echo target
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	conn, err := c.DialContext(ctx, "tcp", echoLn.Addr().String())
+	if err != nil {
+		t.Fatalf("DialContext rawstream: %v", err)
+	}
+	defer conn.Close()
+
+	// 5. Send message and verify
+	msg := []byte("Hello Polymorphic Handshake & Dynamic Record Sizing RawStream!")
+	if _, err := conn.Write(msg); err != nil {
+		t.Fatalf("conn.Write: %v", err)
+	}
+
+	buf := make([]byte, len(msg))
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		t.Fatalf("conn.Read: %v", err)
+	}
+
+	if string(buf) != string(msg) {
+		t.Fatalf("got %q, want %q", string(buf), string(msg))
+	}
+}
+
+func TestH2PaddingEndToEnd(t *testing.T) {
+	psk := []byte(strings.Repeat("h2pad", 7)[:32])
+	replays := auth.NewReplayCache()
+	defer replays.Close()
+
+	// 1. Upstream TCP echo server
+	echoLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen echo: %v", err)
+	}
+	defer echoLn.Close()
+	go func() {
+		for {
+			c, err := echoLn.Accept()
+			if err != nil {
+				return
+			}
+			go func(conn net.Conn) {
+				defer conn.Close()
+				_, _ = io.Copy(conn, conn)
+			}(c)
+		}
+	}()
+
+	// 2. Server running MyXray H2
+	srvHandler := server.NewServer("/test-h2-pad", psk, replays, nil, 1024)
+	srvHandler.SetDialTargetForTest(func(ctx context.Context, address string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, "tcp", address)
+	})
+
+	ts := httptest.NewUnstartedServer(srvHandler)
+	if err := http2.ConfigureServer(ts.Config, &http2.Server{}); err != nil {
+		t.Fatalf("ConfigureServer: %v", err)
+	}
+	ts.TLS = &tls.Config{NextProtos: []string{"h2"}}
+	ts.StartTLS()
+	defer ts.Close()
+
+	// 3. Client configured in H2 mode
+	c, err := New(Config{
+		Server:             ts.Listener.Addr().String(),
+		ServerName:         "example.com",
+		Path:               "/test-h2-pad",
+		PSK:                psk,
+		TCPTransport:       TCPTransportH2,
+		InsecureSkipVerify: true,
+	})
+	if err != nil {
+		t.Fatalf("New H2 client: %v", err)
+	}
+	defer c.Close()
+
+	// 4. Dial echo server via H2
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	conn, err := c.DialContext(ctx, "tcp", echoLn.Addr().String())
+	if err != nil {
+		t.Fatalf("DialContext H2: %v", err)
+	}
+	defer conn.Close()
+
+	// 5. Transfer 1MB of data and verify SHA-256
+	dataSize := 1024 * 1024 // 1 MB
+	testData := make([]byte, dataSize)
+	for i := range testData {
+		testData[i] = byte(i * 31)
+	}
+	sentHasher := sha256.New()
+	sentHasher.Write(testData)
+	expectedHash := sentHasher.Sum(nil)
+
+	recvHasher := sha256.New()
+	errCh := make(chan error, 1)
+
+	go func() {
+		_, err := io.CopyN(recvHasher, conn, int64(dataSize))
+		errCh <- err
+	}()
+
+	if _, err := conn.Write(testData); err != nil {
+		t.Fatalf("conn.Write: %v", err)
+	}
+
+	if err := <-errCh; err != nil {
+		t.Fatalf("read echo error: %v", err)
+	}
+
+	actualHash := recvHasher.Sum(nil)
+	if !bytes.Equal(actualHash, expectedHash) {
+		t.Fatalf("SHA-256 hash mismatch after 1MB H2 transfer with dynamic padding")
 	}
 }

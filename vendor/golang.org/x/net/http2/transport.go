@@ -1555,15 +1555,49 @@ func (cs *clientStream) writeRequestBody(req *http.Request) (err error) {
 		remain := buf[:n]
 		for len(remain) > 0 && err == nil {
 			var allowed int32
-			allowed, err = cs.awaitFlowControl(len(remain))
+			targetPad := 0
+			if cc.t.MaxDataPadding > 0 {
+				maxPad := cc.t.MaxDataPadding
+				if maxPad > 255 {
+					maxPad = 255
+				}
+				minPad := 8
+				if minPad > maxPad {
+					minPad = maxPad
+				}
+				targetPad = minPad + int(time.Now().UnixNano()%(int64(maxPad-minPad+1)))
+			}
+			reqBytes := len(remain)
+			if targetPad > 0 {
+				reqBytes += targetPad + 1
+			}
+			allowed, err = cs.awaitFlowControl(reqBytes)
 			if err != nil {
 				return err
 			}
 			cc.wmu.Lock()
-			data := remain[:allowed]
-			remain = remain[allowed:]
+			var data, pad []byte
+			if targetPad > 0 && allowed > int32(len(remain)+1) {
+				data = remain
+				remain = nil
+				actualPad := int(allowed) - len(data) - 1
+				if actualPad > 255 {
+					actualPad = 255
+				}
+				if actualPad > 0 {
+					pad = make([]byte, actualPad)
+				}
+			} else {
+				takeData := min(int(allowed), len(remain))
+				data = remain[:takeData]
+				remain = remain[takeData:]
+			}
 			sentEnd = sawEOF && len(remain) == 0 && !hasTrailers
-			err = cc.fr.WriteData(cs.ID, sentEnd, data)
+			if len(pad) > 0 {
+				err = cc.fr.WriteDataPadded(cs.ID, sentEnd, data, pad)
+			} else {
+				err = cc.fr.WriteData(cs.ID, sentEnd, data)
+			}
 			if err == nil {
 				// TODO(bradfitz): this flush is for latency, not bandwidth.
 				// Most requests won't need this. Make this opt-in or

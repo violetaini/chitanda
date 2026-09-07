@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
-	"io"
 	"net"
 	"time"
 
@@ -34,10 +33,10 @@ func (c *Client) dialRawStream(ctx context.Context, target string) (net.Conn, er
 	defer stopCancel()
 
 	now := time.Now()
-	clientHello, clientNonce, ts, err := rawstream.CreateClientHello(c.cfg.PSK, c.cfg.ServerID, now)
+	clientHello, clientNonce, ts, err := rawstream.CreatePolymorphicClientHello(c.cfg.PSK, c.cfg.ServerID, now)
 	if err != nil {
 		_ = rawConn.Close()
-		return nil, fmt.Errorf("create client hello: %w", err)
+		return nil, fmt.Errorf("create polymorphic client hello: %w", err)
 	}
 
 	// Derive 0-RTT key with serverID binding
@@ -61,9 +60,9 @@ func (c *Client) dialRawStream(ctx context.Context, target string) (net.Conn, er
 	}
 
 	// Assemble Flight 1 single TCP write burst:
-	// [48B ClientHello] [2B 0-RTT Wire Length] [Encrypted 0-RTT Chunk]
+	// [Polymorphic ClientHello (49-113B)] [2B 0-RTT Wire Length] [Encrypted 0-RTT Chunk]
 	wireLen := len(encrypted0RTT)
-	flight1 := make([]byte, 0, rawstream.ClientHelloSize+2+wireLen)
+	flight1 := make([]byte, 0, len(clientHello)+2+wireLen)
 	flight1 = append(flight1, clientHello...)
 	var lenBuf [2]byte
 	binary.BigEndian.PutUint16(lenBuf[:], uint16(wireLen))
@@ -75,14 +74,8 @@ func (c *Client) dialRawStream(ctx context.Context, target string) (net.Conn, er
 		return nil, fmt.Errorf("write flight 1: %w", err)
 	}
 
-	// Read ServerHello (40 bytes)
-	var serverHello [rawstream.ServerHelloSize]byte
-	if _, err := io.ReadFull(rawConn, serverHello[:]); err != nil {
-		_ = rawConn.Close()
-		return nil, fmt.Errorf("read server hello: %w", err)
-	}
-
-	serverNonce, err := rawstream.VerifyServerHello(c.cfg.PSK, c.cfg.ServerID, ts, clientNonce, serverHello[:])
+	// Read and verify polymorphic ServerHello (41-105 bytes)
+	serverNonce, err := rawstream.ReadAndVerifyPolymorphicServerHello(rawConn, c.cfg.PSK, c.cfg.ServerID, ts, clientNonce)
 	if err != nil {
 		_ = rawConn.Close()
 		return nil, fmt.Errorf("verify server hello: %w", err)

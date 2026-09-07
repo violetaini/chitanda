@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -74,6 +75,11 @@ func newH2TransportClient(server, serverName, rootURL, requestURL, path string, 
 	h2Transport.TLSClientConfig = tlsCfg
 	h2Transport.DialTLSContext = func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
 		return dialTLS(ctx, network, addr)
+	}
+
+	// Enable RFC 7540 dynamic padding to defeat website fingerprinting (WFP) traffic analysis
+	if f := reflect.ValueOf(h2Transport).Elem().FieldByName("MaxDataPadding"); f.IsValid() && f.CanSet() {
+		f.SetInt(64)
 	}
 
 	return &h2TransportClient{

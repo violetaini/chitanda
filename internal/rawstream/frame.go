@@ -27,6 +27,9 @@ const (
 	DefaultMinPadding = 32
 	DefaultMaxPadding = 256
 
+	MaxPolymorphicPadding = 64
+	DomainPolymorphicMask = "CHITANDA-RAWSTREAM-POLY-V1"
+
 	DomainClientHello = "CHITANDA-RAWSTREAM-CLIENT-V1"
 	DomainServerHello = "CHITANDA-RAWSTREAM-SERVER-V1"
 	Domain0RTTKey     = "CHITANDA-RAWSTREAM-0RTT-V1"
@@ -34,15 +37,16 @@ const (
 )
 
 var (
-	ErrInvalidRecordLen   = errors.New("rawstream: invalid handshake record length")
-	ErrTimestampExpired   = errors.New("rawstream: timestamp out of acceptable window")
-	ErrInvalidClientAuth  = errors.New("rawstream: invalid client authentication tag")
-	ErrInvalidServerAuth  = errors.New("rawstream: invalid server authentication tag")
-	ErrDecryptionFailed   = errors.New("rawstream: AEAD chunk decryption failed")
-	ErrChunkTooLarge      = errors.New("rawstream: AEAD chunk length exceeds maximum allowed size")
-	ErrInvalidOpenFrame   = errors.New("rawstream: invalid OPEN frame structure")
-	ErrInvalidAddress     = errors.New("rawstream: unsupported address type in OPEN frame")
-	ErrSequenceExhausted  = errors.New("rawstream: AEAD sequence number exhausted")
+	ErrInvalidRecordLen          = errors.New("rawstream: invalid handshake record length")
+	ErrTimestampExpired          = errors.New("rawstream: timestamp out of acceptable window")
+	ErrInvalidClientAuth         = errors.New("rawstream: invalid client authentication tag")
+	ErrInvalidServerAuth         = errors.New("rawstream: invalid server authentication tag")
+	ErrInvalidPolymorphicPadding = errors.New("rawstream: invalid polymorphic padding length")
+	ErrDecryptionFailed          = errors.New("rawstream: AEAD chunk decryption failed")
+	ErrChunkTooLarge             = errors.New("rawstream: AEAD chunk length exceeds maximum allowed size")
+	ErrInvalidOpenFrame          = errors.New("rawstream: invalid OPEN frame structure")
+	ErrInvalidAddress            = errors.New("rawstream: unsupported address type in OPEN frame")
+	ErrSequenceExhausted         = errors.New("rawstream: AEAD sequence number exhausted")
 )
 
 // CreateClientHello generates a 48-byte ClientHello record.
@@ -100,6 +104,168 @@ func VerifyClientHello(psk []byte, serverID string, record []byte, now time.Time
 	}
 	mac.Write(record[0:8])
 	mac.Write(clientNonce[:])
+	expectedFullTag := mac.Sum(nil)
+
+	if !hmac.Equal(clientTag, expectedFullTag[:16]) {
+		return clientNonce, 0, ErrInvalidClientAuth
+	}
+
+	return clientNonce, timestamp, nil
+}
+
+// DerivePolymorphicMasks derives two 1-byte obfuscation masks for ClientHello and ServerHello padding lengths.
+func DerivePolymorphicMasks(psk []byte, serverID string) (clientMask, serverMask byte) {
+	mac := hmac.New(sha256.New, psk)
+	mac.Write([]byte(DomainPolymorphicMask))
+	if len(serverID) > 0 {
+		mac.Write([]byte(serverID))
+	}
+	sum := mac.Sum(nil)
+	return sum[0], sum[1]
+}
+
+// CreatePolymorphicClientHello generates a variable-length (49-113 bytes) ClientHello record.
+// Wire structure:
+// [1B padLen ^ clientMask] [padLen random bytes] [48B Core ClientHello: 8B ts + 24B nonce + 16B tag]
+// The 16B HMAC tag covers DomainClientHello, serverID, ts, clientNonce, and padBytes.
+func CreatePolymorphicClientHello(psk []byte, serverID string, now time.Time) (record []byte, clientNonce [24]byte, timestamp uint64, err error) {
+	if len(psk) < 32 {
+		return nil, clientNonce, 0, errors.New("rawstream: PSK must be at least 32 bytes")
+	}
+	clientMask, _ := DerivePolymorphicMasks(psk, serverID)
+
+	var padLenBuf [1]byte
+	if _, err := io.ReadFull(rand.Reader, padLenBuf[:]); err != nil {
+		return nil, clientNonce, 0, fmt.Errorf("rawstream: rand padLen failed: %w", err)
+	}
+	padLen := int(padLenBuf[0] % (MaxPolymorphicPadding + 1)) // 0 to 64 bytes
+
+	padBytes := make([]byte, padLen)
+	if padLen > 0 {
+		if _, err := io.ReadFull(rand.Reader, padBytes); err != nil {
+			return nil, clientNonce, 0, fmt.Errorf("rawstream: rand padBytes failed: %w", err)
+		}
+	}
+
+	timestamp = uint64(now.Unix())
+	if _, err := io.ReadFull(rand.Reader, clientNonce[:]); err != nil {
+		return nil, clientNonce, 0, fmt.Errorf("rawstream: random generator failed: %w", err)
+	}
+
+	mac := hmac.New(sha256.New, psk)
+	mac.Write([]byte(DomainClientHello))
+	if len(serverID) > 0 {
+		mac.Write([]byte(serverID))
+	}
+	var tsBuf [8]byte
+	binary.BigEndian.PutUint64(tsBuf[:], timestamp)
+	mac.Write(tsBuf[:])
+	mac.Write(clientNonce[:])
+	mac.Write(padBytes)
+	fullTag := mac.Sum(nil)
+
+	record = make([]byte, 1+padLen+ClientHelloSize)
+	record[0] = byte(padLen) ^ clientMask
+	if padLen > 0 {
+		copy(record[1:1+padLen], padBytes)
+	}
+	offset := 1 + padLen
+	copy(record[offset:offset+8], tsBuf[:])
+	copy(record[offset+8:offset+32], clientNonce[:])
+	copy(record[offset+32:offset+48], fullTag[:16])
+
+	return record, clientNonce, timestamp, nil
+}
+
+// VerifyPolymorphicClientHello verifies an incoming variable-length ClientHello record from a byte buffer.
+func VerifyPolymorphicClientHello(psk []byte, serverID string, record []byte, now time.Time) (clientNonce [24]byte, timestamp uint64, err error) {
+	if len(psk) < 32 {
+		return clientNonce, 0, errors.New("rawstream: PSK must be at least 32 bytes")
+	}
+	if len(record) < 1+ClientHelloSize {
+		return clientNonce, 0, ErrInvalidRecordLen
+	}
+	clientMask, _ := DerivePolymorphicMasks(psk, serverID)
+	padLen := int(record[0] ^ clientMask)
+	if padLen > MaxPolymorphicPadding {
+		return clientNonce, 0, ErrInvalidPolymorphicPadding
+	}
+	if len(record) != 1+padLen+ClientHelloSize {
+		return clientNonce, 0, ErrInvalidRecordLen
+	}
+
+	padBytes := record[1 : 1+padLen]
+	core := record[1+padLen:]
+
+	timestamp = binary.BigEndian.Uint64(core[0:8])
+	copy(clientNonce[:], core[8:32])
+	clientTag := core[32:48]
+
+	nowSec := uint64(now.Unix())
+	diff := int64(nowSec) - int64(timestamp)
+	if diff < -int64(MaxTimestampSkew/time.Second) || diff > int64(MaxTimestampSkew/time.Second) {
+		return clientNonce, 0, ErrTimestampExpired
+	}
+
+	mac := hmac.New(sha256.New, psk)
+	mac.Write([]byte(DomainClientHello))
+	if len(serverID) > 0 {
+		mac.Write([]byte(serverID))
+	}
+	mac.Write(core[0:8])
+	mac.Write(clientNonce[:])
+	mac.Write(padBytes)
+	expectedFullTag := mac.Sum(nil)
+
+	if !hmac.Equal(clientTag, expectedFullTag[:16]) {
+		return clientNonce, 0, ErrInvalidClientAuth
+	}
+
+	return clientNonce, timestamp, nil
+}
+
+// ReadAndVerifyPolymorphicClientHello reads the leading masked padding length byte,
+// the dynamic padding, and the core 48-byte ClientHello from an io.Reader and verifies them.
+func ReadAndVerifyPolymorphicClientHello(r io.Reader, psk []byte, serverID string, now time.Time) (clientNonce [24]byte, timestamp uint64, err error) {
+	if len(psk) < 32 {
+		return clientNonce, 0, errors.New("rawstream: PSK must be at least 32 bytes")
+	}
+	var b0 [1]byte
+	if _, err := io.ReadFull(r, b0[:]); err != nil {
+		return clientNonce, 0, err
+	}
+	clientMask, _ := DerivePolymorphicMasks(psk, serverID)
+	padLen := int(b0[0] ^ clientMask)
+	if padLen > MaxPolymorphicPadding {
+		return clientNonce, 0, ErrInvalidPolymorphicPadding
+	}
+
+	remaining := make([]byte, padLen+ClientHelloSize)
+	if _, err := io.ReadFull(r, remaining); err != nil {
+		return clientNonce, 0, err
+	}
+
+	padBytes := remaining[:padLen]
+	core := remaining[padLen:]
+
+	timestamp = binary.BigEndian.Uint64(core[0:8])
+	copy(clientNonce[:], core[8:32])
+	clientTag := core[32:48]
+
+	nowSec := uint64(now.Unix())
+	diff := int64(nowSec) - int64(timestamp)
+	if diff < -int64(MaxTimestampSkew/time.Second) || diff > int64(MaxTimestampSkew/time.Second) {
+		return clientNonce, 0, ErrTimestampExpired
+	}
+
+	mac := hmac.New(sha256.New, psk)
+	mac.Write([]byte(DomainClientHello))
+	if len(serverID) > 0 {
+		mac.Write([]byte(serverID))
+	}
+	mac.Write(core[0:8])
+	mac.Write(clientNonce[:])
+	mac.Write(padBytes)
 	expectedFullTag := mac.Sum(nil)
 
 	if !hmac.Equal(clientTag, expectedFullTag[:16]) {
@@ -197,6 +363,146 @@ func VerifyServerHello(psk []byte, serverID string, timestamp uint64, clientNonc
 	mac.Write(tsBuf[:])
 	mac.Write(clientNonce[:])
 	mac.Write(serverNonce[:])
+	expectedFullTag := mac.Sum(nil)
+
+	if !hmac.Equal(serverTag, expectedFullTag[:16]) {
+		return serverNonce, ErrInvalidServerAuth
+	}
+
+	return serverNonce, nil
+}
+
+// CreatePolymorphicServerHello generates a variable-length (41-105 bytes) ServerHello response record.
+// Wire structure:
+// [1B padLen ^ serverMask] [padLen random bytes] [40B Core ServerHello: 24B nonce + 16B tag]
+func CreatePolymorphicServerHello(psk []byte, serverID string, timestamp uint64, clientNonce [24]byte) (record []byte, serverNonce [24]byte, err error) {
+	if len(psk) < 32 {
+		return nil, serverNonce, errors.New("rawstream: PSK must be at least 32 bytes")
+	}
+	_, serverMask := DerivePolymorphicMasks(psk, serverID)
+
+	var padLenBuf [1]byte
+	if _, err := io.ReadFull(rand.Reader, padLenBuf[:]); err != nil {
+		return nil, serverNonce, fmt.Errorf("rawstream: server rand padLen failed: %w", err)
+	}
+	padLen := int(padLenBuf[0] % (MaxPolymorphicPadding + 1)) // 0 to 64 bytes
+
+	padBytes := make([]byte, padLen)
+	if padLen > 0 {
+		if _, err := io.ReadFull(rand.Reader, padBytes); err != nil {
+			return nil, serverNonce, fmt.Errorf("rawstream: server rand padBytes failed: %w", err)
+		}
+	}
+
+	if _, err := io.ReadFull(rand.Reader, serverNonce[:]); err != nil {
+		return nil, serverNonce, fmt.Errorf("rawstream: server random failed: %w", err)
+	}
+
+	mac := hmac.New(sha256.New, psk)
+	mac.Write([]byte(DomainServerHello))
+	if len(serverID) > 0 {
+		mac.Write([]byte(serverID))
+	}
+	var tsBuf [8]byte
+	binary.BigEndian.PutUint64(tsBuf[:], timestamp)
+	mac.Write(tsBuf[:])
+	mac.Write(clientNonce[:])
+	mac.Write(serverNonce[:])
+	mac.Write(padBytes)
+	fullTag := mac.Sum(nil)
+
+	record = make([]byte, 1+padLen+ServerHelloSize)
+	record[0] = byte(padLen) ^ serverMask
+	if padLen > 0 {
+		copy(record[1:1+padLen], padBytes)
+	}
+	offset := 1 + padLen
+	copy(record[offset:offset+24], serverNonce[:])
+	copy(record[offset+24:offset+40], fullTag[:16])
+
+	return record, serverNonce, nil
+}
+
+// VerifyPolymorphicServerHello verifies the incoming variable-length ServerHello record from a byte buffer.
+func VerifyPolymorphicServerHello(psk []byte, serverID string, timestamp uint64, clientNonce [24]byte, record []byte) (serverNonce [24]byte, err error) {
+	if len(psk) < 32 {
+		return serverNonce, errors.New("rawstream: PSK must be at least 32 bytes")
+	}
+	if len(record) < 1+ServerHelloSize {
+		return serverNonce, ErrInvalidRecordLen
+	}
+	_, serverMask := DerivePolymorphicMasks(psk, serverID)
+	padLen := int(record[0] ^ serverMask)
+	if padLen > MaxPolymorphicPadding {
+		return serverNonce, ErrInvalidPolymorphicPadding
+	}
+	if len(record) != 1+padLen+ServerHelloSize {
+		return serverNonce, ErrInvalidRecordLen
+	}
+
+	padBytes := record[1 : 1+padLen]
+	core := record[1+padLen:]
+
+	copy(serverNonce[:], core[0:24])
+	serverTag := core[24:40]
+
+	mac := hmac.New(sha256.New, psk)
+	mac.Write([]byte(DomainServerHello))
+	if len(serverID) > 0 {
+		mac.Write([]byte(serverID))
+	}
+	var tsBuf [8]byte
+	binary.BigEndian.PutUint64(tsBuf[:], timestamp)
+	mac.Write(tsBuf[:])
+	mac.Write(clientNonce[:])
+	mac.Write(serverNonce[:])
+	mac.Write(padBytes)
+	expectedFullTag := mac.Sum(nil)
+
+	if !hmac.Equal(serverTag, expectedFullTag[:16]) {
+		return serverNonce, ErrInvalidServerAuth
+	}
+
+	return serverNonce, nil
+}
+
+// ReadAndVerifyPolymorphicServerHello reads and verifies the variable-length ServerHello record from an io.Reader.
+func ReadAndVerifyPolymorphicServerHello(r io.Reader, psk []byte, serverID string, timestamp uint64, clientNonce [24]byte) (serverNonce [24]byte, err error) {
+	if len(psk) < 32 {
+		return serverNonce, errors.New("rawstream: PSK must be at least 32 bytes")
+	}
+	var b0 [1]byte
+	if _, err := io.ReadFull(r, b0[:]); err != nil {
+		return serverNonce, err
+	}
+	_, serverMask := DerivePolymorphicMasks(psk, serverID)
+	padLen := int(b0[0] ^ serverMask)
+	if padLen > MaxPolymorphicPadding {
+		return serverNonce, ErrInvalidPolymorphicPadding
+	}
+
+	remaining := make([]byte, padLen+ServerHelloSize)
+	if _, err := io.ReadFull(r, remaining); err != nil {
+		return serverNonce, err
+	}
+
+	padBytes := remaining[:padLen]
+	core := remaining[padLen:]
+
+	copy(serverNonce[:], core[0:24])
+	serverTag := core[24:40]
+
+	mac := hmac.New(sha256.New, psk)
+	mac.Write([]byte(DomainServerHello))
+	if len(serverID) > 0 {
+		mac.Write([]byte(serverID))
+	}
+	var tsBuf [8]byte
+	binary.BigEndian.PutUint64(tsBuf[:], timestamp)
+	mac.Write(tsBuf[:])
+	mac.Write(clientNonce[:])
+	mac.Write(serverNonce[:])
+	mac.Write(padBytes)
 	expectedFullTag := mac.Sum(nil)
 
 	if !hmac.Equal(serverTag, expectedFullTag[:16]) {
