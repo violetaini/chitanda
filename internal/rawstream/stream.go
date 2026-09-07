@@ -6,17 +6,27 @@ import (
 	"io"
 	"net"
 	"sync"
+	"time"
+)
+
+const (
+	MinRecordPayloadLen = 1380              // MTU-aligned single-packet record for ultra-low TTFB
+	MidRecordPayloadLen = 8192              // Intermediate ramp-up chunk (8 KiB)
+	MaxBatchFlushLen    = 128 * 1024        // 128 KiB batch flush ceiling for maximum bulk throughput
+	Phase1Threshold     = 128 * 1024        // First 128 KiB uses MinRecordPayloadLen with immediate write
+	Phase2Threshold     = 1024 * 1024       // Next 128 KiB to 1 MiB uses MidRecordPayloadLen
+	IdleResetThreshold  = 1 * time.Second   // Idle silence after which record size drops back to Phase 1
 )
 
 // FramedWriter encrypts outgoing byte streams into length-prefixed AEAD chunks.
 type FramedWriter struct {
-	w      io.Writer
-	stream *AEADStream
-	mu     sync.Mutex
-	buf    []byte
+	w          io.Writer
+	stream     *AEADStream
+	mu         sync.Mutex
+	buf        []byte
+	burstBytes int64
+	lastWrite  time.Time
 }
-
-const MaxBatchFlushLen = 128 * 1024 // 128 KiB batch flush ceiling
 
 // NewFramedWriter wraps an io.Writer with an AEAD encryption stream.
 func NewFramedWriter(w io.Writer, stream *AEADStream) *FramedWriter {
@@ -31,13 +41,33 @@ func (fw *FramedWriter) Write(p []byte) (n int, err error) {
 	fw.mu.Lock()
 	defer fw.mu.Unlock()
 
+	now := time.Now()
+	if !fw.lastWrite.IsZero() && now.Sub(fw.lastWrite) > IdleResetThreshold {
+		fw.burstBytes = 0
+	}
+	fw.lastWrite = now
+
 	fw.buf = fw.buf[:0]
 	unflushedPlaintext := 0
 
 	for len(p) > 0 {
+		var maxChunk int
+		var flushThreshold int
+
+		if fw.burstBytes < Phase1Threshold {
+			maxChunk = MinRecordPayloadLen
+			flushThreshold = 0 // Immediate flush for sub-millisecond TTFB
+		} else if fw.burstBytes < Phase2Threshold {
+			maxChunk = MidRecordPayloadLen
+			flushThreshold = MidRecordPayloadLen
+		} else {
+			maxChunk = MaxChunkPayloadLen
+			flushThreshold = MaxBatchFlushLen
+		}
+
 		chunkSize := len(p)
-		if chunkSize > MaxChunkPayloadLen {
-			chunkSize = MaxChunkPayloadLen
+		if chunkSize > maxChunk {
+			chunkSize = maxChunk
 		}
 		chunk := p[:chunkSize]
 		p = p[chunkSize:]
@@ -47,9 +77,10 @@ func (fw *FramedWriter) Write(p []byte) (n int, err error) {
 			return n, err
 		}
 		unflushedPlaintext += chunkSize
+		fw.burstBytes += int64(chunkSize)
 
-		// Flush batch if accumulated buffer exceeds MaxBatchFlushLen
-		if len(fw.buf) >= MaxBatchFlushLen {
+		// Flush batch if accumulated buffer reaches flushThreshold (or immediate in Phase 1)
+		if flushThreshold == 0 || len(fw.buf) >= flushThreshold {
 			if _, err := fw.w.Write(fw.buf); err != nil {
 				return n, err
 			}

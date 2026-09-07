@@ -398,3 +398,177 @@ func TestFramedWriter_ShortWriteError(t *testing.T) {
 		t.Fatalf("expected 0 written plaintext on early failure, got %d", n)
 	}
 }
+
+type chunkRecordingWriter struct {
+	chunks []int
+	rawBuf []byte
+}
+
+func (crw *chunkRecordingWriter) Write(p []byte) (int, error) {
+	crw.rawBuf = append(crw.rawBuf, p...)
+	for len(crw.rawBuf) >= 2 {
+		wireLen := int(binary.BigEndian.Uint16(crw.rawBuf[:2]))
+		if len(crw.rawBuf) < 2+wireLen {
+			break
+		}
+		payloadLen := wireLen - 16
+		crw.chunks = append(crw.chunks, payloadLen)
+		crw.rawBuf = crw.rawBuf[2+wireLen:]
+	}
+	return len(p), nil
+}
+
+func TestFramedWriter_DynamicRecordSizing_Phases(t *testing.T) {
+	key := [16]byte{0xaa, 0xbb, 0xcc, 0xdd}
+	encStream, _ := NewAEADStream(key)
+
+	rec := &chunkRecordingWriter{}
+	fw := NewFramedWriter(rec, encStream)
+
+	// Phase 1: write 64 KiB (< Phase1Threshold = 128 KiB)
+	p1Data := make([]byte, 64*1024)
+	n, err := fw.Write(p1Data)
+	if err != nil || n != len(p1Data) {
+		t.Fatalf("Phase 1 write failed: n=%d, err=%v", n, err)
+	}
+	if len(rec.chunks) == 0 {
+		t.Fatal("expected chunks recorded in Phase 1")
+	}
+	for i, sz := range rec.chunks {
+		if sz > MinRecordPayloadLen {
+			t.Fatalf("Phase 1 chunk [%d] size %d exceeds MinRecordPayloadLen %d", i, sz, MinRecordPayloadLen)
+		}
+	}
+
+	// Phase 2: write 256 KiB (cumulative ~320 KiB, between 128 KiB and 1 MiB)
+	p1Count := len(rec.chunks)
+	p2Data := make([]byte, 256*1024)
+	n, err = fw.Write(p2Data)
+	if err != nil || n != len(p2Data) {
+		t.Fatalf("Phase 2 write failed: n=%d, err=%v", n, err)
+	}
+	p2Chunks := rec.chunks[p1Count:]
+	hasMidChunk := false
+	for i, sz := range p2Chunks {
+		if sz > MidRecordPayloadLen {
+			t.Fatalf("Phase 2 chunk [%d] size %d exceeds MidRecordPayloadLen %d", i, sz, MidRecordPayloadLen)
+		}
+		if sz > MinRecordPayloadLen {
+			hasMidChunk = true
+		}
+	}
+	if !hasMidChunk {
+		t.Fatal("expected at least one Phase 2 chunk larger than MinRecordPayloadLen")
+	}
+
+	// Phase 3: write 1.5 MiB (cumulative > Phase2Threshold = 1 MiB)
+	p2TotalCount := len(rec.chunks)
+	p3Data := make([]byte, 1536*1024)
+	n, err = fw.Write(p3Data)
+	if err != nil || n != len(p3Data) {
+		t.Fatalf("Phase 3 write failed: n=%d, err=%v", n, err)
+	}
+	p3Chunks := rec.chunks[p2TotalCount:]
+	hasMaxChunk := false
+	for _, sz := range p3Chunks {
+		if sz == MaxChunkPayloadLen {
+			hasMaxChunk = true
+		}
+	}
+	if !hasMaxChunk {
+		t.Fatalf("expected Phase 3 to scale up to MaxChunkPayloadLen %d", MaxChunkPayloadLen)
+	}
+}
+
+func TestFramedWriter_DynamicRecordSizing_IdleReset(t *testing.T) {
+	key := [16]byte{0x11, 0x22, 0x33, 0x44}
+	encStream, _ := NewAEADStream(key)
+
+	rec := &chunkRecordingWriter{}
+	fw := NewFramedWriter(rec, encStream)
+
+	// Ramp up past 1 MiB into Phase 3
+	bigData := make([]byte, 1200*1024)
+	if _, err := fw.Write(bigData); err != nil {
+		t.Fatalf("ramp-up write failed: %v", err)
+	}
+
+	// Wait beyond IdleResetThreshold (1s + 100ms margin)
+	time.Sleep(1100 * time.Millisecond)
+
+	recCountBefore := len(rec.chunks)
+	subsequentData := make([]byte, 10*1024)
+	if _, err := fw.Write(subsequentData); err != nil {
+		t.Fatalf("post-idle write failed: %v", err)
+	}
+
+	postIdleChunks := rec.chunks[recCountBefore:]
+	if len(postIdleChunks) == 0 {
+		t.Fatal("expected chunks recorded after idle write")
+	}
+
+	// The first chunk after idle reset must be back in Phase 1 (<= MinRecordPayloadLen)
+	if postIdleChunks[0] > MinRecordPayloadLen {
+		t.Fatalf("expected post-idle chunk to reset to <= %d, got %d", MinRecordPayloadLen, postIdleChunks[0])
+	}
+}
+
+func TestFramedWriter_DynamicRecordSizing_EndToEndIntegrity(t *testing.T) {
+	key := [16]byte{0xde, 0xad, 0xbe, 0xef}
+	encStream, _ := NewAEADStream(key)
+	decStream, _ := NewAEADStream(key)
+
+	pr, pw := io.Pipe()
+	fw := NewFramedWriter(pw, encStream)
+	fr := NewFramedReader(pr, decStream)
+
+	// Transfer across all 3 phases: 1.5 MiB of random data
+	src := make([]byte, 1536*1024)
+	for i := range src {
+		src[i] = byte((i * 31) ^ (i >> 3))
+	}
+
+	errChan := make(chan error, 1)
+	dst := make([]byte, len(src))
+
+	go func() {
+		_, err := io.ReadFull(fr, dst)
+		errChan <- err
+	}()
+
+	// Write in irregular chunks (100B, 50KB, 500KB, rest)
+	sizes := []int{100, 50 * 1024, 500 * 1024, len(src) - (100 + 50*1024 + 500*1024)}
+	offset := 0
+	for _, sz := range sizes {
+		if _, err := fw.Write(src[offset : offset+sz]); err != nil {
+			t.Fatalf("write error at offset %d: %v", offset, err)
+		}
+		offset += sz
+	}
+	_ = pw.Close()
+
+	if err := <-errChan; err != nil {
+		t.Fatalf("read error: %v", err)
+	}
+
+	if !bytes.Equal(src, dst) {
+		t.Fatal("decrypted payload does not match original source across dynamic record scaling")
+	}
+}
+
+func BenchmarkFramedWriter_DynamicSizing_Bulk(b *testing.B) {
+	key := [16]byte{0x01, 0x02, 0x03, 0x04}
+	encStream, _ := NewAEADStream(key)
+	fw := NewFramedWriter(io.Discard, encStream)
+
+	payload := make([]byte, 64*1024)
+	b.SetBytes(int64(len(payload)))
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		if _, err := fw.Write(payload); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+

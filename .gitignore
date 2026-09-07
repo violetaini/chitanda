@@ -4,3 +4,10 @@
 /run/
 *.exe
 *.log
+scan_results*
+remote_*.py
+apply_inbounds.py
+inspect_db.py
+test_tls.py
+proto_scan.py
+
