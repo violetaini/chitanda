@@ -23,7 +23,13 @@ type InboundService struct {
 func (s *InboundService) GetInbounds(userId int) ([]*model.Inbound, error) {
 	db := database.GetDB()
 	var inbounds []*model.Inbound
-	err := db.Model(model.Inbound{}).Preload("ClientStats").Where("user_id = ?", userId).Find(&inbounds).Error
+	query := db.Model(model.Inbound{}).Preload("ClientStats")
+	if userId == 1 {
+		query = query.Where("user_id = ? or user_id = 0", userId)
+	} else {
+		query = query.Where("user_id = ?", userId)
+	}
+	err := query.Find(&inbounds).Error
 	if err != nil && err != gorm.ErrRecordNotFound {
 		return nil, err
 	}

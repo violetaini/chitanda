@@ -8,7 +8,8 @@ const Protocols = {
     Shadowsocks: "shadowsocks",
     Socks: "socks",
     HTTP: "http",
-    Wireguard: "wireguard"
+    Wireguard: "wireguard",
+    Chitanda: "chitanda"
 };
 
 const SSMethods = {
@@ -638,7 +639,7 @@ class Outbound extends CommonClass {
     }
 
     static fromLink(link) {
-        data = link.split('://');
+        let data = link.split('://');
         if(data.length !=2) return null;
         switch(data[0].toLowerCase()){
             case Protocols.VMess:
@@ -647,8 +648,41 @@ class Outbound extends CommonClass {
             case Protocols.Trojan:
             case 'ss':
                 return this.fromParamLink(link);
+            case Protocols.Chitanda:
+                return this.fromChitandaLink(link);
             default:
                 return null;
+        }
+    }
+
+    static fromChitandaLink(link) {
+        try {
+            const url = new URL(link);
+            const psk = decodeURIComponent(url.username || '');
+            const server = url.hostname + (url.port ? ':' + url.port : '');
+            const transport = url.searchParams.get('transport') || 'h2';
+            const path = url.searchParams.get('path') || '/api/v1/sync';
+            const serverName = url.searchParams.get('sni') || url.searchParams.get('server_name') || '';
+            const serverId = url.searchParams.get('server-id') || url.searchParams.get('server_id') || '';
+            const allowInsecure = url.searchParams.get('allow_insecure') === '1' || url.searchParams.get('allowInsecure') === 'true';
+            let remark = decodeURIComponent(url.hash ? url.hash.substring(1) : '');
+            if (!remark) {
+                remark = 'out-chitanda-' + (url.port || '443');
+            }
+            const settings = new Outbound.ChitandaSettings(
+                server,
+                serverName,
+                serverId,
+                psk,
+                path,
+                transport,
+                4,
+                allowInsecure
+            );
+            return new Outbound(remark, Protocols.Chitanda, settings);
+        } catch (e) {
+            console.error('Failed to parse chitanda link', e);
+            return null;
         }
     }
 
@@ -801,6 +835,7 @@ Outbound.Settings = class extends CommonClass {
             case Protocols.Socks: return new Outbound.SocksSettings();
             case Protocols.HTTP: return new Outbound.HttpSettings();
             case Protocols.Wireguard: return new Outbound.WireguardSettings();
+            case Protocols.Chitanda: return new Outbound.ChitandaSettings();
             default: return null;
         }
     }
@@ -817,6 +852,7 @@ Outbound.Settings = class extends CommonClass {
             case Protocols.Socks: return Outbound.SocksSettings.fromJson(json);
             case Protocols.HTTP: return Outbound.HttpSettings.fromJson(json);
             case Protocols.Wireguard: return Outbound.WireguardSettings.fromJson(json);
+            case Protocols.Chitanda: return Outbound.ChitandaSettings.fromJson(json);
             default: return null;
         }
     }
@@ -1162,3 +1198,43 @@ Outbound.WireguardSettings.Peer = class extends CommonClass {
         };
     }
 };
+
+Outbound.ChitandaSettings = class extends CommonClass {
+    constructor(server='', server_name='', server_id='', psk='', path='/api/v1/sync', transport='h2', pool_size=4, allow_insecure=false) {
+        super();
+        this.server = server;
+        this.server_name = server_name;
+        this.server_id = server_id;
+        this.psk = psk || (typeof RandomUtil !== 'undefined' ? RandomUtil.randomSeq(32) : '');
+        this.path = path;
+        this.transport = transport;
+        this.pool_size = pool_size;
+        this.allow_insecure = allow_insecure;
+    }
+
+    static fromJson(json={}) {
+        return new Outbound.ChitandaSettings(
+            json.server ?? '',
+            json.server_name ?? json.serverName ?? '',
+            json.server_id ?? json.serverId ?? '',
+            json.psk ?? '',
+            json.path ?? '/api/v1/sync',
+            json.transport ?? 'h2',
+            json.pool_size ?? json.poolSize ?? 4,
+            json.allow_insecure ?? json.allowInsecure ?? false
+        );
+    }
+
+    toJson() {
+        return {
+            server: this.server,
+            server_name: (this.transport !== 'stream' && this.transport !== 'h1') ? (this.server_name || undefined) : undefined,
+            server_id: this.server_id ? this.server_id : undefined,
+            psk: this.psk,
+            path: this.transport === 'stream' ? undefined : (this.path || undefined),
+            transport: this.transport,
+            pool_size: (this.transport === 'stream' || this.transport === 'h1') ? undefined : (this.pool_size ? Number(this.pool_size) : undefined),
+            allow_insecure: (this.transport !== 'stream' && this.transport !== 'h1') ? (this.allow_insecure ? true : undefined) : undefined,
+        };
+    }
+};

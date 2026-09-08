@@ -483,6 +483,9 @@
                       <a-tag style="margin:0;" v-if="outbound.streamSettings.security=='tls'" color="green">tls</a-tag>
                       <a-tag style="margin:0;" v-if="outbound.streamSettings.security=='reality'" color="green">reality</a-tag>
                     </template>
+                    <template v-if="outbound.protocol === Protocols.Chitanda">
+                      <a-tag style="margin:0;" color="blue">[[ outbound.settings?.transport || 'h2' ]]</a-tag>
+                    </template>
                   </template>
                   <template slot="traffic" slot-scope="text, outbound, index">
                     <a-tag color="green">[[ findOutboundTraffic(outbound) ]]</a-tag>
@@ -1102,8 +1105,10 @@
                         break;
                     case Protocols.DNS:
                         return [o.settings?.address + ':' + o.settings?.port];
-                        case Protocols.Wireguard:
+                    case Protocols.Wireguard:
                         return o.settings.peers.map(peer => peer.endpoint);
+                    case Protocols.Chitanda:
+                        return [o.settings?.server];
                     default:
                         return null;
                 }
