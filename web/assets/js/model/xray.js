@@ -1209,7 +1209,7 @@ class Inbound extends XrayCommonClass {
         if (protocol === Protocols.TROJAN) {
             this.tls = false;
         } else if (protocol === Protocols.CHITANDA) {
-            if (this.settings && this.settings.transport !== 'h1') {
+            if (this.settings && this.settings.transport !== 'h1' && this.settings.transport !== 'stream') {
                 this.stream.security = 'tls';
             } else {
                 this.stream.security = 'none';
@@ -1362,7 +1362,7 @@ class Inbound extends XrayCommonClass {
 
     canEnableTls() {
         if (this.protocol === Protocols.CHITANDA) {
-            return this.settings && this.settings.transport !== 'h1';
+            return this.settings && this.settings.transport !== 'h1' && this.settings.transport !== 'stream';
         }
         if(![Protocols.VMESS, Protocols.VLESS, Protocols.TROJAN, Protocols.SHADOWSOCKS].includes(this.protocol)) return false;
         return ["tcp", "ws", "http", "quic", "grpc", "httpupgrade" , "splithttp"].includes(this.network);
@@ -1898,6 +1898,13 @@ class Inbound extends XrayCommonClass {
                 let links = [];
                 this.settings.peers.forEach((p,index) => {
                     links.push(this.getWireguardLink(addr,this.port,remark + remarkModel.charAt(0) + (index+1),index));
+                });
+                return links.join('\r\n');
+            }
+            if(this.protocol == Protocols.CHITANDA) {
+                let links = [];
+                this.genAllLinks(remark, remarkModel).forEach(l => {
+                    links.push(l.link);
                 });
                 return links.join('\r\n');
             }
