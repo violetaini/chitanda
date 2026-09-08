@@ -2055,9 +2055,10 @@ Inbound.VmessSettings = class extends Inbound.Settings {
     }
 
     static fromJson(json={}) {
+        let clients = (json.clients && Array.isArray(json.clients)) ? json.clients.map(client => Inbound.VmessSettings.Vmess.fromJson(client)) : [];
         return new Inbound.VmessSettings(
             Protocols.VMESS,
-            json.clients.map(client => Inbound.VmessSettings.Vmess.fromJson(client)),
+            clients,
         );
     }
 
@@ -2142,9 +2143,10 @@ Inbound.VLESSSettings = class extends Inbound.Settings {
 
     // decryption should be set to static value
     static fromJson(json={}) {
+        let clients = (json.clients && Array.isArray(json.clients)) ? json.clients.map(client => Inbound.VLESSSettings.VLESS.fromJson(client)) : [];
         return new Inbound.VLESSSettings(
             Protocols.VLESS,
-            json.clients.map(client => Inbound.VLESSSettings.VLESS.fromJson(client)),
+            clients,
             json.decryption || 'none',
             Inbound.VLESSSettings.Fallback.fromJson(json.fallbacks),);
     }
@@ -2270,9 +2272,10 @@ Inbound.TrojanSettings = class extends Inbound.Settings {
     }
 
     static fromJson(json={}) {
+        let clients = (json.clients && Array.isArray(json.clients)) ? json.clients.map(client => Inbound.TrojanSettings.Trojan.fromJson(client)) : [];
         return new Inbound.TrojanSettings(
             Protocols.TROJAN,
-            json.clients.map(client => Inbound.TrojanSettings.Trojan.fromJson(client)),
+            clients,
             Inbound.TrojanSettings.Fallback.fromJson(json.fallbacks),);
         }
 
@@ -2409,12 +2412,13 @@ Inbound.ShadowsocksSettings = class extends Inbound.Settings {
     }
 
     static fromJson(json={}) {
+        let clients = (json.clients && Array.isArray(json.clients)) ? json.clients.map(client => Inbound.ShadowsocksSettings.Shadowsocks.fromJson(client)) : [];
         return new Inbound.ShadowsocksSettings(
             Protocols.SHADOWSOCKS,
             json.method,
             json.password,
             json.network,
-            json.clients.map(client => Inbound.ShadowsocksSettings.Shadowsocks.fromJson(client)),
+            clients,
         );
     }
 
@@ -2601,9 +2605,10 @@ Inbound.HttpSettings = class extends Inbound.Settings {
     }
 
     static fromJson(json={}) {
+        let accounts = (json.accounts && Array.isArray(json.accounts)) ? json.accounts.map(account => Inbound.HttpSettings.HttpAccount.fromJson(account)) : [];
         return new Inbound.HttpSettings(
             Protocols.HTTP,
-            json.accounts.map(account => Inbound.HttpSettings.HttpAccount.fromJson(account)),
+            accounts,
         );
     }
 
@@ -2645,11 +2650,12 @@ Inbound.WireguardSettings = class extends XrayCommonClass {
     }
 
     static fromJson(json={}){
+        let peers = (json.peers && Array.isArray(json.peers)) ? json.peers.map(peer => Inbound.WireguardSettings.Peer.fromJson(peer)) : [];
         return new Inbound.WireguardSettings(
             Protocols.WIREGUARD,
             json.mtu,
             json.secretKey,
-            json.peers.map(peer => Inbound.WireguardSettings.Peer.fromJson(peer)),
+            peers,
             json.kernelMode,
         );
     }
