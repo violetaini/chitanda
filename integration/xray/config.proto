@@ -24,4 +24,6 @@ message OutboundConfig {
   string transport = 5;
   int32 pool_size = 6;
   string server_id = 7;
+  bool allow_insecure = 8;
 }
+

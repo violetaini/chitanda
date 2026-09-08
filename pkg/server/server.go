@@ -149,6 +149,19 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	select {
 	case <-downloadDone:
+		// Upstream finished sending download data.
+		// Allow upload to complete or wait for request context / short drain.
+		select {
+		case <-uploadDone:
+		case <-r.Context().Done():
+		case <-time.After(5 * time.Second):
+		}
+	case <-uploadDone:
+		// Client finished uploading; wait for upstream download to finish.
+		select {
+		case <-downloadDone:
+		case <-r.Context().Done():
+		}
 	case <-r.Context().Done():
 	}
 	_ = upstream.Close()

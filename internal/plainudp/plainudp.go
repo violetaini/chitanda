@@ -26,8 +26,8 @@ const (
 )
 
 const (
-	// Header: Timestamp (8B) + Sequence (8B) + Nonce (24B) = 40B
-	HeaderSize       = 40
+	// Header: Nonce (24B random)
+	HeaderSize       = 24
 	MaxPacketSize    = 64 << 10 // 64KB max datagram buffer
 	MaxTimestampSkew = 30 * time.Second
 
@@ -96,14 +96,21 @@ func NewCodec(psk []byte) (*Codec, error) {
 }
 
 // EncodePacket encrypts sessionID, target address and payload into a plain-udp datagram.
+// Wire format: [24B Random Nonce] [AEAD Ciphertext + 16B Poly1305 Tag]
+// Plaintext structure: [8B Timestamp] [8B Monotonic Sequence] [8B SessionID] [TargetAddress] [Payload]
 func (c *Codec) EncodePacket(dst []byte, dir Direction, sessionID uint64, targetAddr string, payload []byte, now time.Time) ([]byte, error) {
 	bufPtr := packetPool.Get().(*[]byte)
 	defer packetPool.Put(bufPtr)
 
+	seq := c.sequence.Add(1)
+	ts := uint64(now.Unix())
+
 	plaintext := (*bufPtr)[:0]
-	var sBuf [8]byte
-	binary.BigEndian.PutUint64(sBuf[:], sessionID)
-	plaintext = append(plaintext, sBuf[:]...)
+	var hdrBuf [24]byte
+	binary.BigEndian.PutUint64(hdrBuf[0:8], ts)
+	binary.BigEndian.PutUint64(hdrBuf[8:16], seq)
+	binary.BigEndian.PutUint64(hdrBuf[16:24], sessionID)
+	plaintext = append(plaintext, hdrBuf[:]...)
 
 	var err error
 	plaintext, err = appendTargetAddress(plaintext, targetAddr)
@@ -112,24 +119,12 @@ func (c *Codec) EncodePacket(dst []byte, dir Direction, sessionID uint64, target
 	}
 	plaintext = append(plaintext, payload...)
 
-	seq := c.sequence.Add(1)
-
-	// XChaCha20-Poly1305 takes 24-byte Nonce:
-	// [8B SessionID] [8B Monotonic Sequence] [8B Crypto Random Suffix]
-	// Eliminates cross-session and cross-restart collision completely.
 	var nonce [24]byte
-	binary.BigEndian.PutUint64(nonce[0:8], sessionID)
-	binary.BigEndian.PutUint64(nonce[8:16], seq)
-	if _, err := io.ReadFull(rand.Reader, nonce[16:24]); err != nil {
+	if _, err := io.ReadFull(rand.Reader, nonce[:]); err != nil {
 		return nil, fmt.Errorf("plainudp: random nonce failed: %w", err)
 	}
 
-	ts := uint64(now.Unix())
-	// AD: [Timestamp (8B)] [Sequence (8B)] [Direction (1B)]
-	var ad [17]byte
-	binary.BigEndian.PutUint64(ad[0:8], ts)
-	binary.BigEndian.PutUint64(ad[8:16], seq)
-	ad[16] = byte(dir)
+	ad := [1]byte{byte(dir)}
 
 	var aead cipher.AEAD
 	if dir == DirClientToServer {
@@ -140,12 +135,10 @@ func (c *Codec) EncodePacket(dst []byte, dir Direction, sessionID uint64, target
 		return nil, ErrInvalidDirection
 	}
 
-	// Wire: [Timestamp (8B)] [Sequence (8B)] [Nonce (24B)] [Ciphertext + Tag (16B)]
 	if dst == nil {
 		dst = make([]byte, 0, HeaderSize+len(plaintext)+aead.Overhead())
 	}
-	dst = append(dst, ad[0:16]...) // Wire header has Timestamp + Sequence
-	dst = append(dst, nonce[:]...)  // 24B Nonce
+	dst = append(dst, nonce[:]...)
 	dst = aead.Seal(dst, nonce[:], plaintext, ad[:])
 
 	return dst, nil
@@ -153,24 +146,15 @@ func (c *Codec) EncodePacket(dst []byte, dir Direction, sessionID uint64, target
 
 // DecodePacket decrypts a plain-udp datagram, authenticates via AEAD, and extracts sessionID, target address and payload.
 func (c *Codec) DecodePacket(packet []byte, expectedDir Direction, now time.Time) (sessionID uint64, targetAddr string, payload []byte, timestamp uint64, seq uint64, err error) {
-	if len(packet) < HeaderSize+8+1+4+2+16 {
+	// Minimum length: 24B Nonce + (24B hdr + 1B type + 4B ipv4 + 2B port + 16B tag) = 71 bytes
+	if len(packet) < HeaderSize+24+1+4+2+16 {
 		return 0, "", nil, 0, 0, ErrPacketTooShort
 	}
 
-	timestamp = binary.BigEndian.Uint64(packet[0:8])
-	nowSec := uint64(now.Unix())
-	diff := int64(nowSec) - int64(timestamp)
-	if diff < -int64(MaxTimestampSkew/time.Second) || diff > int64(MaxTimestampSkew/time.Second) {
-		return 0, "", nil, timestamp, 0, ErrTimestampExpired
-	}
+	nonce := packet[:HeaderSize]
+	ciphertextWithTag := packet[HeaderSize:]
 
-	seq = binary.BigEndian.Uint64(packet[8:16])
-	nonce := packet[16:40] // 24B Nonce
-	ciphertextWithTag := packet[40:]
-
-	var ad [17]byte
-	copy(ad[0:16], packet[0:16])
-	ad[16] = byte(expectedDir)
+	ad := [1]byte{byte(expectedDir)}
 
 	var aead cipher.AEAD
 	if expectedDir == DirClientToServer {
@@ -178,26 +162,41 @@ func (c *Codec) DecodePacket(packet []byte, expectedDir Direction, now time.Time
 	} else if expectedDir == DirServerToClient {
 		aead = c.s2cAEAD
 	} else {
-		return 0, "", nil, timestamp, seq, ErrInvalidDirection
+		return 0, "", nil, 0, 0, ErrInvalidDirection
 	}
 
-	plaintext, err := aead.Open(nil, nonce, ciphertextWithTag, ad[:])
+	bufPtr := packetPool.Get().(*[]byte)
+	defer packetPool.Put(bufPtr)
+
+	plaintext, err := aead.Open((*bufPtr)[:0], nonce, ciphertextWithTag, ad[:])
 	if err != nil {
-		return 0, "", nil, timestamp, seq, ErrDecryptionFailed
+		return 0, "", nil, 0, 0, ErrDecryptionFailed
 	}
 
-	if len(plaintext) < 8 {
-		return 0, "", nil, timestamp, seq, ErrPacketTooShort
+	if len(plaintext) < 24 {
+		return 0, "", nil, 0, 0, ErrPacketTooShort
 	}
 
-	sessionID = binary.BigEndian.Uint64(plaintext[0:8])
+	timestamp = binary.BigEndian.Uint64(plaintext[0:8])
+	nowSec := uint64(now.Unix())
+	diff := int64(nowSec) - int64(timestamp)
+	if diff < -int64(MaxTimestampSkew/time.Second) || diff > int64(MaxTimestampSkew/time.Second) {
+		return 0, "", nil, timestamp, 0, ErrTimestampExpired
+	}
 
-	targetAddr, payload, err = decodeTargetAddress(plaintext[8:])
+	seq = binary.BigEndian.Uint64(plaintext[8:16])
+	sessionID = binary.BigEndian.Uint64(plaintext[16:24])
+
+	targetAddr, rawPayload, err := decodeTargetAddress(plaintext[24:])
 	if err != nil {
 		return sessionID, "", nil, timestamp, seq, err
 	}
 
-	return sessionID, targetAddr, payload, timestamp, seq, nil
+	// Make an owned copy of payload since bufPtr will be returned to pool
+	payloadCopy := make([]byte, len(rawPayload))
+	copy(payloadCopy, rawPayload)
+
+	return sessionID, targetAddr, payloadCopy, timestamp, seq, nil
 }
 
 func appendTargetAddress(buf []byte, address string) ([]byte, error) {

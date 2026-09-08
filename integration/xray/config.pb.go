@@ -122,6 +122,7 @@ type OutboundConfig struct {
 	Transport     string                 `protobuf:"bytes,5,opt,name=transport,proto3" json:"transport,omitempty"`
 	PoolSize      int32                  `protobuf:"varint,6,opt,name=pool_size,json=poolSize,proto3" json:"pool_size,omitempty"`
 	ServerId      string                 `protobuf:"bytes,7,opt,name=server_id,json=serverId,proto3" json:"server_id,omitempty"`
+	AllowInsecure bool                   `protobuf:"varint,8,opt,name=allow_insecure,json=allowInsecure,proto3" json:"allow_insecure,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -205,27 +206,18 @@ func (x *OutboundConfig) GetServerId() string {
 	return ""
 }
 
+func (x *OutboundConfig) GetAllowInsecure() bool {
+	if x != nil {
+		return x.AllowInsecure
+	}
+	return false
+}
+
 var File_config_proto protoreflect.FileDescriptor
 
 const file_config_proto_rawDesc = "" +
-	"\n" +
-	"\fconfig.proto\x12\x13xray.proxy.chitanda\"\x8e\x01\n" +
-	"\rInboundConfig\x12\x10\n" +
-	"\x03psk\x18\x01 \x01(\tR\x03psk\x12\x12\n" +
-	"\x04path\x18\x02 \x01(\tR\x04path\x12\x1a\n" +
-	"\bfallback\x18\x03 \x01(\tR\bfallback\x12\x1d\n" +
-	"\n" +
-	"strict_sni\x18\x04 \x01(\tR\tstrictSni\x12\x1c\n" +
-	"\ttransport\x18\x05 \x01(\tR\ttransport\"\xaa\x01\n" +
-	"\x0eOutboundConfig\x12\x16\n" +
-	"\x06server\x18\x01 \x01(\tR\x06server\x12\x1f\n" +
-	"\vserver_name\x18\x02 \x01(\tR\n" +
-	"serverName\x12\x10\n" +
-	"\x03psk\x18\x03 \x01(\tR\x03psk\x12\x12\n" +
-	"\x04path\x18\x04 \x01(\tR\x04path\x12\x1c\n" +
-	"\ttransport\x18\x05 \x01(\tR\ttransport\x12\x1b\n" +
-	"\tpool_size\x18\x06 \x01(\x05R\bpoolSizeB[\n" +
-	"\x17com.xray.proxy.chitandaP\x01Z(github.com/xtls/xray-core/proxy/chitanda\xaa\x02\x13Xray.Proxy.Chitandab\x06proto3"
+	"\n\fconfig.proto\x12\x13xray.proxy.chitanda\"\xcc\x01\n\rInboundConfig\x12\x10\n\x03psk\x18\x01 \x01(\tR\x03psk\x12\x12\n\x04path\x18\x02 \x01(\tR\x04path\x12\x1a\n\bfallback\x18\x03 \x01(\tR\bfallback\x12\x1d\n\nstrict_sni\x18\x04 \x01(\tR\tstrictSni\x12\x1c\n\ttransport\x18\x05 \x01(\tR\ttransport\x12\x1b\n\tserver_id\x18\x06 \x01(\tR\bserverId\x12\x1f\n\vreplay_file\x18\a \x01(\tR\nreplayFile\"\xee\x01\n\x0eOutboundConfig\x12\x16\n\x06server\x18\x01 \x01(\tR\x06server\x12\x1f\n\vserver_name\x18\x02 \x01(\tR\nserverName\x12\x10\n\x03psk\x18\x03 \x01(\tR\x03psk\x12\x12\n\x04path\x18\x04 \x01(\tR\x04path\x12\x1c\n\ttransport\x18\x05 \x01(\tR\ttransport\x12\x1b\n\tpool_size\x18\x06 \x01(\x05R\bpoolSize\x12\x1b\n\tserver_id\x18\a \x01(\tR\bserverId\x12%\n\x0eallow_insecure\x18\b \x01(\bR\rallowInsecureB[\n\x17com.xray.proxy.chitandaP\x01Z(github.com/xtls/xray-core/proxy/chitanda\xaa\x02\x13Xray.Proxy.Chitandab\x06proto3"
+
 
 var (
 	file_config_proto_rawDescOnce sync.Once

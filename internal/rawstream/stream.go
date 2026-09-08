@@ -3,6 +3,7 @@ package rawstream
 import (
 	"bufio"
 	"encoding/binary"
+	"errors"
 	"io"
 	"net"
 	"sync"
@@ -112,6 +113,7 @@ type FramedReader struct {
 	decBuf     []byte
 	decOff     int
 	eofReached bool
+	fatalErr   error
 }
 
 // NewFramedReader wraps an io.Reader with an AEAD decryption stream.
@@ -133,22 +135,43 @@ func (fr *FramedReader) Read(p []byte) (int, error) {
 	fr.mu.Lock()
 	defer fr.mu.Unlock()
 
-	if fr.eofReached && fr.decOff >= len(fr.decBuf) {
+	var totalRead int
+
+	// 1. Consume any remaining decrypted data from previous chunk
+	if fr.decOff < len(fr.decBuf) {
+		n := copy(p, fr.decBuf[fr.decOff:])
+		fr.decOff += n
+		totalRead = n
+		p = p[n:]
+		if len(p) == 0 {
+			return totalRead, nil
+		}
+	}
+
+	if fr.fatalErr != nil {
+		err := fr.fatalErr
+		fr.fatalErr = nil
+		if totalRead > 0 {
+			return totalRead, nil
+		}
+		return 0, err
+	}
+
+	if fr.eofReached {
+		if totalRead > 0 {
+			return totalRead, nil
+		}
 		return 0, io.EOF
 	}
 
-	var totalRead int
-
 	for len(p) > 0 {
-		// 1. Consume any remaining decrypted data from previous chunk
-		if fr.decOff < len(fr.decBuf) {
-			n := copy(p, fr.decBuf[fr.decOff:])
-			fr.decOff += n
-			totalRead += n
-			p = p[n:]
-			if len(p) == 0 {
+		if fr.fatalErr != nil {
+			if totalRead > 0 {
 				return totalRead, nil
 			}
+			err := fr.fatalErr
+			fr.fatalErr = nil
+			return 0, err
 		}
 
 		if fr.eofReached {
@@ -166,11 +189,28 @@ func (fr *FramedReader) Read(p []byte) (int, error) {
 
 		// Read 2-byte chunk wire length
 		if _, err := io.ReadFull(fr.r, fr.hdrBuf[:]); err != nil {
-			fr.eofReached = true
+			if errors.Is(err, io.EOF) {
+				fr.eofReached = true
+			} else if errors.Is(err, io.ErrUnexpectedEOF) {
+				fr.fatalErr = io.ErrUnexpectedEOF
+			} else {
+				if ne, ok := err.(net.Error); ok && ne.Timeout() {
+					if totalRead > 0 {
+						return totalRead, nil
+					}
+					return 0, err
+				}
+				fr.fatalErr = err
+			}
 			if totalRead > 0 {
 				return totalRead, nil
 			}
-			return 0, err
+			if fr.eofReached {
+				return 0, io.EOF
+			}
+			errToReturn := fr.fatalErr
+			fr.fatalErr = nil
+			return 0, errToReturn
 		}
 		wireLen := int(binary.BigEndian.Uint16(fr.hdrBuf[:]))
 		if wireLen == 0 {
@@ -181,7 +221,11 @@ func (fr *FramedReader) Read(p []byte) (int, error) {
 			return 0, io.EOF
 		}
 		if wireLen > MaxChunkWireLen {
-			return totalRead, ErrChunkTooLarge
+			fr.fatalErr = ErrChunkTooLarge
+			if totalRead > 0 {
+				return totalRead, nil
+			}
+			return 0, ErrChunkTooLarge
 		}
 
 		if cap(fr.rawBuf) < wireLen {
@@ -190,18 +234,29 @@ func (fr *FramedReader) Read(p []byte) (int, error) {
 			fr.rawBuf = fr.rawBuf[:wireLen]
 		}
 
+		// Read chunk body
 		if _, err := io.ReadFull(fr.r, fr.rawBuf); err != nil {
-			fr.eofReached = true
+			if errors.Is(err, io.EOF) {
+				fr.fatalErr = io.ErrUnexpectedEOF
+			} else {
+				fr.fatalErr = err
+			}
 			if totalRead > 0 {
 				return totalRead, nil
 			}
-			return 0, err
+			errToReturn := fr.fatalErr
+			fr.fatalErr = nil
+			return 0, errToReturn
 		}
 
 		var err error
 		fr.decBuf, err = fr.stream.DecryptChunk(fr.decBuf[:0], fr.rawBuf, uint16(wireLen))
 		if err != nil {
-			return totalRead, ErrDecryptionFailed
+			fr.fatalErr = ErrDecryptionFailed
+			if totalRead > 0 {
+				return totalRead, nil
+			}
+			return 0, ErrDecryptionFailed
 		}
 
 		fr.decOff = 0

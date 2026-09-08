@@ -159,6 +159,8 @@ func (s *Server) serveHTTP3TCP(w http.ResponseWriter, r *http.Request, targetAdd
 			_, uploadErr := io.CopyBuffer(upstream, stream, *bufPtr)
 			if uploadErr != nil {
 				_ = upstream.Close()
+			} else {
+				closeWriteConn(upstream)
 			}
 			uploadDone <- uploadErr
 		}

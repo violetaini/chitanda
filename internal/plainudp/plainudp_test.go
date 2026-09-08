@@ -148,3 +148,62 @@ func TestPlainUDPTamperAndExpire(t *testing.T) {
 		t.Fatalf("expected ErrTimestampExpired on out-of-window packet, got %v", err)
 	}
 }
+
+func TestPlainUDPZeroFingerprintAndEntropy(t *testing.T) {
+	psk := []byte(strings.Repeat("u", 32))
+	codec, err := NewCodec(psk)
+	if err != nil {
+		t.Fatalf("NewCodec: %v", err)
+	}
+	now := time.Now()
+	sessionID := uint64(0xAABBCCDDEEFF0011)
+
+	var allBytes []byte
+	var prevPkt []byte
+
+	for i := 0; i < 50; i++ {
+		pkt, err := codec.EncodePacket(nil, DirClientToServer, sessionID, "1.1.1.1:53", bytes.Repeat([]byte("test"), 250), now)
+		if err != nil {
+			t.Fatalf("EncodePacket: %v", err)
+		}
+
+		// 1. Verify NO sequence duplication: packet[8:16] == packet[24:32] was the old fingerprint
+		if bytes.Equal(pkt[8:16], pkt[24:32]) {
+			t.Fatalf("sequence duplication detected on packet wire: pkt[8:16] == pkt[24:32]")
+		}
+
+		// 2. Verify sessionID is NOT visible in plaintext anywhere on the wire
+		var sBuf [8]byte
+		binary.BigEndian.PutUint64(sBuf[:], sessionID)
+		if bytes.Contains(pkt, sBuf[:]) {
+			t.Fatalf("static sessionID found in plaintext on wire!")
+		}
+
+		// 3. Verify wire changes across every single packet
+		if prevPkt != nil && bytes.Equal(pkt[:24], prevPkt[:24]) {
+			t.Fatalf("nonce repeated across packets!")
+		}
+		prevPkt = pkt
+		allBytes = append(allBytes, pkt...)
+	}
+
+	// Calculate Shannon Entropy across all wire packets
+	freq := make(map[byte]int)
+	for _, b := range allBytes {
+		freq[b]++
+	}
+	total := float64(len(allBytes))
+	entropy := 0.0
+	for _, count := range freq {
+		p := float64(count) / total
+		if p > 0 {
+			entropy -= p * math.Log2(p)
+		}
+	}
+
+	t.Logf("PlainUDP wire Shannon entropy: %.4f bits/byte", entropy)
+	if entropy < 7.95 {
+		t.Fatalf("entropy %.4f < 7.95: traffic is not indistinguishable from random noise", entropy)
+	}
+}
+

@@ -47,7 +47,7 @@ func NewOutboundHandler(ctx context.Context, config *OutboundConfig) (*OutboundH
 		Path:               config.Path,
 		TCPTransport:       transportMode,
 		TCPPoolSize:        int(poolSize),
-		InsecureSkipVerify: true,
+		InsecureSkipVerify: config.AllowInsecure,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("init chitanda client: %w", err)

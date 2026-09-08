@@ -202,14 +202,25 @@ func (c *Client) DialContext(ctx context.Context, network, address string) (net.
 
 	if c.cfg.TCPTransport == TCPTransportH2 || (c.cfg.TCPTransport == TCPTransportAuto && !c.prober.h2Degraded.Load()) {
 		if h2Cli := c.pickBestH2Client(); h2Cli != nil {
-			conn, err := h2Cli.dialH2TCP(ctx, address)
+			h2Ctx := ctx
+			var cancel context.CancelFunc
+			if c.cfg.TCPTransport == TCPTransportAuto {
+				h2Ctx, cancel = context.WithTimeout(ctx, autoH2ConnectTimeout)
+			}
+			conn, err := h2Cli.dialH2TCP(h2Ctx, address)
+			if cancel != nil {
+				cancel()
+			}
 			if err == nil {
 				return conn, nil
 			}
 			if c.cfg.TCPTransport == TCPTransportH2 {
 				return nil, fmt.Errorf("h2 tcp dial failed: %w", err)
 			}
-			// In auto mode, fallback to H3
+			// In auto mode, fallback to H3 if caller's root context is not canceled
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 		}
 	}
 	h3Mgr := c.reserveH3Manager()

@@ -205,22 +205,18 @@ func TestPolymorphicHandshakeAttacks(t *testing.T) {
 		t.Fatalf("expected mismatched serverID to be rejected")
 	}
 
-	// Attack 3: Tampered padding byte
-	clientMask, _ := DerivePolymorphicMasks(psk, serverID)
-	padLen := int(cHello[0] ^ clientMask)
-	if padLen > 0 {
-		tampered := make([]byte, len(cHello))
-		copy(tampered, cHello)
-		tampered[1] ^= 0xFF // flip bit in padding
-		if _, _, err := ReadAndVerifyPolymorphicClientHello(bytes.NewReader(tampered), psk, serverID, now); err == nil {
-			t.Fatalf("expected tampered padding to fail HMAC verification")
-		}
+	// Attack 3: Tampered padding length / header byte
+	tampered := make([]byte, len(cHello))
+	copy(tampered, cHello)
+	tampered[0] ^= 0x01 // flip bit in masked padLen
+	if _, _, err := ReadAndVerifyPolymorphicClientHello(bytes.NewReader(tampered), psk, serverID, now); err == nil {
+		t.Fatalf("expected tampered padLen to fail HMAC verification")
 	}
 
-	// Attack 4: Tampered core tag
+	// Attack 4: Tampered core HMAC tag (at offset 48)
 	tamperedTag := make([]byte, len(cHello))
 	copy(tamperedTag, cHello)
-	tamperedTag[len(tamperedTag)-1] ^= 0x01
+	tamperedTag[48] ^= 0x01 // flip bit in 16B HMAC tag (offset 33..49)
 	if _, _, err := ReadAndVerifyPolymorphicClientHello(bytes.NewReader(tamperedTag), psk, serverID, now); err == nil {
 		t.Fatalf("expected tampered HMAC tag to be rejected")
 	}
@@ -715,4 +711,99 @@ func BenchmarkFramedWriter_DynamicSizing_Bulk(b *testing.B) {
 		}
 	}
 }
+
+func TestPolymorphicClientHelloNoPlaintextZeroes(t *testing.T) {
+	psk := bytes.Repeat([]byte("01234567"), 4)
+	serverID := "edge-node-1"
+	fourZeroes := []byte{0x00, 0x00, 0x00, 0x00}
+
+	for i := 0; i < 50; i++ {
+		now := time.Now().Add(time.Duration(i) * time.Second)
+		cHello, _, _, err := CreatePolymorphicClientHello(psk, serverID, now)
+		if err != nil {
+			t.Fatalf("CreatePolymorphicClientHello failed: %v", err)
+		}
+		// The first 49 bytes contain padLen, maskedTs, nonce, tag.
+		// Plaintext 4-zero timestamp leak at offset 1..9 must be eliminated.
+		if bytes.Equal(cHello[1:5], fourZeroes) {
+			t.Fatalf("found plaintext four zeroes at offset 1..5: leak detected!")
+		}
+	}
+}
+
+type timeoutError struct{}
+
+func (timeoutError) Error() string   { return "i/o timeout" }
+func (timeoutError) Timeout() bool   { return true }
+func (timeoutError) Temporary() bool { return true }
+
+type faultReader struct {
+	data     []byte
+	timeout  bool
+	readOnce bool
+}
+
+func (fr *faultReader) Read(p []byte) (int, error) {
+	if fr.timeout && !fr.readOnce {
+		fr.readOnce = true
+		return 0, timeoutError{}
+	}
+	if len(fr.data) == 0 {
+		return 0, io.EOF
+	}
+	n := copy(p, fr.data)
+	fr.data = fr.data[n:]
+	return n, nil
+}
+
+func TestFramedReader_TruncationAndTimeout(t *testing.T) {
+	key := [16]byte{0x10, 0x20, 0x30, 0x40}
+	encStream, _ := NewAEADStream(key)
+	decStream, _ := NewAEADStream(key)
+
+	// 1. Truncated body: write 2-byte header with wireLen = 50, but body is only 20 bytes
+	var truncatedBuf bytes.Buffer
+	binary.Write(&truncatedBuf, binary.BigEndian, uint16(50))
+	truncatedBuf.Write(make([]byte, 20))
+
+	reader := NewFramedReader(&truncatedBuf, decStream)
+	buf := make([]byte, 1024)
+	_, err := reader.Read(buf)
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("expected ErrUnexpectedEOF on truncated frame, got: %v", err)
+	}
+
+	// 2. Timeout at frame boundary: should not permanently convert to EOF
+	encChunk, err := encStream.EncryptChunk(nil, []byte("hello-timeout-recovery"))
+	if err != nil {
+		t.Fatalf("EncryptChunk: %v", err)
+	}
+	var fullFrame bytes.Buffer
+	fullFrame.Write(encChunk)
+
+	faulty := &faultReader{
+		data:    fullFrame.Bytes(),
+		timeout: true,
+	}
+
+	decStream2, _ := NewAEADStream(key)
+	reader2 := NewFramedReader(faulty, decStream2)
+
+	// First read triggers timeout error
+	_, err = reader2.Read(buf)
+	var netErr net.Error
+	if !errors.As(err, &netErr) || !netErr.Timeout() {
+		t.Fatalf("expected timeout error on first read, got: %v", err)
+	}
+
+	// Second read must recover and read the frame successfully, NOT return false EOF
+	n, err := reader2.Read(buf)
+	if err != nil {
+		t.Fatalf("expected successful recovery after timeout, got: %v", err)
+	}
+	if string(buf[:n]) != "hello-timeout-recovery" {
+		t.Fatalf("got %q, want 'hello-timeout-recovery'", string(buf[:n]))
+	}
+}
+
 

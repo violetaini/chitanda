@@ -124,10 +124,19 @@ func DerivePolymorphicMasks(psk []byte, serverID string) (clientMask, serverMask
 	return sum[0], sum[1]
 }
 
+func deriveTimestampMask(psk []byte, nonce [24]byte) [8]byte {
+	mac := hmac.New(sha256.New, psk)
+	mac.Write([]byte("rawstream-ts-mask"))
+	mac.Write(nonce[:])
+	var mask [8]byte
+	copy(mask[:], mac.Sum(nil)[:8])
+	return mask
+}
+
 // CreatePolymorphicClientHello generates a variable-length (49-113 bytes) ClientHello record.
 // Wire structure:
-// [1B padLen ^ clientMask] [padLen random bytes] [48B Core ClientHello: 8B ts + 24B nonce + 16B tag]
-// The 16B HMAC tag covers DomainClientHello, serverID, ts, clientNonce, and padBytes.
+// [1B padLen ^ clientMask] [8B masked ts] [24B nonce] [16B tag] [padLen random padBytes]
+// The 16B HMAC tag covers DomainClientHello, serverID, ts, clientNonce, and padLen.
 func CreatePolymorphicClientHello(psk []byte, serverID string, now time.Time) (record []byte, clientNonce [24]byte, timestamp uint64, err error) {
 	if len(psk) < 32 {
 		return nil, clientNonce, 0, errors.New("rawstream: PSK must be at least 32 bytes")
@@ -161,18 +170,24 @@ func CreatePolymorphicClientHello(psk []byte, serverID string, now time.Time) (r
 	binary.BigEndian.PutUint64(tsBuf[:], timestamp)
 	mac.Write(tsBuf[:])
 	mac.Write(clientNonce[:])
-	mac.Write(padBytes)
+	mac.Write([]byte{byte(padLen)})
 	fullTag := mac.Sum(nil)
 
-	record = make([]byte, 1+padLen+ClientHelloSize)
-	record[0] = byte(padLen) ^ clientMask
-	if padLen > 0 {
-		copy(record[1:1+padLen], padBytes)
+	// Obfuscate timestamp with nonce-derived keystream
+	tsMask := deriveTimestampMask(psk, clientNonce)
+	var maskedTs [8]byte
+	for i := 0; i < 8; i++ {
+		maskedTs[i] = tsBuf[i] ^ tsMask[i]
 	}
-	offset := 1 + padLen
-	copy(record[offset:offset+8], tsBuf[:])
-	copy(record[offset+8:offset+32], clientNonce[:])
-	copy(record[offset+32:offset+48], fullTag[:16])
+
+	record = make([]byte, 1+ClientHelloSize+padLen)
+	record[0] = byte(padLen) ^ clientMask
+	copy(record[1:9], maskedTs[:])
+	copy(record[9:33], clientNonce[:])
+	copy(record[33:49], fullTag[:16])
+	if padLen > 0 {
+		copy(record[49:49+padLen], padBytes)
+	}
 
 	return record, clientNonce, timestamp, nil
 }
@@ -190,16 +205,17 @@ func VerifyPolymorphicClientHello(psk []byte, serverID string, record []byte, no
 	if padLen > MaxPolymorphicPadding {
 		return clientNonce, 0, ErrInvalidPolymorphicPadding
 	}
-	if len(record) != 1+padLen+ClientHelloSize {
+	if len(record) != 1+ClientHelloSize+padLen {
 		return clientNonce, 0, ErrInvalidRecordLen
 	}
 
-	padBytes := record[1 : 1+padLen]
-	core := record[1+padLen:]
-
-	timestamp = binary.BigEndian.Uint64(core[0:8])
-	copy(clientNonce[:], core[8:32])
-	clientTag := core[32:48]
+	copy(clientNonce[:], record[9:33])
+	tsMask := deriveTimestampMask(psk, clientNonce)
+	var tsBuf [8]byte
+	for i := 0; i < 8; i++ {
+		tsBuf[i] = record[1+i] ^ tsMask[i]
+	}
+	timestamp = binary.BigEndian.Uint64(tsBuf[:])
 
 	nowSec := uint64(now.Unix())
 	diff := int64(nowSec) - int64(timestamp)
@@ -212,45 +228,41 @@ func VerifyPolymorphicClientHello(psk []byte, serverID string, record []byte, no
 	if len(serverID) > 0 {
 		mac.Write([]byte(serverID))
 	}
-	mac.Write(core[0:8])
+	mac.Write(tsBuf[:])
 	mac.Write(clientNonce[:])
-	mac.Write(padBytes)
+	mac.Write([]byte{byte(padLen)})
 	expectedFullTag := mac.Sum(nil)
 
-	if !hmac.Equal(clientTag, expectedFullTag[:16]) {
+	if !hmac.Equal(record[33:49], expectedFullTag[:16]) {
 		return clientNonce, 0, ErrInvalidClientAuth
 	}
 
 	return clientNonce, timestamp, nil
 }
 
-// ReadAndVerifyPolymorphicClientHello reads the leading masked padding length byte,
-// the dynamic padding, and the core 48-byte ClientHello from an io.Reader and verifies them.
+// ReadAndVerifyPolymorphicClientHello reads the fixed 49-byte authenticated header first,
+// verifies the HMAC and freshness in constant time, and only reads padBytes if authenticated.
 func ReadAndVerifyPolymorphicClientHello(r io.Reader, psk []byte, serverID string, now time.Time) (clientNonce [24]byte, timestamp uint64, err error) {
 	if len(psk) < 32 {
 		return clientNonce, 0, errors.New("rawstream: PSK must be at least 32 bytes")
 	}
-	var b0 [1]byte
-	if _, err := io.ReadFull(r, b0[:]); err != nil {
+	var header [1 + ClientHelloSize]byte // 49 bytes
+	if _, err := io.ReadFull(r, header[:]); err != nil {
 		return clientNonce, 0, err
 	}
 	clientMask, _ := DerivePolymorphicMasks(psk, serverID)
-	padLen := int(b0[0] ^ clientMask)
+	padLen := int(header[0] ^ clientMask)
 	if padLen > MaxPolymorphicPadding {
 		return clientNonce, 0, ErrInvalidPolymorphicPadding
 	}
 
-	remaining := make([]byte, padLen+ClientHelloSize)
-	if _, err := io.ReadFull(r, remaining); err != nil {
-		return clientNonce, 0, err
+	copy(clientNonce[:], header[9:33])
+	tsMask := deriveTimestampMask(psk, clientNonce)
+	var tsBuf [8]byte
+	for i := 0; i < 8; i++ {
+		tsBuf[i] = header[1+i] ^ tsMask[i]
 	}
-
-	padBytes := remaining[:padLen]
-	core := remaining[padLen:]
-
-	timestamp = binary.BigEndian.Uint64(core[0:8])
-	copy(clientNonce[:], core[8:32])
-	clientTag := core[32:48]
+	timestamp = binary.BigEndian.Uint64(tsBuf[:])
 
 	nowSec := uint64(now.Unix())
 	diff := int64(nowSec) - int64(timestamp)
@@ -263,13 +275,20 @@ func ReadAndVerifyPolymorphicClientHello(r io.Reader, psk []byte, serverID strin
 	if len(serverID) > 0 {
 		mac.Write([]byte(serverID))
 	}
-	mac.Write(core[0:8])
+	mac.Write(tsBuf[:])
 	mac.Write(clientNonce[:])
-	mac.Write(padBytes)
+	mac.Write([]byte{byte(padLen)})
 	expectedFullTag := mac.Sum(nil)
 
-	if !hmac.Equal(clientTag, expectedFullTag[:16]) {
+	if !hmac.Equal(header[33:49], expectedFullTag[:16]) {
 		return clientNonce, 0, ErrInvalidClientAuth
+	}
+
+	if padLen > 0 {
+		padBytes := make([]byte, padLen)
+		if _, err := io.ReadFull(r, padBytes); err != nil {
+			return clientNonce, 0, err
+		}
 	}
 
 	return clientNonce, timestamp, nil
@@ -374,7 +393,7 @@ func VerifyServerHello(psk []byte, serverID string, timestamp uint64, clientNonc
 
 // CreatePolymorphicServerHello generates a variable-length (41-105 bytes) ServerHello response record.
 // Wire structure:
-// [1B padLen ^ serverMask] [padLen random bytes] [40B Core ServerHello: 24B nonce + 16B tag]
+// [1B padLen ^ serverMask] [24B serverNonce] [16B tag] [padLen random padBytes]
 func CreatePolymorphicServerHello(psk []byte, serverID string, timestamp uint64, clientNonce [24]byte) (record []byte, serverNonce [24]byte, err error) {
 	if len(psk) < 32 {
 		return nil, serverNonce, errors.New("rawstream: PSK must be at least 32 bytes")
@@ -408,17 +427,16 @@ func CreatePolymorphicServerHello(psk []byte, serverID string, timestamp uint64,
 	mac.Write(tsBuf[:])
 	mac.Write(clientNonce[:])
 	mac.Write(serverNonce[:])
-	mac.Write(padBytes)
+	mac.Write([]byte{byte(padLen)})
 	fullTag := mac.Sum(nil)
 
-	record = make([]byte, 1+padLen+ServerHelloSize)
+	record = make([]byte, 1+ServerHelloSize+padLen)
 	record[0] = byte(padLen) ^ serverMask
+	copy(record[1:25], serverNonce[:])
+	copy(record[25:41], fullTag[:16])
 	if padLen > 0 {
-		copy(record[1:1+padLen], padBytes)
+		copy(record[41:41+padLen], padBytes)
 	}
-	offset := 1 + padLen
-	copy(record[offset:offset+24], serverNonce[:])
-	copy(record[offset+24:offset+40], fullTag[:16])
 
 	return record, serverNonce, nil
 }
@@ -436,15 +454,12 @@ func VerifyPolymorphicServerHello(psk []byte, serverID string, timestamp uint64,
 	if padLen > MaxPolymorphicPadding {
 		return serverNonce, ErrInvalidPolymorphicPadding
 	}
-	if len(record) != 1+padLen+ServerHelloSize {
+	if len(record) != 1+ServerHelloSize+padLen {
 		return serverNonce, ErrInvalidRecordLen
 	}
 
-	padBytes := record[1 : 1+padLen]
-	core := record[1+padLen:]
-
-	copy(serverNonce[:], core[0:24])
-	serverTag := core[24:40]
+	copy(serverNonce[:], record[1:25])
+	serverTag := record[25:41]
 
 	mac := hmac.New(sha256.New, psk)
 	mac.Write([]byte(DomainServerHello))
@@ -456,7 +471,7 @@ func VerifyPolymorphicServerHello(psk []byte, serverID string, timestamp uint64,
 	mac.Write(tsBuf[:])
 	mac.Write(clientNonce[:])
 	mac.Write(serverNonce[:])
-	mac.Write(padBytes)
+	mac.Write([]byte{byte(padLen)})
 	expectedFullTag := mac.Sum(nil)
 
 	if !hmac.Equal(serverTag, expectedFullTag[:16]) {
@@ -466,31 +481,24 @@ func VerifyPolymorphicServerHello(psk []byte, serverID string, timestamp uint64,
 	return serverNonce, nil
 }
 
-// ReadAndVerifyPolymorphicServerHello reads and verifies the variable-length ServerHello record from an io.Reader.
+// ReadAndVerifyPolymorphicServerHello reads the fixed 41-byte authenticated header first,
+// verifies the HMAC in constant time, and only reads padBytes if authenticated.
 func ReadAndVerifyPolymorphicServerHello(r io.Reader, psk []byte, serverID string, timestamp uint64, clientNonce [24]byte) (serverNonce [24]byte, err error) {
 	if len(psk) < 32 {
 		return serverNonce, errors.New("rawstream: PSK must be at least 32 bytes")
 	}
-	var b0 [1]byte
-	if _, err := io.ReadFull(r, b0[:]); err != nil {
+	var header [1 + ServerHelloSize]byte // 41 bytes
+	if _, err := io.ReadFull(r, header[:]); err != nil {
 		return serverNonce, err
 	}
 	_, serverMask := DerivePolymorphicMasks(psk, serverID)
-	padLen := int(b0[0] ^ serverMask)
+	padLen := int(header[0] ^ serverMask)
 	if padLen > MaxPolymorphicPadding {
 		return serverNonce, ErrInvalidPolymorphicPadding
 	}
 
-	remaining := make([]byte, padLen+ServerHelloSize)
-	if _, err := io.ReadFull(r, remaining); err != nil {
-		return serverNonce, err
-	}
-
-	padBytes := remaining[:padLen]
-	core := remaining[padLen:]
-
-	copy(serverNonce[:], core[0:24])
-	serverTag := core[24:40]
+	copy(serverNonce[:], header[1:25])
+	serverTag := header[25:41]
 
 	mac := hmac.New(sha256.New, psk)
 	mac.Write([]byte(DomainServerHello))
@@ -502,11 +510,18 @@ func ReadAndVerifyPolymorphicServerHello(r io.Reader, psk []byte, serverID strin
 	mac.Write(tsBuf[:])
 	mac.Write(clientNonce[:])
 	mac.Write(serverNonce[:])
-	mac.Write(padBytes)
+	mac.Write([]byte{byte(padLen)})
 	expectedFullTag := mac.Sum(nil)
 
 	if !hmac.Equal(serverTag, expectedFullTag[:16]) {
 		return serverNonce, ErrInvalidServerAuth
+	}
+
+	if padLen > 0 {
+		padBytes := make([]byte, padLen)
+		if _, err := io.ReadFull(r, padBytes); err != nil {
+			return serverNonce, err
+		}
 	}
 
 	return serverNonce, nil

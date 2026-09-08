@@ -484,3 +484,32 @@ func TestH2PaddingEndToEnd(t *testing.T) {
 		t.Fatalf("SHA-256 hash mismatch after 1MB H2 transfer with dynamic padding")
 	}
 }
+
+func TestH1ChunkReaderBoundary(t *testing.T) {
+	// A full 16KB encrypted payload produces 16402 bytes wire format:
+	// "4012\r\n<16402 bytes>\r\n0\r\n\r\n"
+	payload := bytes.Repeat([]byte("A"), 16402)
+	var raw bytes.Buffer
+	raw.WriteString("4012\r\n")
+	raw.Write(payload)
+	raw.WriteString("\r\n0\r\n\r\n")
+
+	cr := newChunkedReader(bufio.NewReader(&raw))
+	buf := make([]byte, 32768)
+	total := 0
+	for {
+		n, err := cr.Read(buf)
+		total += n
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("unexpected chunk reading error: %v", err)
+		}
+	}
+
+	if total != 16402 {
+		t.Fatalf("expected to read 16402 bytes, read %d", total)
+	}
+}
+

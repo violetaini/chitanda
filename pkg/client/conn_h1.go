@@ -239,7 +239,7 @@ func (cr *chunkedReader) Read(p []byte) (int, error) {
 			line = strings.TrimSpace(line)
 		}
 		chunkLen, err := strconv.ParseInt(line, 16, 64)
-		if err != nil || chunkLen < 0 || chunkLen > int64(h1session.MaxChunkWireLen) {
+		if err != nil || chunkLen < 0 || chunkLen > 65536 {
 			return 0, fmt.Errorf("invalid chunk length %q: %w", line, err)
 		}
 		if chunkLen == 0 {

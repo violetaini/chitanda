@@ -66,10 +66,11 @@ def inject_xray(xray_dir, chitanda_dir):
         if module_name not in content:
             abs_chitanda = os.path.abspath(chitanda_dir).replace('\\', '/')
             content += f"\nreplace {module_name} => {abs_chitanda}\n"
+            content += f"\nreplace golang.org/x/net => {abs_chitanda}/vendor/golang.org/x/net\n"
             content += f"\nrequire (\n\t{module_name} v0.0.0-unpublished\n\tgithub.com/quic-go/quic-go v0.59.0\n)\n"
             with open(go_mod, "w", encoding="utf-8") as f:
                 f.write(content)
-            print(f"  [+] Patched {go_mod} with replace {module_name} => {abs_chitanda}")
+            print(f"  [+] Patched {go_mod} with replace {module_name} => {abs_chitanda} and replace golang.org/x/net")
 
     print("[*] Injection into Xray-core completed successfully!")
 

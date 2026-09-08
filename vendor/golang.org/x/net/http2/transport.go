@@ -1581,6 +1581,9 @@ func (cs *clientStream) writeRequestBody(req *http.Request) (err error) {
 				data = remain
 				remain = nil
 				actualPad := int(allowed) - len(data) - 1
+				if actualPad > targetPad {
+					actualPad = targetPad
+				}
 				if actualPad > 255 {
 					actualPad = 255
 				}
@@ -1591,6 +1594,19 @@ func (cs *clientStream) writeRequestBody(req *http.Request) (err error) {
 				takeData := min(int(allowed), len(remain))
 				data = remain[:takeData]
 				remain = remain[takeData:]
+			}
+			actualUsed := len(data)
+			if len(pad) > 0 {
+				actualUsed += 1 + len(pad)
+			}
+			if unused := allowed - int32(actualUsed); unused > 0 {
+				cc.mu.Lock()
+				cs.flow.add(unused)
+				if cs.flow.conn != nil {
+					cs.flow.conn.add(unused)
+				}
+				cc.cond.Broadcast()
+				cc.mu.Unlock()
 			}
 			sentEnd = sawEOF && len(remain) == 0 && !hasTrailers
 			if len(pad) > 0 {
