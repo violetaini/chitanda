@@ -33,6 +33,7 @@ func newH2TransportClient(server, serverName, rootURL, requestURL, path string, 
 		MinVersion:         tls.VersionTLS13,
 		ServerName:         serverName,
 		InsecureSkipVerify: insecureSkipVerify,
+		NextProtos:         []string{"h2"},
 	}
 	dialTLS := func(ctx context.Context, network, _ string) (net.Conn, error) {
 		var rawConn net.Conn
