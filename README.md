@@ -46,33 +46,35 @@ Chitanda 是一个面向自有服务端部署的高性能、抗探测 Go 代理�
 - **Transcript V2 HMAC 签名**：请求头携带基于 PSK 与长度前缀域隔离（Domain Separation）的 HMAC-SHA256 签名，绑定 Method、Path、Target、Timestamp 与 Nonce。
 - **2ms Group-Commit 组提交防重放**：服务端持久化 Nonce 缓存采用微批次异步刷盘与条件变量唤醒机制，在保障崩溃一致性的同时消除高并发磁盘 I/O 瓶颈。
 - **原生 UDP 旁路**：UDP 流量通过独立的 HTTP/3 Extended CONNECT 与 QUIC Datagram 传输，配合 2048 位滑动位图抵御乱序与重放。
-- **RFC 7540 HTTP/2 原生动态填充注入 (Dynamic Frame Padding)**：在 `h2` 与 `auto` 模式下，客户端自动对 HTTP/2 HEADERS 与 DATA 帧注入 8~64 字节随机长度的原生 RFC 7540 协议级 Padding。与 HTTP/2 流控（Flow Control）严格同步，彻底打乱内层明文长度与外层 TLS 记录大小的 1:1 统计相关性，杜绝基于包长特征的被动分析。
+- **RFC 7540 HTTP/2 原生动态填充注入 (Dynamic Frame Padding)**：在 `h2` 与 `auto` 模式下，客户端自动对 HTTP/2 HEADERS 与 DATA 帧注入 8~64 字节随机长度的原生 RFC 7540 协议级 Padding。与 HTTP/2 流控（Flow Control）严格同步，未消耗的配额自动归还至连接与流窗口，彻底打乱内层明文长度与外层 TLS 记录大小的 1:1 统计相关性，杜绝基于包长特征的被动分析。
+- **严格证书校验与防伪造**：Xray 客户端默认强制验证服务端 TLS 证书与公钥链，杜绝非 PSK 假服务器伪造；针对自签名测试环境提供显式 `allow_insecure` 配置项；Protobuf 描述符全量更新，确保 `server_id`、`replay_file` 与 `allow_insecure` 跨节点反序列化零丢失。
 - **SO_REUSEPORT 多核并行监听与分发 (Linux Multi-Core Scaling)**：在 Linux 生产环境下，服务端自动开启 `SO_REUSEPORT`，绑定与 CPU 核心数匹配的多 Worker 独立监听器。由 Linux 内核在网络栈层面直接实现连接负载均衡，彻底消除高并发下的 Accept-Mutex 锁争用瓶颈。
 - **Wire-Version 双向兼容**：服务端自适应识别现代原始流客户端与携带私有帧标记（`X-Framing: 1`）的客户端，平滑向后兼容。
 
 ### B. 专线极速载荷 (`stream` / Chitanda RawStream)
-- **多态离散握手 (Polymorphic Discrete Handshake)**：
+- **多态离散握手与零探测泄露 (Polymorphic Discrete Handshake & Zero Probe Oracle)**：
   - 彻底打破固定握手包长特征，ClientHello 长度离散化为 49~113 字节，ServerHello 长度离散化为 41~105 字节；
-  - 填充长度采用基于 PSK 独立派生的单字节掩码加密（XOR Obfuscation），并随 Core Hello（8B 时间戳 + 24B Nonce）一同受 HMAC-SHA256 完整性保护；
-  - 针对扫描探针具备零信息泄露机制（Zero Active Probe Oracle），非认证握手立即断开，响应 0 字节。
+  - 核心帧头格式为 `[1B padLen ^ mask] [8B masked ts] [24B nonce] [16B tag] [padLen padBytes]`，通过 PSK 派生动态掩码加密时间戳与填充长度，彻底消除明文零值（`0x00000000`）泄漏；
+  - 服务端固定读取 49 字节首包执行常数时间 HMAC-SHA256 完整性与新鲜度校验，杜绝 1 字节主动探测 Oracle；遇到非认证流量立即断开，响应 0 字节。
 - **自适应动态记录分帧 (Dynamic Record Sizing)**：
   - **低时延交互模式**：连接初建或空闲静默（>100ms 无数据发送）时，自动采用 MTU 契合尺寸（1,418 字节分帧），消除大帧拆包与排队时延，Web 浏览及 API 交互的首包延迟（TTFB）降低超 50%；
   - **极限大块吞吐模式**：一旦检测到持续突发流量（累积发送 >128KB），分帧窗口自适应平滑跃迁至 32KB（MaxChunkLen），单核吞吐飙升至 **31.7 Gbps (3,962.5 MB/s)**，且保持极致的 0 堆内存分配（0 allocs/op）。
-- **0-RTT 动态混淆首飞**：
+- **0-RTT 动态混淆首飞与优雅半关闭**：
   - 0-RTT OPEN 目标帧强制填充 32~256 字节的动态随机 Padding，平滑混淆首包长度指纹；
-  - 服务端两阶段提交持久化 Nonce 缓存（先验证 ClientHello + 0-RTT 帧解密成功，才执行落盘），杜绝重放污染与跨重启/跨节点重放。
+  - 服务端两阶段提交持久化 Nonce 缓存（先验证 ClientHello + 0-RTT 帧解密成功，才执行落盘），杜绝重放污染与跨重启/跨节点重放；
+  - 严格支持 TCP 全双工与半关闭（Half-Close）协调，完美兼容长连接大文件单向流式交互。
 - **傲盾/DPI 主动探测免疫**：
-  - 遇到非认证流量（如扫描器发送 `GET / HTTP/1.1` 或垃圾探针）**立即关闭连接，响应 0 字节，绝不返回任何 HTTP/Web 错误特征**；
-  - 严格支持 TCP 半关闭（Half-Close），完美兼容长请求与单向流式交互。
+  - 遇到非认证流量（如扫描器发送 `GET / HTTP/1.1` 或垃圾探针）**立即关闭连接，响应 0 字节，绝不返回任何 HTTP/Web 错误特征**。
 
 ### C. 纯 IP 实验载荷 (`h1` / `plain-udp`)
 - **标准全双工 HTTP/1.1 Carrier (`h1`)**：
   - 外层仅使用标准 `POST <path> HTTP/1.1` 与 `Transfer-Encoding: chunked`，服务端启用全双工流；
   - 0-RTT OPEN 目标帧随 Flight 1 单包聚合发送，瞬间发起目标直连；
-  - 内置严格分块解析上下限校验，根除负数切片越界与未认证超大内存分配（OOM）。
-- **`plain-udp` 原生 AEAD 数据报与双向隔离**：
-  - **XChaCha20-Poly1305 + 24B Nonce**：采用 24 字节扩展 Nonce（`[8B SessionID] [8B Monotonic Seq] [8B Salt]`），彻底杜绝 Nonce 耗尽与生日碰撞；
+  - 分块流读取器全面支持高达 64KB 合法大块数据传输，杜绝切片截断并防止未认证超大内存分配（OOM）。
+- **`plain-udp` 原生 AEAD 数据报与全密文高熵载荷**：
+  - **全密文零明文指纹**：外层报文仅由 `[24B Crypto Nonce] [AEAD Ciphertext + 16B Tag]` 组成，SessionID、单调递增 Seq、时间戳与数据全部封装在 XChaCha20-Poly1305 密文中，外层香农熵达到 **7.996+ bits/byte**（接近理论上限 8.0），彻底消除任何序列号或明文字段特征；
   - **双向密钥与防反射**：独立派生 `c2sKey` 与 `s2cKey`，Associated Data (AD) 强制绑定传输方向（`DirClientToServer` / `DirServerToClient`），反射报文解密直接失败；
+  - **防重放与乱序容忍**：服务端维护 2048 位滑动位图抵御重放，支持最大 120 秒时间戳漂移保护；
   - **客户端来源校验与并发安全**：客户端严格校验对端 IP/Port 必须为服务器地址；内部采用独立内存池保证 `net.PacketConn` 线程安全并发调用；
   - **服务端资源有界**：限制全服最大活跃会话数（10,000）与每会话转发目标数（32），防止恶意 UDP 泛洪耗尽系统 FD 与内存。
 
@@ -272,7 +274,8 @@ proxies:
         "psk": "your-32-byte-secure-pre-shared-key-here",
         "path": "/api/v1/sync",
         "transport": "h2",
-        "pool_size": 4
+        "pool_size": 4,
+        "allow_insecure": false
       }
     },
     {
@@ -293,7 +296,8 @@ proxies:
         "server_name": "jp.example.com",
         "psk": "your-32-byte-secure-pre-shared-key-here",
         "path": "/api/v1/sync",
-        "transport": "h3"
+        "transport": "h3",
+        "allow_insecure": false
       }
     },
     {
@@ -305,7 +309,8 @@ proxies:
         "psk": "your-32-byte-secure-pre-shared-key-here",
         "path": "/api/v1/sync",
         "transport": "auto",
-        "pool_size": 4
+        "pool_size": 4,
+        "allow_insecure": false
       }
     },
     {

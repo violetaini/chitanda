@@ -120,6 +120,7 @@ jobs:
         run: |
           cd upstream_src
           go mod tidy || true
+          python3 "$GITHUB_WORKSPACE/scripts/patch_xnet.py"
           mkdir -p ../dist
           
           TAG="${{ steps.upstream_check.outputs.upstream_tag }}"

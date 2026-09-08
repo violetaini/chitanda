@@ -11,6 +11,7 @@
 | **H2 多路复用** | `h2` | TLS 1.3 + HTTP/2 流复用 / H3 QUIC Datagram | 必须 (有效 TLS 证书) | **生产环境主线推荐**。高并发池化复用、极低 CPU 开销与成熟抗封锁。 |
 | **原生 H3/QUIC** | `h3` | TLS 1.3 + HTTP/3 流复用 / H3 QUIC Datagram | 必须 (有效 TLS 证书) | **弱网/丢包环境**。原生 0 队头阻塞，强抗网络抖动与移动网络切换。 |
 | **自适应容灾** | `auto` | 动态 H2 优先 $\leftrightarrow$ 降级自愈 H3 | 必须 (有效 TLS 证书) | **混合网络环境**。主动健康嗅探与 0 阻断故障自动切换。 |
+| **专线极速流** | `stream` | RawStream TCP (AES-128-GCM) / `plain-udp` 原生 AEAD | **免证书 (专线/纯 IP)** | **IEPL/IPLC 专线与高性能中转**。单线程吞吐近 2000 MB/s，离散握手，0 探测回显。 |
 | **纯 IP 实验通道** | `h1` *(plain-h1)* | 纯 IP HTTP/1.1 全双工 AEAD / 原生 `plain-udp` | **免证书 (纯 IP 直连)** | **内网/纯 IP 互联**。零 TLS 开销，抗探测静态伪装为普通 HTTP 二进制流。 |
 
 ---
@@ -27,8 +28,8 @@
 | `port` | Integer | 是 | - | 服务器监听端口 (如 `443` 或自定义端口) |
 | `psk` | String | 是 | - | 预共享密钥 (Pre-Shared Key，需与服务端完全一致) |
 | `path` | String | 否 | `/api/v1/sync` | 伪装请求路径，建议使用常见 API 路径 |
-| `transport` | String | 否 | `h2` | 载荷模式：`h2` (默认)、`h3`、`auto`、`h1` (或 `plain-h1`) |
-| `sni` | String | 否 | (同 `server`) | TLS SNI 域名；TLS 模式下必填有效域名，`h1` 纯 IP 模式可省略 |
+| `transport` | String | 否 | `h2` | 载荷模式：`h2` (默认)、`h3`、`auto`、`stream`、`h1` (或 `plain-h1`) |
+| `sni` | String | 否 | (同 `server`) | TLS SNI 域名；TLS 模式下必填有效域名，`stream`/`h1` 纯 IP 模式可省略 |
 | `skip-cert-verify`| Boolean| 否 | `false` | 是否跳过 TLS 证书合法性校验 (生产环境建议保持 `false`) |
 | `pool-size` | Integer | 否 | `4` | TCP 物理连接池容量 (针对 `h2` 模式优化吞吐与抗突发流量) |
 | `udp` | Boolean | 否 | `true` | 是否启用 UDP 数据包转发 |
@@ -81,7 +82,18 @@
   udp: true
 ```
 
-#### ④ 模式 4：`h1` (纯 IP / 免证书 / 全双工 HTTP/1.1 实验通道)
+#### ④ 模式 4：`stream` (RawStream 专线与高性能中转)
+```yaml
+- name: "Chitanda-Stream-Direct"
+  type: chitanda
+  server: 198.51.100.23
+  port: 11323
+  psk: "super-secret-pre-shared-key-32bytes-min"
+  transport: "stream"
+  udp: true
+```
+
+#### ⑤ 模式 5：`h1` (纯 IP / 免证书 / 全双工 HTTP/1.1 实验通道)
 ```yaml
 - name: "Chitanda-H1-DirectIP"
   type: chitanda
@@ -201,13 +213,15 @@ rules:
 | :--- | :---: | :---: | :---: | :--- |
 | `psk` | String | 是 | - | 预共享认证密钥 |
 | `path` | String | 否 | `/api/v1/sync` | 协议通信认证 Path |
-| `transport` | String | 否 | `h2` | 载荷模式 (`h2` / `h3` / `auto` / `h1`) |
+| `transport` | String | 否 | `h2` | 载荷模式 (`h2` / `h3` / `auto` / `stream` / `h1`) |
 | `fallback` | String | 否 | - | 防探测回落目标 (如 `127.0.0.1:8080`、`unix:/run/nginx.sock` 或外部站点) |
 | `strict_sni` | String | 否 | - | 严格 SNI 校验域名 (非指定 SNI 强制回落) |
+| `server_id` | String | 否 | - | 服务端节点标识 (专线/stream 模式跨节点防重放绑定) |
+| `replay_file` | String | 否 | - | 持久化防重放缓存文件路径 (如 `/var/log/chitanda/replay.db`) |
 
 ---
 
-### 3.2 Xray 4 种模式服务端入站配置 (`inbounds`)
+### 3.2 Xray 5 种模式服务端入站配置 (`inbounds`)
 
 #### ① 服务端 H2 主线入站 (带 TLS 1.3 与网站回落)
 ```json
@@ -293,7 +307,23 @@ rules:
 }
 ```
 
-#### ④ 服务端 H1 (纯 IP / 免证书 / 0 特征入站)
+#### ④ 服务端 Stream (专线 / 高性能 0 探测入站)
+```json
+{
+  "tag": "chitanda-inbound-stream",
+  "port": 11323,
+  "protocol": "chitanda",
+  "settings": {
+    "psk": "super-secret-pre-shared-key-32bytes-min",
+    "transport": "stream",
+    "server_id": "node-tokyo-01",
+    "replay_file": "/var/log/chitanda/stream_replay.db"
+  },
+  "streamSettings": { "security": "none" }
+}
+```
+
+#### ⑤ 服务端 H1 (纯 IP / 免证书 / 0 特征入站)
 ```json
 {
   "tag": "chitanda-inbound-h1",
@@ -313,7 +343,22 @@ rules:
 
 ---
 
-### 3.3 Xray 4 种模式客户端出站配置 (`outbounds`)
+### 3.3 Xray 客户端出站参数 (`outbounds.settings`)
+
+| 字段 | 类型 | 必填 | 默认值 | 详细说明 |
+| :--- | :---: | :---: | :---: | :--- |
+| `server` | String | 是 | - | 服务器地址与端口 (`域名:端口` 或 `IP:端口`) |
+| `psk` | String | 是 | - | 预共享认证密钥 (需与服务端一致) |
+| `server_name` | String | 否 | (同 `server`) | TLS SNI 校验域名 (TLS 模式) |
+| `path` | String | 否 | `/api/v1/sync` | 伪装请求路径 |
+| `transport` | String | 否 | `h2` | 载荷模式 (`h2` / `h3` / `auto` / `stream` / `h1`) |
+| `pool_size` | Integer | 否 | `4` | TCP 物理复用连接池大小 (仅 `h2` / `auto` 模式有效) |
+| `server_id` | String | 否 | - | 服务端标识绑定 (仅 `stream` 模式有效，防跨节点重放) |
+| `allow_insecure` | Boolean | 否 | `false` | 是否跳过 TLS 证书校验 (默认 `false` 严格验证；防止自签名测试异常) |
+
+---
+
+### 3.4 Xray 5 种模式客户端出站配置 (`outbounds`)
 
 ```json
 {
@@ -327,7 +372,8 @@ rules:
         "psk": "super-secret-pre-shared-key-32bytes-min",
         "path": "/api/v1/sync",
         "transport": "h2",
-        "pool_size": 4
+        "pool_size": 4,
+        "allow_insecure": false
       }
     },
     {
@@ -338,7 +384,8 @@ rules:
         "server_name": "jp.example.com",
         "psk": "super-secret-pre-shared-key-32bytes-min",
         "path": "/api/v1/sync",
-        "transport": "h3"
+        "transport": "h3",
+        "allow_insecure": false
       }
     },
     {
@@ -350,7 +397,18 @@ rules:
         "psk": "super-secret-pre-shared-key-32bytes-min",
         "path": "/api/v1/sync",
         "transport": "auto",
-        "pool_size": 4
+        "pool_size": 4,
+        "allow_insecure": false
+      }
+    },
+    {
+      "tag": "chitanda-out-stream",
+      "protocol": "chitanda",
+      "settings": {
+        "server": "203.0.113.88:11323",
+        "psk": "super-secret-pre-shared-key-32bytes-min",
+        "server_id": "node-tokyo-01",
+        "transport": "stream"
       }
     },
     {
