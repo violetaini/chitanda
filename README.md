@@ -210,7 +210,7 @@ proxies:
 
 ---
 
-### B. Xray-core 服务端与客户端 4 种模式
+### B. Xray-core 服务端与客户端 5 种模式
 
 #### 1) 服务端入站配置 (`inbounds`)
 ```json
@@ -241,7 +241,8 @@ proxies:
       "settings": {
         "psk": "your-32-byte-secure-pre-shared-key-here",
         "server_id": "tokyo-node-01",
-        "transport": "stream"
+        "transport": "stream",
+        "replay_file": "/etc/x-ui/replay_11323.db"
       },
       "streamSettings": { "security": "none" }
     },
@@ -354,12 +355,31 @@ bash <(curl -fsSL https://raw.githubusercontent.com/violetaini/chitanda/3x-ui/in
 
 ### 特性与说明
 - **开箱即用**：自动完成 3X-UI 面板安装，并将底层 Xray 内核直接部署为最新的 `xray-chitanda`。
-- **在线切换内核**：进入 3X-UI Web 界面后的 **Xray 设置 $\to$ 切换版本** 功能已自动接管，指向本仓库的 GitHub Releases，可直接在线选择和热更新 Chitanda 编译的所有版本内核。
+- **全传输模式原生适配**：入站配置原生集成 `h2`、`stream`、`h3`、`auto`、`h1` 传输模式；`stream` 专线免证书模式下自动隐藏 TLS 证书与 SNI 表单；原生支持 `server_id` 节点身份绑定与端口独立落盘持久防重放（`/etc/x-ui/replay_[端口].db` 与端口变动自动联动）。
+- **节点二维码与批量导出**：入站管理表格操作菜单直接提供 Chitanda 节点二维码查看与单选/全选批量导出分享。
+- **在线切换内核**：进入 3X-UI Web 界面后的 **Xray 设置 $\to$ 切换版本** 功能已自动接管，指向本仓库的 GitHub Releases（自动过滤排除非 Xray 构件），可直接在线选择和热更新 Chitanda 编译的所有版本内核。
 - **多架构适配**：自动识别并适配 Linux AMD64 (`x86_64`) 与 ARM64 (`aarch64`)。
 
 ---
 
-## 7. 构建与验证
+## 7. 移动端与路由器生态集成 (OpenWrt & Android Ecosystem)
+
+为了让 Chitanda 节点在各类终端设备上获得开箱即用的原生体验，本项目针对 OpenWrt 软路由与 Android 移动端提供了深度定制的客户端版本与全自动跟随时效工作流：
+
+### A. OpenClash 路由固件定制版 (`chitanda-openclash`)
+- **仓库地址**：[`violetaini/chitanda-openclash`](https://github.com/violetaini/chitanda-openclash)
+- **内核自动重定向**：无缝将 OpenClash 的官方内核下载与在线更新通道全面重定向至 Chitanda 专有 `mihomo` 构建发布。
+- **镜像源竞速与断点重试**：原生支持并增强 `github_address_mod` 代理逻辑，自动融合 `ghfast.top`、`gh-proxy.com` 等国内加速镜像源进行并发竞速与故障自动切换，保障国内网络环境下软路由内核一键更新零失败。
+- **全自动上游同步流水线**：通过 GitHub Actions 周期性自动追踪 `vernesong/OpenClash` 主线发布，无感自动构建并推送最新 LuCI 插件包。
+
+### B. Clash Meta For Android 安卓定制版 (`chitanda-cmfa`)
+- **仓库地址**：[`violetaini/chitanda-cmfa`](https://github.com/violetaini/chitanda-cmfa)
+- **原生支持 Chitanda 协议**：内置预装集成了 Chitanda 核心扩展的 `mihomo` 移动端核心，开箱即用支持 `h2`、`stream`、`h3`、`auto`、`h1` 全模式节点导入、测速与分流。
+- **全自动标签跟随与编译**：配置全自动工作流实时监听 `MetaCubeX/ClashMetaForAndroid` 官方 Release Tag，触发自动注入 Chitanda 签名秘钥与核心代码，自动化全量打包并发布最新版本 APK 安装包。
+
+---
+
+## 8. 构建与验证
 
 ```sh
 # 运行全量单元测试（包含密码学、防反射、重放攻击注入、全双工回环与 UDP 模拟）
@@ -376,7 +396,7 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o bin/bench-dir
 
 ---
 
-## 8. 性能基准 (Micro-Benchmarks)
+## 9. 性能基准 (Micro-Benchmarks)
 
 RawStream 与 AEADStream 在 x86_64 (AES-NI) 硬件环境下的实测基准测试：
 
@@ -391,7 +411,7 @@ RawStream 与 AEADStream 在 x86_64 (AES-NI) 硬件环境下的实测基准测�
 
 ---
 
-## 9. 技术边界与安全声明 (Threat Model & Limitations)
+## 10. 技术边界与安全声明 (Threat Model & Limitations)
 
 1. **载荷定位与网络场景**：
    - `h2` / `h3` 依托 TLS 1.3 加密与标准真实 SNI 伪装，是跨境外公网审查对抗环境下的**主要公网生产载荷**；

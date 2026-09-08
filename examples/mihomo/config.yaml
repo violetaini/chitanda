@@ -72,6 +72,18 @@ proxies:
     transport: "h1"
     udp: true
 
+  # -------------------------------------------------------------
+  # 模式 5: Stream 专线高性能模式 (RawStream TCP + AES-128-GCM + 动态混淆) - 专线推荐
+  # -------------------------------------------------------------
+  - name: "Chitanda-05-Stream-Tokyo"
+    type: chitanda
+    server: 203.0.113.88
+    port: 11323
+    psk: "super-secure-pre-shared-key-sample-token"
+    transport: "stream"
+    server-id: "tokyo-node-01"
+    udp: true
+
 proxy-groups:
   - name: "PROXIES"
     type: select
@@ -81,6 +93,7 @@ proxy-groups:
       - "Chitanda-02-H3-Tokyo"
       - "Chitanda-03-Auto-Tokyo"
       - "Chitanda-04-H1-DirectIP"
+      - "Chitanda-05-Stream-Tokyo"
       - DIRECT
 
   - name: "AUTO-FALLBACK"
@@ -92,6 +105,7 @@ proxy-groups:
       - "Chitanda-02-H3-Tokyo"
       - "Chitanda-03-Auto-Tokyo"
       - "Chitanda-04-H1-DirectIP"
+      - "Chitanda-05-Stream-Tokyo"
 
   - name: "LOAD-BALANCE"
     type: load-balance
@@ -101,6 +115,7 @@ proxy-groups:
       - "Chitanda-01-H2-Tokyo"
       - "Chitanda-02-H3-Tokyo"
       - "Chitanda-03-Auto-Tokyo"
+      - "Chitanda-05-Stream-Tokyo"
 
 rules:
   - GEOIP,LAN,DIRECT

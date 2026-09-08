@@ -1,6 +1,6 @@
 # Chitanda 协议全模式配置指南 (Mihomo / Clash.Meta & Xray-core Wiki)
 
-本文档提供 **Chitanda (千反田)** 传输协议在 **Mihomo (Clash.Meta)** 客户端与 **Xray-core** 服务端/客户端中的完整配置手册与 4 种传输载荷模式（`h2` / `h3` / `auto` / `h1`）的详细用例。
+本文档提供 **Chitanda (千反田)** 传输协议在 **Mihomo (Clash.Meta)** 客户端与 **Xray-core** 服务端/客户端中的完整配置手册与 5 种传输载荷模式（`h2` / `stream` / `h3` / `auto` / `h1`）的详细用例。
 
 ---
 
@@ -9,9 +9,9 @@
 | 模式 | 传输标识 | 承载机制 (TCP / UDP) | 证书要求 | 典型适用场景 |
 | :--- | :--- | :--- | :---: | :--- |
 | **H2 多路复用** | `h2` | TLS 1.3 + HTTP/2 流复用 / H3 QUIC Datagram | 必须 (有效 TLS 证书) | **生产环境主线推荐**。高并发池化复用、极低 CPU 开销与成熟抗封锁。 |
+| **专线极速流** | `stream` | RawStream TCP (AES-128-GCM) / `plain-udp` 原生 AEAD | **免证书 (专线/纯 IP)** | **IEPL/IPLC 专线与高性能中转**。单线程吞吐超 4000 MB/s，离散握手，0 探测回显。 |
 | **原生 H3/QUIC** | `h3` | TLS 1.3 + HTTP/3 流复用 / H3 QUIC Datagram | 必须 (有效 TLS 证书) | **弱网/丢包环境**。原生 0 队头阻塞，强抗网络抖动与移动网络切换。 |
 | **自适应容灾** | `auto` | 动态 H2 优先 $\leftrightarrow$ 降级自愈 H3 | 必须 (有效 TLS 证书) | **混合网络环境**。主动健康嗅探与 0 阻断故障自动切换。 |
-| **专线极速流** | `stream` | RawStream TCP (AES-128-GCM) / `plain-udp` 原生 AEAD | **免证书 (专线/纯 IP)** | **IEPL/IPLC 专线与高性能中转**。单线程吞吐近 2000 MB/s，离散握手，0 探测回显。 |
 | **纯 IP 实验通道** | `h1` *(plain-h1)* | 纯 IP HTTP/1.1 全双工 AEAD / 原生 `plain-udp` | **免证书 (纯 IP 直连)** | **内网/纯 IP 互联**。零 TLS 开销，抗探测静态伪装为普通 HTTP 二进制流。 |
 
 ---
@@ -27,9 +27,10 @@
 | `server` | String | 是 | - | 服务器域名或 IP 地址 |
 | `port` | Integer | 是 | - | 服务器监听端口 (如 `443` 或自定义端口) |
 | `psk` | String | 是 | - | 预共享密钥 (Pre-Shared Key，需与服务端完全一致) |
-| `path` | String | 否 | `/api/v1/sync` | 伪装请求路径，建议使用常见 API 路径 |
-| `transport` | String | 否 | `h2` | 载荷模式：`h2` (默认)、`h3`、`auto`、`stream`、`h1` (或 `plain-h1`) |
+| `path` | String | 否 | `/api/v1/sync` | 伪装请求路径，建议使用常见 API 路径 (`stream` 模式无需此项) |
+| `transport` | String | 否 | `h2` | 载荷模式：`h2` (默认)、`stream`、`h3`、`auto`、`h1` (或 `plain-h1`) |
 | `sni` | String | 否 | (同 `server`) | TLS SNI 域名；TLS 模式下必填有效域名，`stream`/`h1` 纯 IP 模式可省略 |
+| `server-id` | String | 否 | - | 服务端节点标识 (绑定节点身份，仅 `stream` 专线模式防跨节点握手重放) |
 | `skip-cert-verify`| Boolean| 否 | `false` | 是否跳过 TLS 证书合法性校验 (生产环境建议保持 `false`) |
 | `pool-size` | Integer | 否 | `4` | TCP 物理连接池容量 (针对 `h2` 模式优化吞吐与抗突发流量) |
 | `udp` | Boolean | 否 | `true` | 是否启用 UDP 数据包转发 |
@@ -39,7 +40,7 @@
 
 ---
 
-### 2.2 Mihomo 4 种模式节点配置实例
+### 2.2 Mihomo 5 种模式节点配置实例
 
 #### ① 模式 1：`h2` (TLS 1.3 + HTTP/2 多路复用 - 默认推荐)
 ```yaml
@@ -175,12 +176,23 @@ proxies:
     transport: "h1"
     udp: true
 
+  # 5. 专线极速 Stream 节点
+  - name: "Tokyo-Stream"
+    type: chitanda
+    server: 203.0.113.88
+    port: 11323
+    psk: "ch1tanda-auth-key-production-sample"
+    transport: "stream"
+    server-id: "tokyo-node-01"
+    udp: true
+
 proxy-groups:
   - name: "PROXIES"
     type: select
     proxies:
       - "AUTO-FALLBACK"
       - "Tokyo-H2"
+      - "Tokyo-Stream"
       - "Tokyo-H3"
       - "Tokyo-Auto"
       - "DirectIP-H1"
@@ -192,6 +204,7 @@ proxy-groups:
     interval: 300
     proxies:
       - "Tokyo-H2"
+      - "Tokyo-Stream"
       - "Tokyo-H3"
       - "Tokyo-Auto"
       - "DirectIP-H1"

@@ -56,6 +56,16 @@
       }
     },
     {
+      "tag": "chitanda-stream",
+      "protocol": "chitanda",
+      "settings": {
+        "server": "203.0.113.88:11323",
+        "psk": "super-secure-pre-shared-key-sample-token",
+        "transport": "stream",
+        "server_id": "tokyo-node-01"
+      }
+    },
+    {
       "tag": "chitanda-h1",
       "protocol": "chitanda",
       "settings": {

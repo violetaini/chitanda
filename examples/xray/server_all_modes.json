@@ -28,6 +28,20 @@
       }
     },
     {
+      "tag": "inbound-stream-dedicated",
+      "port": 11323,
+      "protocol": "chitanda",
+      "settings": {
+        "psk": "super-secure-pre-shared-key-sample-token",
+        "server_id": "tokyo-node-01",
+        "transport": "stream",
+        "replay_file": "/etc/x-ui/replay_11323.db"
+      },
+      "streamSettings": {
+        "security": "none"
+      }
+    },
+    {
       "tag": "inbound-h1-direct-ip",
       "port": 18200,
       "protocol": "chitanda",
