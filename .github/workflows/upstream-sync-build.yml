@@ -177,8 +177,16 @@ jobs:
                 if [ "$GOARCH" == "arm64" ]; then XRAY_ARCH="arm64-v8a"; fi
               fi
               
+              # Ensure GeoIP & GeoSite dat files are included in standard Xray zip distribution
+              if [ ! -f "geoip.dat" ]; then
+                curl -fsSL -o "geoip.dat" https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat
+              fi
+              if [ ! -f "geosite.dat" ]; then
+                curl -fsSL -o "geosite.dat" https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat
+              fi
+              
               STD_ZIP="Xray-${XRAY_OS}-${XRAY_ARCH}.zip"
-              zip "$STD_ZIP" "xray${EXT}"
+              zip "$STD_ZIP" "xray${EXT}" "geoip.dat" "geosite.dat"
               rm -f "xray${EXT}"
               
               # Standard .dgst checksum file (SHA256)
