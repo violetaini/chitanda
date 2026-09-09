@@ -654,7 +654,30 @@ systemctl restart x-ui
 
 ---
 
-## 7. 生产安全与部署最佳实践
+## 7. Mihomo / OpenClash 运行健壮性与零 DefaultResolver 契约
+
+在 OpenClash 软路由及各类 Mihomo (Clash.Meta) 客户端中，为杜绝代理内核绕过 Fake-IP / 内置 DNS 发生真实 IP 泄露，Mihomo 源码（`main.go`）设置了极严格的防御性断言：**严格禁止协议出站适配器在代理建立阶段调用 Go 标准库的系统 DNS 解析器（`net.DefaultResolver`）**。一旦发生违规调用，Mihomo 会立即向 stderr 输出全部 goroutine 堆栈并强行调用 `os.Exit(2)` 终止进程，导致 OpenClash 瞬间暴毙。
+
+为确保软路由与客户端在高频 UDP 游戏与域名节点场景下的极致稳定，Chitanda 协议实现了全方位的**零 DefaultResolver 契约**：
+
+### 7.1 核心防护机制
+
+1. **纯内存 IP 解析器 (`parseUDPAddr`)**：
+   - 在数据包接收、目标反向解析链路中，完全采用 Go 原生 `netip.ParseAddrPort` 与 `net.ParseIP` 进行无锁、无分配的内存级字面量 IP 解析；
+   - 绝不调用任何操作系统或 Go 运行时的 DNS 解析方法，0 DNS 阻塞开销。
+2. **Mihomo 专有域名解析器无缝对接 (`resolveUDPAddr`)**：
+   - 当节点配置为域名（例如专线中转 `iepl-tokyo.example.com`）时，Chitanda 出站适配器将域名解析任务通过回调函数完全委托给 Mihomo 的 `resolver.ProxyServerHostResolver`；
+   - 解析结果严格遵循 Mihomo 的 DNS 优选策略（`ipv4-prefer` / `ipv6-prefer` 等），并自动与 OpenClash 的 Fake-IP 缓存协同工作。
+3. **软路由策略路由与 `fwmark` 强绑定**：
+   - 在软路由（OpenWrt）透明代理模式下，内核基于 `fwmark` 标记识别出站流量。Chitanda 在初始化 UDP 监听套接字时，主动向 Mihomo 的 `c.dialer.ListenPacket` 传入已解析的真实服务端目的 IP (`AddrPort`)；
+   - 彻底解决 Linux 内核策略路由在未知目的套接字时误匹配默认路由导致的数据包黑洞问题。
+4. **泛型 PacketConn 接口解耦**：
+   - 解除旧版对 `*net.UDPConn` 底层原生套接字的硬性类型断言约束，抽象为通用的 `net.PacketConn`；
+   - 完美兼容 OpenClash / Mihomo 各类装饰层连接（如附带流量统计、自闭合守护及策略绑定的安全包装对象）。
+
+---
+
+## 8. 生产安全与部署最佳实践
 
 1. **PSK 密钥强度**：
    - 务必使用随机生成的强密码（建议使用 `openssl rand -base64 32` 生成 32 字节高熵密钥）。

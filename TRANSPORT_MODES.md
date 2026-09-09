@@ -101,3 +101,6 @@ Chitanda 对全部 5 种载荷模式实施了统一的生命周期与优雅回�
    - 密钥协商完毕后立即调用 `releaseHandshake()` 并清空连接超时，海外高延迟目标建连不受握手超时截断。
 3. **带内流结束标界 (In-band EOF Marker)**：
    - `StreamConn.CloseWrite()` 同时下发 2 字节 `[0x00, 0x00]` 带内标记与底层 TCP FIN，即使中间路由过滤 FIN，对端 `FramedReader` 仍能准确感知单向流关闭。
+4. **客户端 UDP 零 DefaultResolver 契约 (Zero DefaultResolver Contract)**：
+   - 针对 Mihomo (OpenClash / CMFA) 严禁代理出站调用 Go 标准库系统 DNS（否则触发防御性自杀断言 `os.Exit(2)`），全模式 UDP 客户端全面拔除 `net.DefaultResolver`；
+   - 数据报采用 `netip.ParseAddrPort` 与 `net.ParseIP` 纯内存无锁反向解析目标，节点域名解析完全委托给 Mihomo 自身解析器，彻底消除移动端/软路由在 UDP 场景下的闪退崩溃。

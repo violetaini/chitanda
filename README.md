@@ -94,6 +94,10 @@ Chitanda 是一个面向自有服务端部署的高性能、抗探测 Go 代理�
   - `h2` 与 `h1` 模式：将旧版 30 秒冗余等待彻底压缩至 250 毫秒，并在读协程挂死时直接切断套接字。
 - **彻底杜绝 FD 泄漏**：在 50+ 并发短请求实测中，所有套接字在 325ms 内彻底释放，**0 残留套接字，彻底消除 OpenClash 软路由 9090 控制端口假死与 DNS 超时**。
 
+### F. 客户端零 DefaultResolver 契约与 Mihomo 原生解析对接
+- **杜绝客户端自杀断言崩溃**：针对 Mihomo (Clash.Meta) 内核严禁代理出站直接调用 Go 标准库系统 DNS（触发即 `os.Exit(2)` 暴毙）的特性，Chitanda 客户端 SDK 全面实施零 DefaultResolver 契约，报文反向解析一律使用 `netip.ParseAddrPort` 与 `net.ParseIP` 纯内存无锁处理；
+- **Mihomo 原生解析器与策略路由协同**：节点域名解析完全委托给 Mihomo 的 `ProxyServerHostResolver`，并在建立 UDP 通道时向 `c.dialer.ListenPacket` 显式注入远端目标 `AddrPort`，保障软路由 Linux 环境下的 `fwmark` 路由策略与网卡绑定 100% 正确命中。
+
 ---
 
 ## 3. Go SDK 使用示例
@@ -380,6 +384,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/violetaini/chitanda/3x-ui/in
 - **仓库地址**：[`violetaini/chitanda-openclash`](https://github.com/violetaini/chitanda-openclash)
 - **内核自动重定向**：无缝将 OpenClash 的官方内核下载与在线更新通道全面重定向至 Chitanda 专有 `mihomo` 构建发布。
 - **镜像源竞速与断点重试**：原生支持并增强 `github_address_mod` 代理逻辑，自动融合 `ghfast.top`、`gh-proxy.com` 等国内加速镜像源进行并发竞速与故障自动切换，保障国内网络环境下软路由内核一键更新零失败。
+- **全场景防崩溃与零 DefaultResolver 契约**：彻底解决软路由在运行高频 UDP 手游或配置域名节点时踩中 Mihomo 防御性自杀断言的闪退问题，保障 OpenClash 7x24 小时不假死。
 - **全自动上游同步流水线**：通过 GitHub Actions 周期性自动追踪 `vernesong/OpenClash` 主线发布，无感自动构建并推送最新 LuCI 插件包。
 
 ### B. Clash Meta For Android 安卓定制版 (`chitanda-cmfa`)
