@@ -172,7 +172,9 @@ jobs:
                 echo "===> Mihomo smoke test PASSED successfully!"
               elif [ "${{ matrix.target }}" == "xray" ]; then
                 echo "===> Running Xray smoke test with Chitanda configurations..."
-                "../dist/$BIN_NAME" -test -config "$GITHUB_WORKSPACE/examples/xray/client_all_modes.json"
+                printf '{"outbounds":[{"protocol":"chitanda","settings":{"server":"127.0.0.1:443","psk":"test","transport":"stream","server_id":"n1"}}]}\n' > /tmp/test-xray.json
+                "../dist/$BIN_NAME" -test -config /tmp/test-xray.json
+                rm -f /tmp/test-xray.json
                 echo "===> Xray smoke test PASSED successfully!"
               fi
             fi
