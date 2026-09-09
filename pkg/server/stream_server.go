@@ -254,6 +254,13 @@ func (s *StreamServer) HandleConn(conn net.Conn) {
 		return
 	}
 
+	// Cryptographic handshake successfully completed:
+	// Release the handshake semaphore immediately so concurrent handshakes are not queued
+	releaseHandshake()
+
+	// Clear the 2-second handshake deadline so dialing upstream target is not aborted prematurely
+	_ = conn.SetDeadline(time.Time{})
+
 	// 11. Dial upstream target using session-scoped context
 	connCtx, connCancel := context.WithCancel(s.ctx)
 	defer connCancel()
@@ -263,9 +270,6 @@ func (s *StreamServer) HandleConn(conn net.Conn) {
 		return
 	}
 	defer upstream.Close()
-
-	// Handshake successfully completed: release handshake token early
-	releaseHandshake()
 
 	// Upgrade TCP settings: enable NoDelay and aggressive KeepAlive to prevent intermediate NAT/IEPL timeouts
 	if tc, ok := conn.(*net.TCPConn); ok {
@@ -291,9 +295,6 @@ func (s *StreamServer) HandleConn(conn net.Conn) {
 		_ = kac.SetKeepAlivePeriod(15 * time.Second)
 	}
 
-
-	// Clear deadlines for full-duplex proxying
-	_ = conn.SetDeadline(time.Time{})
 
 	// 12. Send initial payload to upstream if present
 	if len(initialPayload) > 0 {
@@ -368,19 +369,22 @@ func relayBidirectional(ctx context.Context, client, target net.Conn) {
 
 	select {
 	case <-uploadDone:
-		// Client finished sending; allow target to finish downloading or drain up to 30s
+		// Client finished sending; allow target to finish downloading or drain up to 60s
 		select {
 		case <-downloadDone:
 		case <-ctx.Done():
-		case <-time.After(30 * time.Second):
+		case <-time.After(60 * time.Second):
 			cancel()
 		}
 	case <-downloadDone:
-		// Target finished sending; allow client to finish uploading or drain up to 30s
+		// Target finished sending (EOF). Response is complete.
+		// Set a short read deadline (250ms) on client so client.Read unblocks immediately
+		// if client is idle/holding keepalive open, preventing leaked connections/FDs.
+		_ = client.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
 		select {
 		case <-uploadDone:
 		case <-ctx.Done():
-		case <-time.After(30 * time.Second):
+		case <-time.After(250 * time.Millisecond):
 			cancel()
 		}
 	case <-ctx.Done():

@@ -27,6 +27,7 @@ type FramedWriter struct {
 	buf        []byte
 	burstBytes int64
 	lastWrite  time.Time
+	closed     bool
 }
 
 // NewFramedWriter wraps an io.Writer with an AEAD encryption stream.
@@ -41,6 +42,10 @@ func NewFramedWriter(w io.Writer, stream *AEADStream) *FramedWriter {
 func (fw *FramedWriter) Write(p []byte) (n int, err error) {
 	fw.mu.Lock()
 	defer fw.mu.Unlock()
+
+	if fw.closed {
+		return 0, io.ErrClosedPipe
+	}
 
 	now := time.Now()
 	if !fw.lastWrite.IsZero() && now.Sub(fw.lastWrite) > IdleResetThreshold {
@@ -100,6 +105,21 @@ func (fw *FramedWriter) Write(p []byte) (n int, err error) {
 		fw.buf = fw.buf[:0]
 	}
 	return n, nil
+}
+
+// WriteEOF sends an in-band 0-length AEAD wire chunk to signal end-of-stream.
+func (fw *FramedWriter) WriteEOF() error {
+	fw.mu.Lock()
+	defer fw.mu.Unlock()
+
+	if fw.closed {
+		return nil
+	}
+	fw.closed = true
+
+	var zeroLen [2]byte
+	_, err := fw.w.Write(zeroLen[:])
+	return err
 }
 
 // FramedReader decrypts incoming length-prefixed AEAD chunks into a plaintext byte stream.
@@ -247,6 +267,7 @@ func (c *StreamConn) Write(b []byte) (int, error) {
 }
 
 func (c *StreamConn) CloseWrite() error {
+	_ = c.Writer.WriteEOF()
 	if cw, ok := c.Conn.(closeWriter); ok {
 		return cw.CloseWrite()
 	}
