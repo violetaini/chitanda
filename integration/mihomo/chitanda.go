@@ -21,7 +21,7 @@ type ChitandaOption struct {
 	Server         string `proxy:"server"`
 	Port           int    `proxy:"port"`
 	PSK            string `proxy:"psk"`
-	Path           string `proxy:"path"`
+	Path           string `proxy:"path,omitempty"`
 	Transport      string `proxy:"transport,omitempty"` // "h2" (default), "h3", "auto", "h1", "stream", "plain-h1"
 	SNI            string `proxy:"sni,omitempty"`
 	ServerID       string `proxy:"server-id,omitempty"`
