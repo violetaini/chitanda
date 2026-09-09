@@ -129,8 +129,15 @@ gen_random_string() {
 
 # This function will be called when user installed x-ui out of security
 config_after_install() {
-    echo -e "${yellow}Install/update finished! For security it's recommended to modify panel settings ${plain}"
-    read -p "Would you like to customize the panel settings? (If not, random settings will be applied) [y/n]: " config_confirm
+    if [[ -f "/etc/x-ui/x-ui.db" ]]; then
+        echo -e "${green}Existing x-ui database found at /etc/x-ui/x-ui.db.${plain}"
+        echo -e "${yellow}All existing inbounds, users, port, and credentials will be preserved.${plain}"
+        read -p "Would you like to modify panel login settings? [y/N] (default: n): " config_confirm
+    else
+        echo -e "${yellow}Install finished! For security it's recommended to configure panel settings ${plain}"
+        read -p "Would you like to customize the panel settings? (If not, random settings will be applied) [y/n]: " config_confirm
+    fi
+
     if [[ "${config_confirm}" == "y" || "${config_confirm}" == "Y" ]]; then
         read -p "Please set up your username: " config_account
         echo -e "${yellow}Your username will be: ${config_account}${plain}"
@@ -148,8 +155,8 @@ config_after_install() {
         /usr/local/x-ui/x-ui setting -webBasePath ${config_webBasePath}
         echo -e "${yellow}Web base path set successfully!${plain}"
     else
-        echo -e "${red}Cancel...${plain}"
         if [[ ! -f "/etc/x-ui/x-ui.db" ]]; then
+            echo -e "${red}Cancel...${plain}"
             local usernameTemp=$(head -c 6 /dev/urandom | base64)
             local passwordTemp=$(head -c 6 /dev/urandom | base64)
             local webBasePathTemp=$(gen_random_string 10)
@@ -160,9 +167,9 @@ config_after_install() {
             echo -e "${green}Password: ${passwordTemp}${plain}"
             echo -e "${green}WebBasePath: ${webBasePathTemp}${plain}"
             echo -e "###############################################"
-            echo -e "${yellow}If you forgot your login info, you can type "x-ui settings" to check after installation${plain}"
+            echo -e "${yellow}If you forgot your login info, you can type \"x-ui settings\" to check after installation${plain}"
         else
-            echo -e "${yellow}This is your upgrade, will keep old settings. If you forgot your login info, you can type "x-ui settings" to check${plain}"
+            echo -e "${green}Upgrading... Preserving existing database and login settings.${plain}"
         fi
     fi
     /usr/local/x-ui/x-ui migrate
@@ -171,13 +178,17 @@ config_after_install() {
 install_x-ui() {
     cd /usr/local/
 
+    if [[ -f "/etc/x-ui/x-ui.db" ]]; then
+        cp -a /etc/x-ui/x-ui.db /etc/x-ui/x-ui.db.bak_$(date +%Y%m%d%H%M%S) 2>/dev/null || true
+        echo -e "${green}Database backup created at /etc/x-ui/${plain}"
+    fi
+
     if [ $# == 0 ]; then
-        last_version=$(curl -Ls "https://api.github.com/repos/violetaini/chitanda/releases/tags/3x-ui-v2.3.11" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-        if [[ ! -n "$last_version" ]]; then
-            echo -e "${red}Failed to fetch x-ui version, it maybe due to Github API restrictions, please try it later${plain}"
-            exit 1
+        last_version=$(curl -Ls "https://api.github.com/repos/violetaini/chitanda/releases/tags/3x-ui-v2.3.11" 2>/dev/null | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+        if [[ -z "$last_version" ]]; then
+            last_version="3x-ui-v2.3.11"
         fi
-        echo -e "Got x-ui latest version: ${last_version}, beginning the installation..."
+        echo -e "Target x-ui version: ${last_version}, beginning the installation..."
         wget -N --no-check-certificate -O /usr/local/x-ui-linux-$(arch).tar.gz https://github.com/violetaini/chitanda/releases/download/3x-ui-v2.3.11/x-ui-linux-$(arch).tar.gz || wget -N --no-check-certificate -O /usr/local/x-ui-linux-$(arch).tar.gz https://github.com/violetaini/chitanda/releases/download/v2.3.11/x-ui-linux-$(arch).tar.gz
         if [[ $? -ne 0 ]]; then
             echo -e "${red}Downloading x-ui failed, please be sure that your server can access Github ${plain}"
