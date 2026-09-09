@@ -39,6 +39,7 @@ type h3TransportManager struct {
 	sessionCache  *sessioncache.Cache
 	activeStreams atomic.Int64
 	listenPacket  func(ctx context.Context, network, addr string) (net.PacketConn, error)
+	resolveUDP    func(ctx context.Context, network, addr string) (*net.UDPAddr, error)
 
 	// Separate physical connections for TCP and UDP
 	currentTCP *h3Connection
@@ -52,6 +53,7 @@ func newH3TransportManager(
 	initialPacketSize uint16,
 	insecureSkipVerify bool,
 	listenPacket func(ctx context.Context, network, addr string) (net.PacketConn, error),
+	resolveUDPFn func(ctx context.Context, network, addr string) (*net.UDPAddr, error),
 ) *h3TransportManager {
 	tlsConfig := &tls.Config{
 		MinVersion:         tls.VersionTLS13,
@@ -74,6 +76,7 @@ func newH3TransportManager(
 		transport:    &http3.Transport{EnableDatagrams: true, DisableCompression: true},
 		sessionCache: sessionCache,
 		listenPacket: listenPacket,
+		resolveUDP:   resolveUDPFn,
 	}
 }
 
@@ -83,7 +86,7 @@ func (m *h3TransportManager) ensureConnection(ctx context.Context, current **h3C
 	if *current != nil && (*current).quic.Context().Err() == nil {
 		return *current, nil
 	}
-	udpAddr, err := net.ResolveUDPAddr("udp", m.server)
+	udpAddr, err := resolveUDP(ctx, m.server, m.resolveUDP)
 	if err != nil {
 		return nil, err
 	}
@@ -427,10 +430,7 @@ func (c *quicPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 		}
 
 		n = copy(p, payload)
-		udpAddr, _ := net.ResolveUDPAddr("udp", address)
-		if udpAddr == nil {
-			udpAddr = &net.UDPAddr{IP: net.IPv4(0, 0, 0, 0), Port: 0}
-		}
+		udpAddr := parseUDPAddr(address)
 		return n, udpAddr, nil
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
@@ -61,6 +62,7 @@ type Config struct {
 	ServerID              string // optional target server ID for RawStream cross-node replay protection
 	DialContext           func(ctx context.Context, network, addr string) (net.Conn, error)
 	ListenPacket          func(ctx context.Context, network, addr string) (net.PacketConn, error)
+	ResolveUDP            func(ctx context.Context, network, addr string) (*net.UDPAddr, error)
 }
 
 // Client is the MyXray core client engine.
@@ -163,7 +165,7 @@ func New(cfg Config) (*Client, error) {
 		}
 		for i := 0; i < h3Count; i++ {
 			h3Managers = append(h3Managers, newH3TransportManager(
-				cfg.Server, cfg.ServerName, rootURL, requestURL, cfg.Path, cfg.PSK, cache, cfg.QUICInitialPacketSize, cfg.InsecureSkipVerify, cfg.ListenPacket,
+				cfg.Server, cfg.ServerName, rootURL, requestURL, cfg.Path, cfg.PSK, cache, cfg.QUICInitialPacketSize, cfg.InsecureSkipVerify, cfg.ListenPacket, cfg.ResolveUDP,
 			))
 		}
 	}
@@ -296,7 +298,7 @@ func (c *Client) ListenPacket(ctx context.Context) (net.PacketConn, error) {
 	c.mu.Unlock()
 
 	if c.cfg.TCPTransport == TCPTransportPlainH1 || c.cfg.TCPTransport == TCPTransportH1 || c.cfg.TCPTransport == TCPTransportStream {
-		return newPlainUDPConn(c.cfg.Server, c.cfg.PSK, c.cfg.ListenPacket)
+		return newPlainUDPConn(ctx, c.cfg.Server, c.cfg.PSK, c.cfg.ListenPacket, c.cfg.ResolveUDP)
 	}
 
 	h3Mgr := c.reserveH3Manager()
@@ -373,3 +375,53 @@ func signRequest(request *http.Request, psk []byte, path, target, mode string) e
 	request.Header.Set(HeaderSignature, auth.Signature(psk, mode, request.Method, path, target, timestamp, nonce))
 	return nil
 }
+
+// parseUDPAddr parses a target address string into a *net.UDPAddr without invoking Go's default DNS resolver.
+func parseUDPAddr(addrStr string) *net.UDPAddr {
+	if ap, err := netip.ParseAddrPort(addrStr); err == nil {
+		return net.UDPAddrFromAddrPort(ap)
+	}
+	host, portStr, err := net.SplitHostPort(addrStr)
+	if err == nil {
+		if port, err := strconv.Atoi(portStr); err == nil {
+			if ip := net.ParseIP(host); ip != nil {
+				return &net.UDPAddr{IP: ip, Port: port}
+			}
+			return &net.UDPAddr{IP: net.IPv4zero, Port: port}
+		}
+	}
+	return &net.UDPAddr{IP: net.IPv4zero, Port: 0}
+}
+
+// resolveUDP resolves an address string into *net.UDPAddr.
+// It checks literal IP first to avoid unnecessary DNS calls, invokes the custom resolver if supplied,
+// and falls back to net.Resolver to ensure Go's net.DefaultResolver is not directly relied upon.
+func resolveUDP(ctx context.Context, addrStr string, fn func(context.Context, string, string) (*net.UDPAddr, error)) (*net.UDPAddr, error) {
+	if ap, err := netip.ParseAddrPort(addrStr); err == nil {
+		return net.UDPAddrFromAddrPort(ap), nil
+	}
+	host, portStr, err := net.SplitHostPort(addrStr)
+	if err != nil {
+		return nil, err
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return nil, err
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return &net.UDPAddr{IP: ip, Port: port}, nil
+	}
+	if fn != nil {
+		return fn(ctx, "udp", addrStr)
+	}
+	var r net.Resolver
+	ips, err := r.LookupIP(ctx, "ip", host)
+	if err != nil {
+		return nil, err
+	}
+	if len(ips) == 0 {
+		return nil, errors.New("no IP resolved")
+	}
+	return &net.UDPAddr{IP: ips[0], Port: port}, nil
+}
+

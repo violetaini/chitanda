@@ -106,12 +106,20 @@ func (c *Chitanda) getClient() (*client.Client, error) {
 		},
 		ListenPacket: func(ctx context.Context, network, addr string) (net.PacketConn, error) {
 			var rAddr netip.AddrPort
-			if addr != "" {
+			if addr != "" && addr != ":0" {
 				if ap, err := netip.ParseAddrPort(addr); err == nil {
 					rAddr = ap
 				}
 			}
+			if !rAddr.IsValid() {
+				if srvUdp, err := resolveUDPAddr(ctx, "udp", serverAddr, c.option.IPVersion); err == nil {
+					rAddr = srvUdp.AddrPort()
+				}
+			}
 			return c.dialer.ListenPacket(ctx, network, addr, rAddr)
+		},
+		ResolveUDP: func(ctx context.Context, network, addr string) (*net.UDPAddr, error) {
+			return resolveUDPAddr(ctx, network, addr, c.option.IPVersion)
 		},
 	})
 	if err != nil {
@@ -140,6 +148,12 @@ func (c *Chitanda) DialContext(ctx context.Context, metadata *C.Metadata) (C.Con
 func (c *Chitanda) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (C.PacketConn, error) {
 	if !c.option.UDP {
 		return nil, errors.New("chitanda: udp is disabled for this node")
+	}
+
+	if metadata != nil {
+		if err := c.ResolveUDP(ctx, metadata); err != nil {
+			return nil, err
+		}
 	}
 
 	cli, err := c.getClient()

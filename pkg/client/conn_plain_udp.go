@@ -25,7 +25,7 @@ var udpReadPool = sync.Pool{
 
 type plainUDPConn struct {
 	sessionID  uint64
-	conn       *net.UDPConn
+	conn       net.PacketConn
 	serverAddr *net.UDPAddr
 	codec      *plainudp.Codec
 	closed     atomic.Bool
@@ -33,24 +33,25 @@ type plainUDPConn struct {
 	replay     frame.ReplayWindow
 }
 
-func newPlainUDPConn(server string, psk []byte, listenPacket func(ctx context.Context, network, addr string) (net.PacketConn, error)) (*plainUDPConn, error) {
-	srvAddr, err := net.ResolveUDPAddr("udp", server)
+func newPlainUDPConn(
+	ctx context.Context,
+	server string,
+	psk []byte,
+	listenPacket func(ctx context.Context, network, addr string) (net.PacketConn, error),
+	resolveUDPFn func(ctx context.Context, network, addr string) (*net.UDPAddr, error),
+) (*plainUDPConn, error) {
+	srvAddr, err := resolveUDP(ctx, server, resolveUDPFn)
 	if err != nil {
 		return nil, fmt.Errorf("resolve server udp addr %q: %w", server, err)
 	}
 
-	var conn *net.UDPConn
+	var conn net.PacketConn
 	if listenPacket != nil {
-		pconn, err := listenPacket(context.Background(), "udp", ":0")
+		pconn, err := listenPacket(ctx, "udp", ":0")
 		if err != nil {
 			return nil, fmt.Errorf("listen custom packet: %w", err)
 		}
-		if uc, ok := pconn.(*net.UDPConn); ok {
-			conn = uc
-		} else {
-			_ = pconn.Close()
-			return nil, errors.New("listenPacket must provide *net.UDPConn for PlainUDP")
-		}
+		conn = pconn
 	} else {
 		c, err := net.ListenUDP("udp", nil)
 		if err != nil {
@@ -58,8 +59,12 @@ func newPlainUDPConn(server string, psk []byte, listenPacket func(ctx context.Co
 		}
 		conn = c
 	}
-	_ = conn.SetReadBuffer(8 << 20)
-	_ = conn.SetWriteBuffer(8 << 20)
+	if uc, ok := conn.(interface{ SetReadBuffer(int) error }); ok {
+		_ = uc.SetReadBuffer(8 << 20)
+	}
+	if uc, ok := conn.(interface{ SetWriteBuffer(int) error }); ok {
+		_ = uc.SetWriteBuffer(8 << 20)
+	}
 
 	codec, err := plainudp.NewCodec(psk)
 	if err != nil {
@@ -91,14 +96,16 @@ func (c *plainUDPConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 	defer udpReadPool.Put(bufPtr)
 
 	for {
-		readN, remoteAddr, err := c.conn.ReadFromUDP(*bufPtr)
+		readN, remoteAddr, err := c.conn.ReadFrom(*bufPtr)
 		if err != nil {
 			return 0, nil, err
 		}
 
 		// Strict origin check: drop any datagram not originating from configured proxy server
-		if !remoteAddr.IP.Equal(c.serverAddr.IP) || remoteAddr.Port != c.serverAddr.Port {
-			continue
+		if ua, ok := remoteAddr.(*net.UDPAddr); ok {
+			if !ua.IP.Equal(c.serverAddr.IP) || ua.Port != c.serverAddr.Port {
+				continue
+			}
 		}
 
 		sessionID, targetAddrStr, payload, _, seq, err := c.codec.DecodePacket((*bufPtr)[:readN], plainudp.DirServerToClient, time.Now())
@@ -116,11 +123,7 @@ func (c *plainUDPConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 			continue // Drop replayed responses
 		}
 
-		rAddr, err := net.ResolveUDPAddr("udp", targetAddrStr)
-		if err != nil {
-			rAddr = &net.UDPAddr{IP: net.IPv4zero, Port: 0}
-		}
-
+		rAddr := parseUDPAddr(targetAddrStr)
 		copied := copy(p, payload)
 		return copied, rAddr, nil
 	}
@@ -136,7 +139,7 @@ func (c *plainUDPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 		return 0, err
 	}
 
-	if _, err := c.conn.WriteToUDP(packet, c.serverAddr); err != nil {
+	if _, err := c.conn.WriteTo(packet, c.serverAddr); err != nil {
 		return 0, err
 	}
 	return len(p), nil
