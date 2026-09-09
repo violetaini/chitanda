@@ -223,7 +223,7 @@ install_x-ui() {
         rm -rf /tmp/x-ui-dat-backup
     fi
 
-    # Ensure geoip.dat and geosite.dat exist
+    # Ensure standard & localized geoip and geosite dat files exist
     if [[ ! -f bin/geoip.dat ]]; then
         echo -e "${yellow}Downloading geoip.dat...${plain}"
         wget -N --no-check-certificate -O bin/geoip.dat https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat || true
@@ -231,6 +231,22 @@ install_x-ui() {
     if [[ ! -f bin/geosite.dat ]]; then
         echo -e "${yellow}Downloading geosite.dat...${plain}"
         wget -N --no-check-certificate -O bin/geosite.dat https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat || true
+    fi
+    if [[ ! -f bin/geoip_IR.dat ]]; then
+        echo -e "${yellow}Downloading geoip_IR.dat...${plain}"
+        wget -N --no-check-certificate -O bin/geoip_IR.dat https://github.com/chocolate4u/Iran-v2ray-rules/releases/latest/download/geoip.dat || true
+    fi
+    if [[ ! -f bin/geosite_IR.dat ]]; then
+        echo -e "${yellow}Downloading geosite_IR.dat...${plain}"
+        wget -N --no-check-certificate -O bin/geosite_IR.dat https://github.com/chocolate4u/Iran-v2ray-rules/releases/latest/download/geosite.dat || true
+    fi
+    if [[ ! -f bin/geoip_VN.dat ]]; then
+        echo -e "${yellow}Downloading geoip_VN.dat...${plain}"
+        wget -N --no-check-certificate -O bin/geoip_VN.dat https://github.com/vuong2023/vn-v2ray-rules/releases/latest/download/geoip.dat || true
+    fi
+    if [[ ! -f bin/geosite_VN.dat ]]; then
+        echo -e "${yellow}Downloading geosite_VN.dat...${plain}"
+        wget -N --no-check-certificate -O bin/geosite_VN.dat https://github.com/vuong2023/vn-v2ray-rules/releases/latest/download/geosite.dat || true
     fi
 
     # Check the system's architecture and rename the file accordingly
