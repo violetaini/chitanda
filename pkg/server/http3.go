@@ -180,6 +180,8 @@ func (s *Server) serveHTTP3TCP(w http.ResponseWriter, r *http.Request, targetAdd
 	select {
 	case <-uploadDone:
 	case <-r.Context().Done():
+	case <-time.After(250 * time.Millisecond):
+		stream.CancelRead(0)
 	}
 }
 

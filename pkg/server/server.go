@@ -150,17 +150,18 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	select {
 	case <-downloadDone:
 		// Upstream finished sending download data.
-		// Allow upload to complete or wait for request context / short drain.
+		// Allow upload to complete or wait for request context / short drain (250ms).
 		select {
 		case <-uploadDone:
 		case <-r.Context().Done():
-		case <-time.After(30 * time.Second):
+		case <-time.After(250 * time.Millisecond):
 		}
 	case <-uploadDone:
-		// Client finished uploading; wait for upstream download to finish.
+		// Client finished uploading; wait for upstream download to finish (up to 60s).
 		select {
 		case <-downloadDone:
 		case <-r.Context().Done():
+		case <-time.After(60 * time.Second):
 		}
 	case <-r.Context().Done():
 	}
@@ -314,15 +315,19 @@ func (s *Server) servePlainH1(w http.ResponseWriter, r *http.Request) {
 
 	select {
 	case <-downloadDone:
+		// Upstream finished sending download data.
+		// Allow upload to complete or wait for request context / short drain (250ms).
 		select {
 		case <-uploadDone:
 		case <-r.Context().Done():
-		case <-time.After(30 * time.Second):
+		case <-time.After(250 * time.Millisecond):
 		}
 	case <-uploadDone:
+		// Client finished uploading; wait for upstream download to finish (up to 60s).
 		select {
 		case <-downloadDone:
 		case <-r.Context().Done():
+		case <-time.After(60 * time.Second):
 		}
 	case <-r.Context().Done():
 	}
