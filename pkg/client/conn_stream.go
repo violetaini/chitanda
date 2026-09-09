@@ -17,7 +17,16 @@ func (c *Client) dialRawStream(ctx context.Context, target string) (net.Conn, er
 	}
 	if tc, ok := rawConn.(*net.TCPConn); ok {
 		_ = tc.SetNoDelay(true)
+		_ = tc.SetKeepAlive(true)
+		_ = tc.SetKeepAlivePeriod(15 * time.Second)
+	} else if kac, ok := rawConn.(interface {
+		SetKeepAlive(bool) error
+		SetKeepAlivePeriod(time.Duration) error
+	}); ok {
+		_ = kac.SetKeepAlive(true)
+		_ = kac.SetKeepAlivePeriod(15 * time.Second)
 	}
+
 
 	// 1. Map context deadline to connection deadline to prevent indefinite hanging
 	if deadline, ok := ctx.Deadline(); ok {

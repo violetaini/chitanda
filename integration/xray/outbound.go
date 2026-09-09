@@ -78,7 +78,11 @@ func (h *OutboundHandler) Process(ctx context.Context, link *transport.Link, dia
 
 		uploadDone := make(chan error, 1)
 		go func() {
-			uploadDone <- buf.Copy(link.Reader, buf.NewWriter(conn))
+			err := buf.Copy(link.Reader, buf.NewWriter(conn))
+			if cw, ok := conn.(interface{ CloseWrite() error }); ok {
+				_ = cw.CloseWrite()
+			}
+			uploadDone <- err
 		}()
 
 		downloadErr := buf.Copy(buf.NewReader(conn), link.Writer)

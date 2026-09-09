@@ -806,4 +806,113 @@ func TestFramedReader_TruncationAndTimeout(t *testing.T) {
 	}
 }
 
+func TestFramedReader_PartialChunkDoesNotBlockRead(t *testing.T) {
+	key := [16]byte{1, 2, 3, 4}
+	encStream, _ := NewAEADStream(key)
+	decStream, _ := NewAEADStream(key)
+
+	// Encrypt chunk 1
+	msg1 := []byte("first chunk data 1234567890")
+	chunk1, err := encStream.EncryptChunk(nil, msg1)
+	if err != nil {
+		t.Fatalf("EncryptChunk: %v", err)
+	}
+
+	// Prepare chunk 2 header (2 bytes wire length = 1000) WITHOUT body
+	var chunk2Hdr [2]byte
+	binary.BigEndian.PutUint16(chunk2Hdr[:], 1000)
+
+	// Combine chunk 1 and chunk 2 header together (mimicking a single TCP segment from IEPL relay)
+	combined := append(chunk1, chunk2Hdr[:]...)
+
+	r, w := io.Pipe()
+	fr := NewFramedReader(r, decStream)
+
+	// Write the combined packet into the pipe
+	go func() {
+		_, _ = w.Write(combined)
+		// Body of chunk 2 is NOT written! We simulate a pause or waiting for response.
+	}()
+
+	buf := make([]byte, 4096)
+	readDone := make(chan struct{})
+	var n int
+	var readErr error
+	go func() {
+		n, readErr = fr.Read(buf)
+		close(readDone)
+	}()
+
+	select {
+	case <-readDone:
+		if readErr != nil {
+			t.Fatalf("unexpected read error: %v", readErr)
+		}
+		if !bytes.Equal(buf[:n], msg1) {
+			t.Fatalf("expected %q, got %q", msg1, buf[:n])
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("STALL DETECTED: FramedReader.Read blocked waiting for next chunk body instead of returning chunk 1!")
+	}
+}
+
+func TestFramedReader_LeftoverDecBufReturnsImmediatelyWithoutBlocking(t *testing.T) {
+	key := [16]byte{1, 2, 3, 4}
+	encStream, _ := NewAEADStream(key)
+	decStream, _ := NewAEADStream(key)
+
+	// Encrypt chunk 1 (100 bytes)
+	msg1 := bytes.Repeat([]byte("A"), 100)
+	chunk1, _ := encStream.EncryptChunk(nil, msg1)
+
+	// Chunk 2 header only (incomplete chunk)
+	var chunk2Hdr [2]byte
+	binary.BigEndian.PutUint16(chunk2Hdr[:], 500)
+
+	combined := append(chunk1, chunk2Hdr[:]...)
+
+	r, w := io.Pipe()
+	fr := NewFramedReader(r, decStream)
+
+	go func() {
+		_, _ = w.Write(combined)
+	}()
+
+	// First read: reads only 40 bytes out of 100 bytes
+	smallBuf := make([]byte, 40)
+	n1, err := fr.Read(smallBuf)
+	if err != nil || n1 != 40 {
+		t.Fatalf("first read failed: n=%d, err=%v", n1, err)
+	}
+
+	// Now 60 bytes remain in fr.decBuf!
+	// Second read: requests 4096 bytes. MUST return remaining 60 bytes immediately without touching pipe!
+	bigBuf := make([]byte, 4096)
+	readDone := make(chan struct{})
+	var n2 int
+	var err2 error
+	go func() {
+		n2, err2 = fr.Read(bigBuf)
+		close(readDone)
+	}()
+
+	select {
+	case <-readDone:
+		if err2 != nil {
+			t.Fatalf("second read error: %v", err2)
+		}
+		if n2 != 60 {
+			t.Fatalf("expected 60 leftover bytes, got %d", n2)
+		}
+		if !bytes.Equal(bigBuf[:n2], msg1[40:]) {
+			t.Fatalf("leftover data mismatch")
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("STALL DETECTED: FramedReader.Read blocked waiting for network instead of returning leftover decBuf!")
+	}
+}
+
+
+
+
 

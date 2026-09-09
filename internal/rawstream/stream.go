@@ -132,142 +132,88 @@ func NewFramedReader(r io.Reader, stream *AEADStream) *FramedReader {
 }
 
 func (fr *FramedReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+
 	fr.mu.Lock()
 	defer fr.mu.Unlock()
-
-	var totalRead int
 
 	// 1. Consume any remaining decrypted data from previous chunk
 	if fr.decOff < len(fr.decBuf) {
 		n := copy(p, fr.decBuf[fr.decOff:])
 		fr.decOff += n
-		totalRead = n
-		p = p[n:]
-		if len(p) == 0 {
-			return totalRead, nil
-		}
+		return n, nil
 	}
 
+	// 2. Check for sticky EOF or fatal error
 	if fr.fatalErr != nil {
 		err := fr.fatalErr
 		fr.fatalErr = nil
-		if totalRead > 0 {
-			return totalRead, nil
-		}
 		return 0, err
 	}
 
 	if fr.eofReached {
-		if totalRead > 0 {
-			return totalRead, nil
-		}
 		return 0, io.EOF
 	}
 
-	for len(p) > 0 {
-		if fr.fatalErr != nil {
-			if totalRead > 0 {
-				return totalRead, nil
-			}
-			err := fr.fatalErr
-			fr.fatalErr = nil
+	// 3. Read 2-byte chunk wire length
+	if _, err := io.ReadFull(fr.r, fr.hdrBuf[:]); err != nil {
+		if errors.Is(err, io.EOF) {
+			fr.eofReached = true
+			return 0, io.EOF
+		} else if errors.Is(err, io.ErrUnexpectedEOF) {
+			fr.fatalErr = io.ErrUnexpectedEOF
+			return 0, io.ErrUnexpectedEOF
+		}
+		if ne, ok := err.(net.Error); ok && ne.Timeout() {
 			return 0, err
 		}
-
-		if fr.eofReached {
-			if totalRead > 0 {
-				return totalRead, nil
-			}
-			return 0, io.EOF
-		}
-
-		// 2. If we already read some bytes and no further header is buffered in memory,
-		// return immediately so we don't block the caller.
-		if totalRead > 0 && fr.br.Buffered() < 2 {
-			return totalRead, nil
-		}
-
-		// Read 2-byte chunk wire length
-		if _, err := io.ReadFull(fr.r, fr.hdrBuf[:]); err != nil {
-			if errors.Is(err, io.EOF) {
-				fr.eofReached = true
-			} else if errors.Is(err, io.ErrUnexpectedEOF) {
-				fr.fatalErr = io.ErrUnexpectedEOF
-			} else {
-				if ne, ok := err.(net.Error); ok && ne.Timeout() {
-					if totalRead > 0 {
-						return totalRead, nil
-					}
-					return 0, err
-				}
-				fr.fatalErr = err
-			}
-			if totalRead > 0 {
-				return totalRead, nil
-			}
-			if fr.eofReached {
-				return 0, io.EOF
-			}
-			errToReturn := fr.fatalErr
-			fr.fatalErr = nil
-			return 0, errToReturn
-		}
-		wireLen := int(binary.BigEndian.Uint16(fr.hdrBuf[:]))
-		if wireLen == 0 {
-			fr.eofReached = true
-			if totalRead > 0 {
-				return totalRead, nil
-			}
-			return 0, io.EOF
-		}
-		if wireLen > MaxChunkWireLen {
-			fr.fatalErr = ErrChunkTooLarge
-			if totalRead > 0 {
-				return totalRead, nil
-			}
-			return 0, ErrChunkTooLarge
-		}
-
-		if cap(fr.rawBuf) < wireLen {
-			fr.rawBuf = make([]byte, wireLen)
-		} else {
-			fr.rawBuf = fr.rawBuf[:wireLen]
-		}
-
-		// Read chunk body
-		if _, err := io.ReadFull(fr.r, fr.rawBuf); err != nil {
-			if errors.Is(err, io.EOF) {
-				fr.fatalErr = io.ErrUnexpectedEOF
-			} else {
-				fr.fatalErr = err
-			}
-			if totalRead > 0 {
-				return totalRead, nil
-			}
-			errToReturn := fr.fatalErr
-			fr.fatalErr = nil
-			return 0, errToReturn
-		}
-
-		var err error
-		fr.decBuf, err = fr.stream.DecryptChunk(fr.decBuf[:0], fr.rawBuf, uint16(wireLen))
-		if err != nil {
-			fr.fatalErr = ErrDecryptionFailed
-			if totalRead > 0 {
-				return totalRead, nil
-			}
-			return 0, ErrDecryptionFailed
-		}
-
-		fr.decOff = 0
-		n := copy(p, fr.decBuf)
-		fr.decOff = n
-		totalRead += n
-		p = p[n:]
+		fr.fatalErr = err
+		return 0, err
 	}
 
-	return totalRead, nil
+	wireLen := int(binary.BigEndian.Uint16(fr.hdrBuf[:]))
+	if wireLen == 0 {
+		fr.eofReached = true
+		return 0, io.EOF
+	}
+	if wireLen > MaxChunkWireLen {
+		fr.fatalErr = ErrChunkTooLarge
+		return 0, ErrChunkTooLarge
+	}
+
+	if cap(fr.rawBuf) < wireLen {
+		fr.rawBuf = make([]byte, wireLen)
+	} else {
+		fr.rawBuf = fr.rawBuf[:wireLen]
+	}
+
+	// 4. Read chunk body
+	if _, err := io.ReadFull(fr.r, fr.rawBuf); err != nil {
+		if errors.Is(err, io.EOF) {
+			fr.fatalErr = io.ErrUnexpectedEOF
+			return 0, io.ErrUnexpectedEOF
+		}
+		fr.fatalErr = err
+		return 0, err
+	}
+
+	// 5. Decrypt chunk
+	var err error
+	fr.decBuf, err = fr.stream.DecryptChunk(fr.decBuf[:0], fr.rawBuf, uint16(wireLen))
+	if err != nil {
+		fr.fatalErr = ErrDecryptionFailed
+		return 0, ErrDecryptionFailed
+	}
+
+	// 6. Copy decrypted data to destination buffer
+	fr.decOff = 0
+	n := copy(p, fr.decBuf)
+	fr.decOff = n
+	return n, nil
 }
+
 
 type closeWriter interface {
 	CloseWrite() error

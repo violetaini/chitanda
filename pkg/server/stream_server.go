@@ -267,13 +267,30 @@ func (s *StreamServer) HandleConn(conn net.Conn) {
 	// Handshake successfully completed: release handshake token early
 	releaseHandshake()
 
-	// Upgrade TCP settings: enable NoDelay and rely on OS auto-tuning for window scaling
+	// Upgrade TCP settings: enable NoDelay and aggressive KeepAlive to prevent intermediate NAT/IEPL timeouts
 	if tc, ok := conn.(*net.TCPConn); ok {
 		_ = tc.SetNoDelay(true)
+		_ = tc.SetKeepAlive(true)
+		_ = tc.SetKeepAlivePeriod(15 * time.Second)
+	} else if kac, ok := conn.(interface {
+		SetKeepAlive(bool) error
+		SetKeepAlivePeriod(time.Duration) error
+	}); ok {
+		_ = kac.SetKeepAlive(true)
+		_ = kac.SetKeepAlivePeriod(15 * time.Second)
 	}
 	if tc, ok := upstream.(*net.TCPConn); ok {
 		_ = tc.SetNoDelay(true)
+		_ = tc.SetKeepAlive(true)
+		_ = tc.SetKeepAlivePeriod(15 * time.Second)
+	} else if kac, ok := upstream.(interface {
+		SetKeepAlive(bool) error
+		SetKeepAlivePeriod(time.Duration) error
+	}); ok {
+		_ = kac.SetKeepAlive(true)
+		_ = kac.SetKeepAlivePeriod(15 * time.Second)
 	}
+
 
 	// Clear deadlines for full-duplex proxying
 	_ = conn.SetDeadline(time.Time{})
