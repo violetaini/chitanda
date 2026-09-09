@@ -206,6 +206,8 @@ install_x-ui() {
     fi
 
     if [[ -e /usr/local/x-ui/ ]]; then
+        mkdir -p /tmp/x-ui-dat-backup
+        cp -f /usr/local/x-ui/bin/*.dat /tmp/x-ui-dat-backup/ 2>/dev/null || true
         systemctl stop x-ui
         rm /usr/local/x-ui/ -rf
     fi
@@ -214,6 +216,22 @@ install_x-ui() {
     rm x-ui-linux-$(arch).tar.gz -f
     cd x-ui
     chmod +x x-ui
+
+    # Restore dat files if present
+    if [[ -d /tmp/x-ui-dat-backup ]]; then
+        cp -n /tmp/x-ui-dat-backup/*.dat bin/ 2>/dev/null || true
+        rm -rf /tmp/x-ui-dat-backup
+    fi
+
+    # Ensure geoip.dat and geosite.dat exist
+    if [[ ! -f bin/geoip.dat ]]; then
+        echo -e "${yellow}Downloading geoip.dat...${plain}"
+        wget -N --no-check-certificate -O bin/geoip.dat https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat || true
+    fi
+    if [[ ! -f bin/geosite.dat ]]; then
+        echo -e "${yellow}Downloading geosite.dat...${plain}"
+        wget -N --no-check-certificate -O bin/geosite.dat https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat || true
+    fi
 
     # Check the system's architecture and rename the file accordingly
     if [[ $(arch) == "armv5" || $(arch) == "armv6" || $(arch) == "armv7" ]]; then

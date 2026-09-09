@@ -64,6 +64,10 @@ jobs:
           mv x-ui/bin/xray x-ui/bin/xray-linux-${{ matrix.arch_name }}
           chmod +x x-ui/bin/xray-linux-${{ matrix.arch_name }}
           
+          # Download GeoIP & GeoSite dat files
+          curl -fL -o x-ui/bin/geoip.dat https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat
+          curl -fL -o x-ui/bin/geosite.dat https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat
+          
           tar -czvf "x-ui-linux-${{ matrix.arch_name }}.tar.gz" x-ui
           mkdir -p dist
           mv "x-ui-linux-${{ matrix.arch_name }}.tar.gz" dist/
