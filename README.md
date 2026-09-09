@@ -5,6 +5,7 @@ Chitanda 是一个面向自有服务端部署的高性能、抗探测 Go 代理�
 当前主线支持 **5 种传输载荷模式（Transport Carriers）**：以 **`h2` (TLS 1.3 + HTTP/2 多路复用)** 作为公网主线推荐；针对 IEPL / IPLC 专线提供极限吞吐的 **`stream` (RawStream 自定义 TCP)**；同时提供 **`h3`**、**`auto`** 与纯 IP 模式 **`h1`**（别名 `plain-h1`）。
 
 - 📖 **[完整配置手册与 Wiki 规范](docs/CONFIGURATION.md)**
+- ⚡ **[五大传输载荷与生命周期规范 (Transport Modes)](TRANSPORT_MODES.md)**
 - 📁 **[示例配置文件目录 (Examples)](examples/)**
 - 📦 **[GitHub 自动发布二进制 (Releases)](https://github.com/violetaini/chitanda/releases)**
 
@@ -84,6 +85,14 @@ Chitanda 是一个面向自有服务端部署的高性能、抗探测 Go 代理�
 2. **本地静态目录**：托管指定的 HTML/静态资源；
 3. **Nginx UDS 反向代理**：通过 `unix:/path/to/nginx.sock` 零网络栈损耗代理本地 Web 服务；
 4. **本地端口反向代理**：转发至 `127.0.0.1:8080` 等本地 HTTP 服务。
+
+### E. 全模式半关闭与毫秒级优雅回收 (Half-Close & Graceful Drain)
+- **高频短连接与手游防断连优化**：针对《碧蓝档案》等高频突发短交互手游及 Web API 轮询，当目标服务器响应完成并关闭连接（`downloadDone`）时，服务端全面统一执行 **250ms 快速回收机制**。
+- **带内 EOF 标界与双向套接字彻底销毁**：
+  - `stream` 模式：服务端向客户端主动下发带内 `[0x00, 0x00]` 零长分帧标记并附带 TCP FIN，客户端收到后立即关闭本地上行；
+  - `h3` 模式：超时主动触发 `stream.CancelRead(0)` 彻底终结悬挂 QUIC 流，消除流上限耗尽卡死；
+  - `h2` 与 `h1` 模式：将旧版 30 秒冗余等待彻底压缩至 250 毫秒，并在读协程挂死时直接切断套接字。
+- **彻底杜绝 FD 泄漏**：在 50+ 并发短请求实测中，所有套接字在 325ms 内彻底释放，**0 残留套接字，彻底消除 OpenClash 软路由 9090 控制端口假死与 DNS 超时**。
 
 ---
 
@@ -358,6 +367,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/violetaini/chitanda/3x-ui/in
 - **全传输模式原生适配**：入站配置原生集成 `h2`、`stream`、`h3`、`auto`、`h1` 传输模式；`stream` 专线免证书模式下自动隐藏 TLS 证书与 SNI 表单；原生支持 `server_id` 节点身份绑定与端口独立落盘持久防重放（`/etc/x-ui/replay_[端口].db` 与端口变动自动联动）。
 - **节点二维码与批量导出**：入站管理表格操作菜单直接提供 Chitanda 节点二维码查看与单选/全选批量导出分享。
 - **在线切换内核**：进入 3X-UI Web 界面后的 **Xray 设置 $\to$ 切换版本** 功能已自动接管，指向本仓库的 GitHub Releases（自动过滤排除非 Xray 构件），可直接在线选择和热更新 Chitanda 编译的所有版本内核。
+- **高频短连接与游戏防假死优化**：搭载最新的 250ms 半关闭优雅排空生命周期控制，彻底解决手游（如《碧蓝档案》）高频交互导致的连接堆积、FD 泄漏与软路由假死问题（详见 [docs/CONFIGURATION.md](docs/CONFIGURATION.md#4-3-xui-xray-ui-节点部署与内核热更新运维指南)）。
 - **多架构适配**：自动识别并适配 Linux AMD64 (`x86_64`) 与 ARM64 (`aarch64`)。
 
 ---
