@@ -166,11 +166,7 @@ jobs:
               if [ "${{ matrix.target }}" == "mihomo" ]; then
                 echo "===> Running Mihomo smoke test with Chitanda configurations..."
                 "../dist/$BIN_NAME" -t -f "$GITHUB_WORKSPACE/examples/mihomo/config.yaml"
-                cat << 'EOF' > /tmp/test-minimal.yaml
-mixed-port: 7890
-proxies:
-  - {name: test-minimal, server: 127.0.0.1, port: 443, type: chitanda, psk: test-secret-token}
-EOF
+                printf 'mixed-port: 7890\nproxies:\n  - {name: test-minimal, server: 127.0.0.1, port: 443, type: chitanda, psk: test-secret-token}\n' > /tmp/test-minimal.yaml
                 "../dist/$BIN_NAME" -t -f /tmp/test-minimal.yaml
                 rm -f /tmp/test-minimal.yaml
                 echo "===> Mihomo smoke test PASSED successfully!"
