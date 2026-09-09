@@ -41,7 +41,7 @@ func base(initialPacketSize uint16) *quic.Config {
 		MaxConnectionReceiveWindow:     MaxConnectionWindow,
 		MaxIncomingStreams:             1024,
 		MaxIncomingUniStreams:          64,
-		KeepAlivePeriod:                30 * time.Second,
+		KeepAlivePeriod:                15 * time.Second,
 		EnableDatagrams:                true,
 	}
 }

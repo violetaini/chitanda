@@ -30,6 +30,18 @@ func (c *Client) dialPlainH1(ctx context.Context, target string) (net.Conn, erro
 	if err != nil {
 		return nil, fmt.Errorf("plain-h1 dial server %q: %w", c.cfg.Server, err)
 	}
+	if tc, ok := rawConn.(*net.TCPConn); ok {
+		_ = tc.SetNoDelay(true)
+		_ = tc.SetKeepAlive(true)
+		_ = tc.SetKeepAlivePeriod(15 * time.Second)
+	} else if kac, ok := rawConn.(interface {
+		SetKeepAlive(bool) error
+		SetKeepAlivePeriod(time.Duration) error
+	}); ok {
+		_ = kac.SetKeepAlive(true)
+		_ = kac.SetKeepAlivePeriod(15 * time.Second)
+	}
+
 
 	now := time.Now()
 	clientHello, clientNonce, ts, err := h1session.CreateClientHello(c.cfg.PSK, now)
@@ -274,6 +286,10 @@ func (c *plainH1Conn) Write(b []byte) (n int, err error) {
 	return c.framedWriter.Write(b)
 }
 
+func (c *plainH1Conn) CloseWrite() error {
+	return c.chunkWriter.Close()
+}
+
 func (c *plainH1Conn) Close() error {
 	c.closeOnce.Do(func() {
 		close(c.closed)
@@ -282,6 +298,7 @@ func (c *plainH1Conn) Close() error {
 	})
 	return nil
 }
+
 
 func (c *plainH1Conn) LocalAddr() net.Addr                { return c.raw.LocalAddr() }
 func (c *plainH1Conn) RemoteAddr() net.Addr               { return c.raw.RemoteAddr() }

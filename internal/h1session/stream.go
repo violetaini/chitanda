@@ -162,3 +162,18 @@ func (c *Conn) Read(p []byte) (int, error) {
 func (c *Conn) Write(p []byte) (int, error) {
 	return c.writer.Write(p)
 }
+
+func (c *Conn) CloseWrite() error {
+	if cw, ok := c.Conn.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	return nil
+}
+
+func (c *Conn) CloseRead() error {
+	if cr, ok := c.Conn.(interface{ CloseRead() error }); ok {
+		return cr.CloseRead()
+	}
+	return nil
+}
+

@@ -35,7 +35,7 @@ func DialContext(ctx context.Context, address string) (net.Conn, error) {
 		if !allowed(candidate.IP) {
 			continue
 		}
-		dialer := net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+		dialer := net.Dialer{Timeout: 10 * time.Second, KeepAlive: 15 * time.Second}
 		conn, dialErr := dialer.DialContext(ctx, "tcp", net.JoinHostPort(candidate.IP.String(), portText))
 		if dialErr == nil {
 			return conn, nil

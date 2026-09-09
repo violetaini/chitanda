@@ -41,17 +41,29 @@ func newH2TransportClient(server, serverName, rootURL, requestURL, path string, 
 		if dialRaw != nil {
 			rawConn, err = dialRaw(ctx, network, server)
 		} else {
-			dialer := net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+			dialer := net.Dialer{Timeout: 10 * time.Second, KeepAlive: 15 * time.Second}
 			rawConn, err = dialer.DialContext(ctx, network, server)
 		}
 		if err != nil {
 			return nil, err
+		}
+		if tc, ok := rawConn.(*net.TCPConn); ok {
+			_ = tc.SetNoDelay(true)
+			_ = tc.SetKeepAlive(true)
+			_ = tc.SetKeepAlivePeriod(15 * time.Second)
+		} else if kac, ok := rawConn.(interface {
+			SetKeepAlive(bool) error
+			SetKeepAlivePeriod(time.Duration) error
+		}); ok {
+			_ = kac.SetKeepAlive(true)
+			_ = kac.SetKeepAlivePeriod(15 * time.Second)
 		}
 		tlsConn := tls.Client(rawConn, tlsCfg)
 		if err := tlsConn.HandshakeContext(ctx); err != nil {
 			_ = rawConn.Close()
 			return nil, err
 		}
+
 		return tlsConn, nil
 	}
 
