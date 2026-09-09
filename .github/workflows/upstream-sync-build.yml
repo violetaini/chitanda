@@ -162,6 +162,25 @@ jobs:
             
             CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH GOARM=$GOARM_VALUE go build $BUILD_FLAGS -trimpath -ldflags="$LDFLAGS" -o "../dist/$BIN_NAME" ${{ matrix.pkg_path }}
             
+            if [ "$GOOS" == "linux" ] && [ "$GOARCH" == "amd64" ]; then
+              if [ "${{ matrix.target }}" == "mihomo" ]; then
+                echo "===> Running Mihomo smoke test with Chitanda configurations..."
+                "../dist/$BIN_NAME" -t -f "$GITHUB_WORKSPACE/examples/mihomo/config.yaml"
+                cat << 'EOF' > /tmp/test-minimal.yaml
+mixed-port: 7890
+proxies:
+  - {name: test-minimal, server: 127.0.0.1, port: 443, type: chitanda, psk: test-secret-token}
+EOF
+                "../dist/$BIN_NAME" -t -f /tmp/test-minimal.yaml
+                rm -f /tmp/test-minimal.yaml
+                echo "===> Mihomo smoke test PASSED successfully!"
+              elif [ "${{ matrix.target }}" == "xray" ]; then
+                echo "===> Running Xray smoke test with Chitanda configurations..."
+                "../dist/$BIN_NAME" -test -config "$GITHUB_WORKSPACE/examples/xray/client_all_modes.json"
+                echo "===> Xray smoke test PASSED successfully!"
+              fi
+            fi
+            
             cd ../dist
             
             if [ "${{ matrix.target }}" == "xray" ]; then
