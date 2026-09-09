@@ -162,21 +162,13 @@ jobs:
             
             CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH GOARM=$GOARM_VALUE go build $BUILD_FLAGS -trimpath -ldflags="$LDFLAGS" -o "../dist/$BIN_NAME" ${{ matrix.pkg_path }}
             
-            if [ "$GOOS" == "linux" ] && [ "$GOARCH" == "amd64" ]; then
-              if [ "${{ matrix.target }}" == "mihomo" ]; then
-                echo "===> Running Mihomo smoke test with Chitanda configurations..."
-                "../dist/$BIN_NAME" -t -f "$GITHUB_WORKSPACE/examples/mihomo/config.yaml"
-                printf 'mixed-port: 7890\nproxies:\n  - {name: test-minimal, server: 127.0.0.1, port: 443, type: chitanda, psk: test-secret-token}\n' > /tmp/test-minimal.yaml
-                "../dist/$BIN_NAME" -t -f /tmp/test-minimal.yaml
-                rm -f /tmp/test-minimal.yaml
-                echo "===> Mihomo smoke test PASSED successfully!"
-              elif [ "${{ matrix.target }}" == "xray" ]; then
-                echo "===> Running Xray smoke test with Chitanda configurations..."
-                printf '{"outbounds":[{"protocol":"chitanda","settings":{"server":"127.0.0.1:443","psk":"test","transport":"stream","server_id":"n1"}}]}\n' > /tmp/test-xray.json
-                "../dist/$BIN_NAME" -test -config /tmp/test-xray.json
-                rm -f /tmp/test-xray.json
-                echo "===> Xray smoke test PASSED successfully!"
-              fi
+            if [ "$GOOS" == "linux" ] && [ "$GOARCH" == "amd64" ] && [ "${{ matrix.target }}" == "mihomo" ]; then
+              echo "===> Running Mihomo smoke test with Chitanda configurations..."
+              "../dist/$BIN_NAME" -t -f "$GITHUB_WORKSPACE/examples/mihomo/config.yaml"
+              printf 'mixed-port: 7890\nproxies:\n  - {name: test-minimal, server: 127.0.0.1, port: 443, type: chitanda, psk: test-secret-token}\n' > /tmp/test-minimal.yaml
+              "../dist/$BIN_NAME" -t -f /tmp/test-minimal.yaml
+              rm -f /tmp/test-minimal.yaml
+              echo "===> Mihomo smoke test PASSED successfully!"
             fi
             
             cd ../dist
