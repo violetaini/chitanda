@@ -86,6 +86,7 @@ func (h *OutboundHandler) Process(ctx context.Context, link *transport.Link, dia
 		}()
 
 		downloadErr := buf.Copy(buf.NewReader(conn), link.Writer)
+		_ = conn.Close()
 		<-uploadDone
 		return downloadErr
 	} else if destination.Network == xnet.Network_UDP {

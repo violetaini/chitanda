@@ -254,11 +254,11 @@ func (s *StreamServer) HandleConn(conn net.Conn) {
 		return
 	}
 
-	// 11. Dial upstream target
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
+	// 11. Dial upstream target using session-scoped context
+	connCtx, connCancel := context.WithCancel(s.ctx)
+	defer connCancel()
 
-	upstream, err := s.dialTarget(ctx, "tcp", targetAddr)
+	upstream, err := s.dialTarget(connCtx, "tcp", targetAddr)
 	if err != nil {
 		return
 	}
@@ -314,7 +314,7 @@ func (s *StreamServer) HandleConn(conn net.Conn) {
 	streamConn := rawstream.NewStreamConn(conn, rStream, wStream)
 
 	// 14. Bidirectional relay
-	relayBidirectional(s.ctx, streamConn, upstream)
+	relayBidirectional(connCtx, streamConn, upstream)
 }
 
 type closeWriter interface {
@@ -331,42 +331,60 @@ func relayBidirectional(ctx context.Context, client, target net.Conn) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	var wg sync.WaitGroup
-	wg.Add(2)
-
 	go func() {
 		<-ctx.Done()
 		_ = client.Close()
 		_ = target.Close()
 	}()
 
+	uploadDone := make(chan struct{}, 1)
+	downloadDone := make(chan struct{}, 1)
+
 	// client -> target
 	go func() {
-		defer wg.Done()
 		bufPtr := copyBufferPool.Get().(*[]byte)
 		defer copyBufferPool.Put(bufPtr)
 		_, err := io.CopyBuffer(target, client, *bufPtr)
 		if err != nil {
 			cancel()
-			return
+		} else {
+			closeWriteConn(target)
 		}
-		closeWriteConn(target)
+		uploadDone <- struct{}{}
 	}()
 
 	// target -> client
 	go func() {
-		defer wg.Done()
 		bufPtr := copyBufferPool.Get().(*[]byte)
 		defer copyBufferPool.Put(bufPtr)
 		_, err := io.CopyBuffer(client, target, *bufPtr)
 		if err != nil {
 			cancel()
-			return
+		} else {
+			closeWriteConn(client)
 		}
-		closeWriteConn(client)
+		downloadDone <- struct{}{}
 	}()
 
-	wg.Wait()
+	select {
+	case <-uploadDone:
+		// Client finished sending; allow target to finish downloading or drain up to 30s
+		select {
+		case <-downloadDone:
+		case <-ctx.Done():
+		case <-time.After(30 * time.Second):
+			cancel()
+		}
+	case <-downloadDone:
+		// Target finished sending; allow client to finish uploading or drain up to 30s
+		select {
+		case <-uploadDone:
+		case <-ctx.Done():
+		case <-time.After(30 * time.Second):
+			cancel()
+		}
+	case <-ctx.Done():
+	}
 }
 
 // Close gracefully closes the listener, replay cache, and active PlainUDP server.

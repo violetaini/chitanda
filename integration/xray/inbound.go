@@ -262,6 +262,21 @@ func (c *pipeConn) Close() error {
 	return err2
 }
 
+func (c *pipeConn) CloseWrite() error {
+	_ = c.writer.Flush()
+	if c.writeCloser != nil {
+		return common.Close(c.writeCloser)
+	}
+	return nil
+}
+
+func (c *pipeConn) CloseRead() error {
+	if c.readCloser != nil {
+		return common.Close(c.readCloser)
+	}
+	return nil
+}
+
 func (c *pipeConn) LocalAddr() net.Addr                { return &net.TCPAddr{IP: net.IPv4zero, Port: 0} }
 func (c *pipeConn) RemoteAddr() net.Addr               { return &net.TCPAddr{IP: net.IPv4zero, Port: 0} }
 func (c *pipeConn) SetDeadline(t time.Time) error      { return nil }

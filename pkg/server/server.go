@@ -154,7 +154,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-uploadDone:
 		case <-r.Context().Done():
-		case <-time.After(5 * time.Second):
+		case <-time.After(30 * time.Second):
 		}
 	case <-uploadDone:
 		// Client finished uploading; wait for upstream download to finish.
@@ -314,6 +314,16 @@ func (s *Server) servePlainH1(w http.ResponseWriter, r *http.Request) {
 
 	select {
 	case <-downloadDone:
+		select {
+		case <-uploadDone:
+		case <-r.Context().Done():
+		case <-time.After(30 * time.Second):
+		}
+	case <-uploadDone:
+		select {
+		case <-downloadDone:
+		case <-r.Context().Done():
+		}
 	case <-r.Context().Done():
 	}
 	_ = upstream.Close()

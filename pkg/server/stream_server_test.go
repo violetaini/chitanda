@@ -722,3 +722,186 @@ func TestClient_DialRawStream_ContextTimeoutAndCancellation(t *testing.T) {
 		t.Fatalf("dial took %v to timeout, expected ~150ms", elapsed)
 	}
 }
+
+func TestStreamServer_ContextLifecycle_NoPrematureTimeout(t *testing.T) {
+	psk := []byte("01234567890123456789012345678901")
+
+	srvL, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("server listen: %v", err)
+	}
+	defer srvL.Close()
+
+	echoL, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("echo listen: %v", err)
+	}
+	defer echoL.Close()
+
+	go func() {
+		for {
+			c, err := echoL.Accept()
+			if err != nil {
+				return
+			}
+			go func(conn net.Conn) {
+				defer conn.Close()
+				_, _ = io.Copy(conn, conn)
+			}(c)
+		}
+	}()
+
+	ctxRecorded := make(chan context.Context, 1)
+	srv := NewStreamServer(psk, "", nil, func(ctx context.Context, network, address string) (net.Conn, error) {
+		ctxRecorded <- ctx
+		var d net.Dialer
+		return d.DialContext(ctx, network, echoL.Addr().String())
+	})
+	defer srv.Close()
+
+	go func() {
+		_ = srv.Serve(srvL)
+	}()
+
+	cli, err := client.New(client.Config{
+		Server:       srvL.Addr().String(),
+		PSK:          psk,
+		TCPTransport: client.TCPTransportStream,
+	})
+	if err != nil {
+		t.Fatalf("client.New: %v", err)
+	}
+	defer cli.Close()
+
+	conn, err := cli.DialContext(context.Background(), "tcp", "target.local:80")
+	if err != nil {
+		t.Fatalf("DialContext failed: %v", err)
+	}
+
+	var upstreamCtx context.Context
+	select {
+	case upstreamCtx = <-ctxRecorded:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for dialTarget to be called")
+	}
+
+	// Verify that upstreamCtx does NOT have a short deadline (e.g. 15s) imposed by StreamServer
+	if deadline, hasDeadline := upstreamCtx.Deadline(); hasDeadline {
+		t.Fatalf("upstreamCtx should NOT have a deadline, but got deadline %v", deadline)
+	}
+
+	// Verify that upstreamCtx is NOT done while connection is active
+	select {
+	case <-upstreamCtx.Done():
+		t.Fatalf("upstreamCtx was cancelled prematurely while connection is active")
+	default:
+	}
+
+	// Write and read data to prove session works
+	if _, err := conn.Write([]byte("ping")); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+	buf := make([]byte, 4)
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		t.Fatalf("read failed: %v", err)
+	}
+	if string(buf) != "ping" {
+		t.Fatalf("expected ping, got %s", string(buf))
+	}
+
+	// Close connection from client side
+	_ = conn.Close()
+
+	// Verify that upstreamCtx is cancelled once session terminates
+	select {
+	case <-upstreamCtx.Done():
+		// Successfully cancelled when session ended!
+	case <-time.After(2 * time.Second):
+		t.Fatalf("upstreamCtx was not cancelled after session ended")
+	}
+}
+
+func TestStreamServer_IdleLongLivedSession(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping 18-second idle test in short mode")
+	}
+	psk := []byte("01234567890123456789012345678901")
+
+	echoL, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("echo listen: %v", err)
+	}
+	defer echoL.Close()
+
+	go func() {
+		for {
+			c, err := echoL.Accept()
+			if err != nil {
+				return
+			}
+			go func(conn net.Conn) {
+				defer conn.Close()
+				_, _ = io.Copy(conn, conn)
+			}(c)
+		}
+	}()
+
+	srvL, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("server listen: %v", err)
+	}
+	defer srvL.Close()
+
+	srv := NewStreamServer(psk, "", nil, func(ctx context.Context, network, address string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, network, echoL.Addr().String())
+	})
+	defer srv.Close()
+
+	go func() {
+		_ = srv.Serve(srvL)
+	}()
+
+	cli, err := client.New(client.Config{
+		Server:       srvL.Addr().String(),
+		PSK:          psk,
+		TCPTransport: client.TCPTransportStream,
+	})
+	if err != nil {
+		t.Fatalf("client.New: %v", err)
+	}
+	defer cli.Close()
+
+	conn, err := cli.DialContext(context.Background(), "tcp", "target.local:80")
+	if err != nil {
+		t.Fatalf("DialContext failed: %v", err)
+	}
+	defer conn.Close()
+
+	// Initial message
+	if _, err := conn.Write([]byte("hello before idle")); err != nil {
+		t.Fatalf("write before idle failed: %v", err)
+	}
+	buf := make([]byte, len("hello before idle"))
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		t.Fatalf("read before idle failed: %v", err)
+	}
+
+	// Sleep for 18 seconds (EXCEEDING the previous 15-second cutoff!)
+	t.Logf("Sleeping for 18 seconds (idle silence test)...")
+	time.Sleep(18 * time.Second)
+
+	// Second message after 18 seconds of complete silence
+	msgAfter := []byte("hello after 18s idle")
+	if _, err := conn.Write(msgAfter); err != nil {
+		t.Fatalf("write after 18s idle failed: %v", err)
+	}
+	bufAfter := make([]byte, len(msgAfter))
+	if _, err := io.ReadFull(conn, bufAfter); err != nil {
+		t.Fatalf("read after 18s idle failed (SESSION DIED): %v", err)
+	}
+	if string(bufAfter) != string(msgAfter) {
+		t.Fatalf("mismatch after idle: got %q, want %q", bufAfter, msgAfter)
+	}
+	t.Logf("SUCCESS: Connection survived 18s of complete idle silence!")
+}
