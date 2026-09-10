@@ -110,11 +110,11 @@ Measured between the two test nodes, whose raw RTT was about 100 ms and iperf3 t
 
 The 16 MiB HTTP/2 stream window is intentionally a build-time vendored change. It removes the default 4 MiB long-haul throughput ceiling while leaving TLS and HTTP/2 framing in mature libraries. See `TEST_REPORT.md` for full benchmark details.
 
-## H1 免证书纯 IP 部署说明 (H1 & Plain-UDP)
+## H1 証明書不要・IP直指定デプロイ仕様 (H1 & Plain-UDP)
 
-在不需要 TLS 证书、或者纯 IP 敏感场景下，可以直接启动免证书纯 IP 服务：
+TLS 証明書が不要な環境や、IP 直指定が必要なシナリオにおいて、証明書不要の純 IP サービスを直接起動できます：
 
-### 服务端启动命令 (无证书纯 IP 模式)
+### サーバー起動コマンド (証明書不要・純 IP モード)
 ```sh
 ./myxray-server \
   -listen=:18200 \
@@ -123,14 +123,14 @@ The 16 MiB HTTP/2 stream window is intentionally a build-time vendored change. I
   -psk-file=/etc/myxray/psk.key \
   -replay-file=/var/lib/myxray/replay_plain.log
 ```
-*(注意：在无证书模式下，无需指定 `-cert` 和 `-key` 参数，服务端会自动以原生 HTTP/1.1 全双工与 Plain-UDP 数据报模式运行。)*
+*(注意: 証明書不要モードでは `-cert` および `-key` パラメーターの指定は不要です。サーバーは自動的にネイティブ HTTP/1.1 全二重および Plain-UDP データグラムモードで動作します。)*
 
-### 客户端 SDK 配置示例
+### クライアント SDK 設定例
 ```go
 cli, err := client.New(client.Config{
     Server:       "168.138.209.1:18200",
     PSK:          pskBytes,
     Path:         "/api/v1/private-sync-gateway",
-    TCPTransport: client.TCPTransportH1, // 启用 H1 + Plain-UDP (支持纯 IP 直连)
+    TCPTransport: client.TCPTransportH1, // H1 + Plain-UDP を有効化 (純 IP 直指定をサポート)
 })
 ```

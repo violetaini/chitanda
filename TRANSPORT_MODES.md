@@ -1,106 +1,106 @@
-# Chitanda 五种传输载荷模式与生命周期规范 (Transport Modes & Lifecycle Specification)
+# Chitanda 5大トランスポートキャリア仕様とライフサイクル規約 (Transport Modes & Lifecycle Specification)
 
-Chitanda (千反田) 核心协议通过 `TCPTransport` 提供 `h2`、`stream`、`h3`、`auto`、`h1` (plain-h1) 共 5 种传输载荷模式。
+Chitanda (千反田) コアプロトコルは、`TCPTransport` 設定を通じて `h2`、`stream`、`h3`、`auto`、`h1` (plain-h1) の計 5 種類のトランスポートキャリアモードを提供します。
 
-本文档详细规范各模式的数据路径、密码学模型、故障切换、半关闭（Half-Close）生命周期与安全边界。
+本文書では、各モードのデータパス、暗号化モデル、フェイルオーバー動作、ハーフクローズ（Half-Close）ライフサイクル、およびセキュリティ境界を詳細に定義します。
 
 ---
 
-## 1. 模式总览矩阵
+## 1. モード一覧マトリクス (Transport Carrier Matrix)
 
-| 配置值 (`TCPTransport`) | TCP 承载机制 | UDP 承载机制 | 0-RTT 特性 | 证书/域名要求 | 建议定位与核心优势 |
+| 設定値 (`TCPTransport`) | TCP 転送方式 | UDP 転送方式 | 0-RTT 特性 | 証明書・ドメイン要件 | 推奨用途と主な優位性 |
 | :--- | :--- | :--- | :---: | :---: | :--- |
-| **`h2`** *(默认)* | TLS 1.3 / HTTP/2 连接池流复用 | H3 / QUIC Datagram | ✅ (连接复用 0-RTT) | 必须配置域名与有效证书 | **生产公网主线推荐**：低 CPU 开销、极高吞吐、主流成熟 TLS 伪装、RFC 7540 动态 Padding 防指纹 |
-| **`stream`** | RawStream TCP (AES-128-GCM) | `plain-udp` 原生 AEAD 数据报 | ✅ (0-RTT OPEN 动态填充) | **完全不需要** (免证书专线/纯 IP) | **IEPL/IPLC 专线与高性能中转推荐**：单线程近 2000 MB/s、离散握手 0 探测指纹、毫秒级快速半关闭 |
-| **`h3`** | TLS 1.3 / QUIC Stream / HTTP/3 | H3 / QUIC Datagram | ✅ (持久化票据 0-RTT) | 必须配置域名与有效证书 | **抗弱网/丢包主线**：原生 QUIC 0 队头阻塞、移动端网络切换平滑保活 |
-| **`auto`** | H2 优先 $\leftrightarrow$ 迟滞自愈 H3 | H3 / QUIC Datagram | ✅ | 必须配置域名与有效证书 | **自适应容灾**：H2 异常自动降级 H3，网络恢复自动回切 |
-| **`h1`** *(别名 `plain-h1`)* | 纯 IP HTTP/1.1 全双工 + PSK-AEAD | `plain-udp` 原生 AEAD 数据报 | ✅ (Flight 1 预派生 0-RTT) | **完全不需要** (纯 IP 直连) | **免证书实验/内网载荷**：极简无 TLS，内层 ChaCha20 加密，外层全双工 HTTP/1.1 伪装 |
+| **`h2`** *(デフォルト)* | TLS 1.3 / HTTP/2 コネクションプール多重化 | H3 / QUIC Datagram | ✅ (コネクション流用 0-RTT) | ドメインおよび有効な TLS 証明書が必須 | **本番パブリック環境推奨**：低 CPU 負荷、極めて高いスループット、成熟した標準 TLS 偽装、RFC 7540 動的パディングによるパケット長解析防止 |
+| **`stream`** | RawStream TCP (AES-128-GCM) | `plain-udp` ネイティブ AEAD データグラム | ✅ (0-RTT OPEN 動的パディング) | **完全不要** (証明書不要の専用線 / 純 IP) | **IEPL / IPLC 専用線および高速中継推奨**：シングルスレッド約 2,000 MB/s、離散ハンドシェイクによるプローブ指紋ゼロ、ミリ秒単位の高速ハーフクローズ |
+| **`h3`** | TLS 1.3 / QUIC Stream / HTTP/3 | H3 / QUIC Datagram | ✅ (永続化チケット 0-RTT) | ドメインおよび有効な TLS 証明書が必須 | **パケットロス・弱網環境推奨**：ネイティブ QUIC による Head-of-Line ブロッキング完全排除、モバイル回線切り替え時のシームレスなセッション維持 |
+| **`auto`** | H2 優先 $\leftrightarrow$ ヒステリシス自律回復 H3 | H3 / QUIC Datagram | ✅ | ドメインおよび有効な TLS 証明書が必須 | **自律フェイルオーバー**：H2 異常検知時に自動で H3 へ降格、ネットワーク回復時に自動切り戻し |
+| **`h1`** *(別名 `plain-h1`)* | 純 IP HTTP/1.1 全二重 + PSK-AEAD | `plain-udp` ネイティブ AEAD データグラム | ✅ (Flight 1 事前導出 0-RTT) | **完全不要** (純 IP 直接接続) | **証明書不要・実験的 / イントラネット向けキャリア**：TLS オーバーヘッド皆無、内層 ChaCha20 暗号化、外層は全二重 HTTP/1.1 に偽装 |
 
 ---
 
-## 2. 各模式技术细节
+## 2. 各モードの技術仕様 (Technical Details)
 
-### 1. `h2`：固定 HTTP/2 TCP Carrier (生产公网主线推荐)
-- **配置方式**：`TCPTransport: "h2"`
-- **数据路径**：客户端建立 TLS 1.3 连接，验证服务端证书与 SNI。私有代理流使用 HTTP/2 `POST` 请求，鉴权完成后直接在请求体和响应体中传输原始 TCP 字节流。
-- **连接池化**：SDK 维护 `TCPPoolSize`（1-16）个独立 H2 物理连接，动态调度分配到活跃流最少的连接。
-- **RFC 7540 协议级动态填充 (Dynamic Frame Padding)**：HEADERS 与 DATA 帧注入 8~64 字节随机长度的原生 RFC 7540 Padding，彻底打破外层 TLS 记录与内层明文的 1:1 统计相关性。
-- **Wire-Version 向后兼容**：服务端自适应识别旧客户端私有帧标记（`X-Framing: 1`）与现代原始字节流。
-- **UDP 路径**：由独立的 H3 Manager 建立 QUIC Datagram 关联通道。
+### 1. `h2`: 固定 HTTP/2 TCP Carrier (本番パブリック環境推奨)
+- **設定指定**: `TCPTransport: "h2"`
+- **データパス**: クライアントは TLS 1.3 接続を確立し、サーバー証明書と SNI を検証します。プロキシストリームは HTTP/2 `POST` リクエストを使用し、認証完了後はリクエストボディとレスポンスボディ内で生の TCP バイトストリームを直接全二重転送します。
+- **コネクションプーリング**: SDK は `TCPPoolSize`（1〜16）個の独立した H2 物理接続を維持し、アクティブストリーム数が最も少ない接続へ動的にトラフィックを分散します。
+- **RFC 7540 プロトコルレベル動的フレームパディング (Dynamic Frame Padding)**: HEADERS および DATA フレームに 8〜64 バイトのランダム長を持つ RFC 7540 規格準拠パディングを動的注入し、外層 TLS レコード長と内層平文長の 1:1 相関関係を完全に排除します。
+- **Wire-Version 下位互換性**: サーバーは独自のフレーム識別子（`X-Framing: 1`）を持つレガシークライアントと最新のストリームクライアントを自動識別し、互換性を確保します。
+- **UDP パス**: 独立した H3 Manager により確立される QUIC Datagram チャネルを通じて転送されます。
 
-### 2. `stream`：RawStream TCP Carrier (IEPL/IPLC 专线与中转推荐)
-- **配置方式**：`TCPTransport: "stream"`
-- **无 TLS / 专线极致性能**：去除 TLS 协议包裹与多路复用开销，直接采用 AES-128-GCM 进行轻量高吞吐流式加解密。
-- **多态离散握手 (Polymorphic Discrete Handshake)**：
-  - ClientHello 随机长度为 49~113 字节，ServerHello 随机长度为 41~105 字节；
-  - 掩码加密时间戳与填充长度，彻底消除 `0x00000000` 明文零值特征；
-  - 服务端读取固定首包执行常数时间 HMAC 验证，遇非认证流量响应 0 字节并断开，杜绝主动探测。
-- **自适应动态记录分帧 (Dynamic Record Sizing)**：
-  - 首包交互/空闲后采用 1,418 字节 MTU 契合分帧，降低 Web/API 交互延迟 > 50%；
-  - 持续吞吐突发（>128KB）自适应平滑跃迁至 32KB 分帧，单核吞吐突破 30+ Gbps，零内存分配。
-- **ServerID 绑定防跨节点重放**：会话密钥强绑定目标 `server_id`，杜绝节点间凭据重放攻击。
+### 2. `stream`: RawStream TCP Carrier (IEPL / IPLC 専用線・高速中継推奨)
+- **設定指定**: `TCPTransport: "stream"`
+- **TLS 不要・専用線極限パフォーマンス**: TLS プロトコルのカプセル化およびストリーム多重化オーバーヘッドを完全に排除し、AES-128-GCM を直接採用して軽量・超高速なストリーミング暗号化を実現します。
+- **多相的離散ハンドシェイク (Polymorphic Discrete Handshake)**:
+  - ClientHello の長さを 49〜113 バイト、ServerHello の長さを 41〜105 バイトに離散・ランダム化。
+  - タイムスタンプとパディング長を動的マスクで暗号化し、`0x00000000` などの平文ゼロ値特徴を完全遮断。
+  - サーバーは固定 49 バイトの初期パケットを読み取って固定時間 HMAC 検証を実施。未認証トラフィックに対しては 0 バイト（無応答）で即時切断し、アクティブプローブオラクルを排除。
+- **適応型動的レコードサイジング (Dynamic Record Sizing)**:
+  - 接続初期やアイドル静黙後は MTU 最適化サイズ（1,418 バイト）でフレーム分割し、Web / API 通信の初期遅延（TTFB）を 50% 以上削減。
+  - バーストトラフィック継続時（累積送信 >128KB）は 32KB フレームへ自動拡大。シングルスレッドで 30+ Gbps のスループットを達成し、ヒープメモリ割り当てゼロ（0 allocs/op）を維持。
+- **ServerID バインドによるクロスノードリプレイ防御**: セッション鍵を接続先 `server_id` に強制バインドし、ノード間をまたぐリプレイ攻撃を防御。
 
-### 3. `h3`：固定 HTTP/3 (QUIC) TCP Carrier
-- **配置方式**：`TCPTransport: "h3"`
-- **数据路径**：基于 QUIC Stream 与 HTTP/3 传输。每个 TCP 代理连接映射为一个独立的 QUIC bidirectional stream。
-- **0-RTT 与抗丢包**：QUIC 原生消除了 TCP 队头阻塞；配置 `SessionCacheFile` 可跨进程复用 TLS 票据实现 0-RTT。
-- **UDP 路径**：复用同一 QUIC 栈的 HTTP/3 Extended CONNECT 与 QUIC Datagram (RFC 9221)。
+### 3. `h3`: 固定 HTTP/3 (QUIC) TCP Carrier
+- **設定指定**: `TCPTransport: "h3"`
+- **データパス**: QUIC Stream および HTTP/3 に基づいて転送されます。各 TCP プロキシ接続は独立した QUIC 双方向ストリームにマッピングされます。
+- **0-RTT とパケットロス耐性**: QUIC ネイティブの仕組みにより TCP Head-of-Line ブロッキングを解消。`SessionCacheFile` を設定することで、プロセス再起動後も TLS セッションチケットを再利用して 0-RTT ハンドシェイクを実現します。
+- **UDP パス**: 同一 QUIC スタック上の HTTP/3 Extended CONNECT および QUIC Datagram (RFC 9221) を共有・再利用します。
 
-### 4. `auto`：动态健康探测与迟滞自愈 (Hysteresis Failover/Failback)
-- **配置方式**：`TCPTransport: "auto"`
-- **工作机制**：
-  1. 默认优先使用 H2 快速通道建立出站 TCP；
-  2. 后台 Prober 每 3 秒发送轻量探测（`HEAD /` 携带 `X-Carrier-Probe: 1`）；
-  3. **快速降级**：连续 2 次探测失败或 RTT > 500ms（约 6 秒内），标记降级，后续新建 TCP 自动走 H3 QUIC 连接池；
-  4. **迟滞自愈**：当 H2 连续 10 次探测成功且 RTT <= 500ms（稳定 30 秒），解除降级状态，新建 TCP 自动切回 H2；
-  5. 切换仅影响后续新建流，已有在传流保持原有连接直至自然结束。
+### 4. `auto`: 動的ヘルスチェックとヒステリシス自律回復 (Hysteresis Failover/Failback)
+- **設定指定**: `TCPTransport: "auto"`
+- **動作メカニズム**:
+  1. デフォルトでは高速な H2 チャネルを優先してアウトバウンド TCP を確立。
+  2. バックグラウンド Prober が 3 秒ごとに軽量ヘルスチェックパケット（`X-Carrier-Probe: 1` を付与した `HEAD /`）を送信。
+  3. **迅速な降格 (Fast Failover)**: 2 回連続でプローブに失敗するか、RTT が 500ms を超過した場合（約 6 秒以内）、降格状態と判定し、以降の新規 TCP 接続は自動的に H3 QUIC プールへルーティング。
+  4. **ヒステリシス自律回復 (Hysteresis Recovery)**: H2 で 10 回連続してプローブが成功し、かつ RTT <= 500ms を維持した場合（30 秒間の安定確認）、降格状態を解除して新規接続を H2 へ自動復帰。
+  5. 切り替えは以降の「新規ストリーム」にのみ適用され、既存の通信中ストリームは終了まで維持されます。
 
-### 5. `h1` (`plain-h1`) / `plain-udp`：免证书纯 IP 实验载荷
-- **配置方式**：`TCPTransport: "h1"` (或 `"plain-h1"`)
-- **无 TLS / 纯 IP**：无需配置 `ServerName` 与证书，直连服务器 IP:Port。
-- **0-RTT 流水线机制**：Flight 1 合并发送 HTTP 请求头 + ClientHello + 0-RTT OPEN Target 帧，服务端解密后立即连接目标，实现应用层 0-RTT。
-- **`plain-udp` 原生 AEAD 数据报**：
-  - 全密文高熵载荷（香农熵 > 7.996 bits/byte），双向独立密钥（`c2sKey`/`s2cKey`）与 Associated Data 强绑定防反射；
-  - 2048 位滑动窗口抗乱序与重放，全服会话上限与每会话并发限制杜绝资源泛洪。
+### 5. `h1` (`plain-h1`) / `plain-udp`: 証明書不要・純 IP 実験的キャリア
+- **設定指定**: `TCPTransport: "h1"` (または `"plain-h1"`)
+- **TLS 不要・純 IP 直指定**: `ServerName` や証明書の設定は一切不要で、サーバーの IP:Port へ直接接続します。
+- **0-RTT パイプライン化**: Flight 1 において HTTP リクエストヘッダー + ClientHello + 0-RTT OPEN ターゲットフレームを一括送信。サーバーは復号後即座に宛先へ接続を開始し、アプリケーション層 0-RTT を達成。
+- **`plain-udp` ネイティブ AEAD データグラム**:
+  - 完全暗号化高エントロピーペイロード（シャノンエントロピー > 7.996 bits/byte）。双方向で独立した鍵（`c2sKey`/`s2cKey`）と Associated Data をバインドし、反射攻撃を防御。
+  - 2048 ビットのスライディングウィンドウでパケットの順序逆転とリプレイを検知。サーバー全体およびセッション単位の同時接続数上限によりリソース枯渇を防止。
 
 ---
 
-## 3. 全模式半关闭与优雅回收生命周期 (Half-Close & Graceful Lifecycle)
+## 3. 全モード共通のハーフクローズとグレースフル・リソース回収 (Half-Close & Graceful Lifecycle)
 
-在代理手游（如《碧蓝档案》）、短 HTTP/1.1 API 轮询或移动客户端连接池中，通常呈现 **“客户端发起请求 $\rightarrow$ 服务端响应 $\rightarrow$ 目标服务器主动发送 FIN 断开”** 的时序。若双向代理流不能快速闭合空闲上行方向，会导致连接大量挂死、软路由文件描述符（FD）耗尽及代理内核假死。
+モバイルゲーム（例: 『ブルーアーカイブ』）のプロキシ、短時間の HTTP/1.1 API ポーリング、または各種クライアントのコネクションプールでは、通常 **「クライアントがリクエスト送信 $\rightarrow$ サーバーが応答 $\rightarrow$ 宛先サーバーが能動的に FIN を送信して切断」** というシーケンスが発生します。プロキシの双方向ストリームが空閑状態となったアップストリーム方向を速やかに切断できない場合、大量の接続が残留（スタック）し、ソフトウェアルーターのファイルディスクリプタ（FD）枯渇やプロキシコアのフリーズを引き起こします。
 
-Chitanda 对全部 5 种载荷模式实施了统一的生命周期与优雅回收控制：
+Chitanda は、サポートする全 5 種類のキャリアモードに対して、統一されたライフサイクル管理とミリ秒単位のグレースフル回収制御を実施しています：
 
 ```text
-  [客户端 App / 游戏] ──(请求数据)──> [代理客户端] ──(隧道载荷)──> [Chitanda 服务端] ──(请求)──> [目标服务器]
-                                                                                             │
-                                                                                        (发送响应)
-                                                                                             │
-  [客户端 App / 游戏] <──(响应数据)── [代理客户端] <──(隧道载荷)── [Chitanda 服务端] <──(返回 200 OK)
-                                                                                             │
-                                                                                        (目标发送 FIN/EOF)
-                                                                                             │
-                                                                                    【downloadDone 触发】
-                                                                                             │
-                                                      ┌──────────────────────────────────────┴──────────────────────────────────────┐
-                                                      ▼                                                                             ▼
-                                            【stream 专线模式】                                                          【h2 / h3 / h1 模式】
-                                    1. 立即调用 closeWriteConn(client)                                             1. h2/h1: 启动 250ms 快速回收定时器
-                                       发送带内 WriteEOF() [0x00, 0x00] + TCP FIN                                  2. h3: 启动 250ms 定时器并触发 stream.CancelRead(0)
-                                    2. 启动 250ms SetReadDeadline 保护                                             3. 杜绝旧版 30s 漫长等待，连接在毫秒级释放！
-                                    3. 空闲客户端在 250ms 内强制释放两端套接字
+  [クライアント App / ゲーム] ──(リクエスト)──> [プロキシクライアント] ──(トンネル)──> [Chitanda サーバー] ──(リクエスト)──> [宛先サーバー]
+                                                                                                                │
+                                                                                                          (レスポンス返送)
+                                                                                                                │
+  [クライアント App / ゲーム] <──(レスポンス)── [プロキシクライアント] <──(トンネル)── [Chitanda サーバー] <──(200 OK 返却)
+                                                                                                                │
+                                                                                                          (宛先が FIN/EOF 送信)
+                                                                                                                │
+                                                                                                        【downloadDone トリガー】
+                                                                                                                │
+                                                        ┌──────────────────────────────────────┴──────────────────────────────────────┐
+                                                        ▼                                                                             ▼
+                                              【stream 専用線モード】                                                        【h2 / h3 / h1 モード】
+                                      1. closeWriteConn(client) を即時実行                                           1. h2/h1: 250ms 高速回収タイマーを起動
+                                         インバンド WriteEOF() [0x00, 0x00] + TCP FIN を送信                         2. h3: 250ms タイマー起動および stream.CancelRead(0) 実行
+                                      2. 250ms SetReadDeadline 保護を起動                                            3. 従来の 30 秒冗長待機を排除し、ミリ秒単位で解放！
+                                      3. アイドルクライアントの両端ソケットを 250ms 以内に強制解放
 ```
 
-### 关键回收规范：
-1. **下行优先回收 (Download-Completion Triggered Drain)**：
-   - 目标服务器响应完毕并关闭连接后，服务端认为核心业务交互已完成。
-   - 对客户端方向启动 **250 毫秒（250ms）** 优雅排空窗口，允许客户端传输尾随确认或 FIN。
-   - 若客户端连接池处于空闲静默状态（未主动发 FIN），250ms 超时将直接唤醒读取协程并安全切断两端套接字，**杜绝旧版代码挂起 30 秒导致的 FD 暴涨**。
-2. **握手锁与上游连接解耦 (Handshake Scope Decoupling)**：
-   - `stream` 模式的 2 秒握手截止时间与 512 握手信号量仅在 ClientHello/ServerHello 密文握手阶段生效；
-   - 密钥协商完毕后立即调用 `releaseHandshake()` 并清空连接超时，海外高延迟目标建连不受握手超时截断。
-3. **带内流结束标界 (In-band EOF Marker)**：
-   - `StreamConn.CloseWrite()` 同时下发 2 字节 `[0x00, 0x00]` 带内标记与底层 TCP FIN，即使中间路由过滤 FIN，对端 `FramedReader` 仍能准确感知单向流关闭。
-4. **客户端 UDP 零 DefaultResolver 契约 (Zero DefaultResolver Contract)**：
-   - 针对 Mihomo (OpenClash / CMFA) 严禁代理出站调用 Go 标准库系统 DNS（否则触发防御性自杀断言 `os.Exit(2)`），全模式 UDP 客户端全面拔除 `net.DefaultResolver`；
-   - 数据报采用 `netip.ParseAddrPort` 与 `net.ParseIP` 纯内存无锁反向解析目标，节点域名解析完全委托给 Mihomo 自身解析器，彻底消除移动端/软路由在 UDP 场景下的闪退崩溃。
+### 主要な回収仕様 (Key Reclamation Rules):
+1. **ダウンロード完了連動ドレイン (Download-Completion Triggered Drain)**:
+   - 宛先サーバーがレスポンスを完了して接続を切断した時点で、サーバーは主要な業務通信が終了したと判断します。
+   - クライアント方向に対して **250 ミリ秒（250ms）** のグレースフル排空ウィンドウを起動し、クライアントからの末尾 ACK や FIN パケットの到達を許容します。
+   - クライアントの接続プールがアイドル状態（能動的に FIN を送信しない）であっても、250ms のタイムアウトによりリード用 Goroutine を起床させて両端のソケットを安全に切断。**旧実装で発生していた 30 秒の待機ハングによる FD 枯渇を根絶**します。
+2. **ハンドシェイクロックとアップストリーム接続の分離 (Handshake Scope Decoupling)**:
+   - `stream` モードの 2 秒間ハンドシェイク制限時間および 512 個のセマフォは、ClientHello/ServerHello の暗号化ハンドシェイク段階にのみ適用されます。
+   - 鍵交換完了直後に `releaseHandshake()` を呼び出して接続タイムアウトをクリアするため、海外の高遅延宛先への接続処理がハンドシェイクタイムアウトによって切断されることはありません。
+3. **インバンド EOF マーカー (In-band EOF Marker)**:
+   - `StreamConn.CloseWrite()` は、2 バイトの `[0x00, 0x00]` インバンドマーカーと下位レイヤーの TCP FIN を同時に送信します。中継ネットワーク機器によって FIN がドロップされた場合でも、対向の `FramedReader` は単方向ストリームの終了を確実に検知できます。
+4. **クライアント UDP Zero-DefaultResolver 規約 (Zero DefaultResolver Contract)**:
+   - Mihomo (OpenClash / CMFA) において、プロキシアウトバウンドが Go 標準ライブラリのシステム DNS を呼び出すことを防護的に禁止（違反時は `os.Exit(2)` で即時クラッシュ）している仕様に対応し、全モードの UDP クライアントから `net.DefaultResolver` への依存を完全排除。
+   - パケットの逆引きは `netip.ParseAddrPort` および `net.ParseIP` によるロックフリーなインメモリ処理で行い、ノードのドメイン解決は Mihomo 自身のリゾルバへ委譲。モバイル端末やルーター環境での UDP 通信によるクラッシュを根絶しています。

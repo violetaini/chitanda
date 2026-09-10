@@ -1,48 +1,48 @@
-# Chitanda 协议全模式配置指南 (Mihomo / Clash.Meta & Xray-core Wiki)
+# Chitanda プロトコル全モード設定ガイド (Mihomo / Clash.Meta & Xray-core Wiki)
 
-本文档提供 **Chitanda (千反田)** 传输协议在 **Mihomo (Clash.Meta)** 客户端与 **Xray-core** 服务端/客户端中的完整配置手册与 5 种传输载荷模式（`h2` / `stream` / `h3` / `auto` / `h1`）的详细用例。
+本文書は、**Chitanda (千反田)** 転送プロトコルにおける **Mihomo (Clash.Meta)** クライアントおよび **Xray-core** サーバー／クライアントの完全な設定マニュアルと、5 種類のトランスポートキャリアモード（`h2` / `stream` / `h3` / `auto` / `h1`）の詳細な構成例を提供します。
 
 ---
 
-## 1. 传输载荷模式概览 (Transport Matrix)
+## 1. トランスポートキャリアモード概要 (Transport Matrix)
 
-| 模式 | 传输标识 | 承载机制 (TCP / UDP) | 证书要求 | 典型适用场景 |
+| モード | トランスポート識別子 | 転送メカニズム (TCP / UDP) | 証明書要件 | 主な推奨ユースケース |
 | :--- | :--- | :--- | :---: | :--- |
-| **H2 多路复用** | `h2` | TLS 1.3 + HTTP/2 流复用 / H3 QUIC Datagram | 必须 (有效 TLS 证书) | **生产环境主线推荐**。高并发池化复用、极低 CPU 开销与成熟抗封锁。 |
-| **专线极速流** | `stream` | RawStream TCP (AES-128-GCM) / `plain-udp` 原生 AEAD | **免证书 (专线/纯 IP)** | **IEPL/IPLC 专线与高性能中转**。单线程吞吐超 4000 MB/s，离散握手，0 探测回显。 |
-| **原生 H3/QUIC** | `h3` | TLS 1.3 + HTTP/3 流复用 / H3 QUIC Datagram | 必须 (有效 TLS 证书) | **弱网/丢包环境**。原生 0 队头阻塞，强抗网络抖动与移动网络切换。 |
-| **自适应容灾** | `auto` | 动态 H2 优先 $\leftrightarrow$ 降级自愈 H3 | 必须 (有效 TLS 证书) | **混合网络环境**。主动健康嗅探与 0 阻断故障自动切换。 |
-| **纯 IP 实验通道** | `h1` *(plain-h1)* | 纯 IP HTTP/1.1 全双工 AEAD / 原生 `plain-udp` | **免证书 (纯 IP 直连)** | **内网/纯 IP 互联**。零 TLS 开销，抗探测静态伪装为普通 HTTP 二进制流。 |
+| **H2 ストリーム多重化** | `h2` | TLS 1.3 + HTTP/2 多重化 / H3 QUIC Datagram | 必須 (有効な TLS 証明書) | **本番パブリック環境推奨**。高並行プール多重化、極めて低い CPU 負荷、成熟した耐検閲性。 |
+| **専用線高速ストリーム** | `stream` | RawStream TCP (AES-128-GCM) / `plain-udp` ネイティブ AEAD | **不要 (専用線 / 純 IP)** | **IEPL / IPLC 専用線および高速中継**。シングルスレッド 4,000 MB/s 超、離散ハンドシェイク、アクティブプローブ無応答。 |
+| **ネイティブ H3/QUIC** | `h3` | TLS 1.3 + HTTP/3 多重化 / H3 QUIC Datagram | 必須 (有効な TLS 証明書) | **パケットロス・弱網環境**。ネイティブ 0 Head-of-Line ブロッキング、モバイル回線切り替えへの高い耐性。 |
+| **自律フェイルオーバー** | `auto` | 動的 H2 優先 $\leftrightarrow$ 障害時自動 H3 降格・自律回復 | 必須 (有効な TLS 証明書) | **混合ネットワーク環境**。動的ヘルスチェックと無瞬断自動フォールバック。 |
+| **純 IP 実験的チャネル** | `h1` *(plain-h1)* | 純 IP HTTP/1.1 全二重 AEAD / ネイティブ `plain-udp` | **不要 (純 IP 直接接続)** | **イントラネット / 純 IP 相互接続**。TLS オーバーヘッドゼロ、標準 HTTP バイナリストリームへの静的偽装。 |
 
 ---
 
-## 2. Mihomo (Clash.Meta) 客户端配置手册
+## 2. Mihomo (Clash.Meta) クライアント設定マニュアル
 
-### 2.1 节点参数说明 (Proxy Parameters)
+### 2.1 ノードパラメーター一覧 (Proxy Parameters)
 
-| 字段 | 类型 | 必填 | 默认值 | 详细说明 |
+| フィールド | 型 | 必須 | デフォルト値 | 詳細説明 |
 | :--- | :---: | :---: | :---: | :--- |
-| `name` | String | 是 | - | 节点自定义显示名称 |
-| `type` | String | 是 | - | 代理协议类型，固定为 `chitanda` |
-| `server` | String | 是 | - | 服务器域名或 IP 地址 |
-| `port` | Integer | 是 | - | 服务器监听端口 (如 `443` 或自定义端口) |
-| `psk` | String | 是 | - | 预共享密钥 (Pre-Shared Key，需与服务端完全一致) |
-| `path` | String | 否 | `/api/v1/sync` | 伪装请求路径，建议使用常见 API 路径 (`stream` 模式无需此项) |
-| `transport` | String | 否 | `h2` | 载荷模式：`h2` (默认)、`stream`、`h3`、`auto`、`h1` (或 `plain-h1`) |
-| `sni` | String | 否 | (同 `server`) | TLS SNI 域名；TLS 模式下必填有效域名，`stream`/`h1` 纯 IP 模式可省略 |
-| `server-id` | String | 否 | - | 服务端节点标识 (绑定节点身份，仅 `stream` 专线模式防跨节点握手重放) |
-| `skip-cert-verify`| Boolean| 否 | `false` | 是否跳过 TLS 证书合法性校验 (生产环境建议保持 `false`) |
-| `pool-size` | Integer | 否 | `4` | TCP 物理连接池容量 (针对 `h2` 模式优化吞吐与抗突发流量) |
-| `udp` | Boolean | 否 | `true` | 是否启用 UDP 数据包转发 |
-| `interface-name` | String | 否 | - | 出站绑定网卡名称 (支持多网卡策略路由) |
-| `routing-mark` | Integer | 否 | `0` | Linux 出站流量的 `fwmark` 路由标记 |
-| `ip-version` | String | 否 | `dual` | 解析与连接偏好：`ipv4-prefer`、`ipv6-prefer`、`ipv4-only`、`ipv6-only` |
+| `name` | String | はい | - | ノードの表示名 |
+| `type` | String | はい | - | プロトコル識別子。`chitanda` を固定指定 |
+| `server` | String | はい | - | サーバーのホスト名（ドメイン）または IP アドレス |
+| `port` | Integer | はい | - | サーバーのリッスンポート (例: `443` または任意のポート) |
+| `psk` | String | はい | - | 事前共有鍵 (Pre-Shared Key。サーバー側と完全に一致させる必要があります) |
+| `path` | String | いいえ | `/api/v1/sync` | 偽装リクエストパス。一般的な API パスを推奨 (`stream` モードでは不要) |
+| `transport` | String | いいえ | `h2` | キャリアモード: `h2` (デフォルト)、`stream`、`h3`、`auto`、`h1` (または `plain-h1`) |
+| `sni` | String | いいえ | (`server` と同一) | TLS SNI ドメイン。TLS モードでは有効なドメインが必須、`stream`/`h1` モードでは省略可 |
+| `server-id` | String | いいえ | - | サーバーノード識別子 (ノード身元バインド、`stream` 専用線モードでクロスノードリプレイ攻撃を防御) |
+| `skip-cert-verify`| Boolean| いいえ | `false` | TLS 証明書の検証をスキップするかどうか (本番環境では `false` を推奨) |
+| `pool-size` | Integer | いいえ | `4` | TCP コネクションプールのサイズ (`h2` モードのスループットおよびバースト耐性を最適化) |
+| `udp` | Boolean | いいえ | `true` | UDP パケット転送を有効にするかどうか |
+| `interface-name` | String | いいえ | - | アウトバウンドにバインドする NIC 名 (マルチインターフェース・ポリシールーティングに対応) |
+| `routing-mark` | Integer | いいえ | `0` | Linux アウトバウンドトラフィックの `fwmark` ルーティングマーク |
+| `ip-version` | String | いいえ | `dual` | 名前解決と接続の優先度: `ipv4-prefer`、`ipv6-prefer`、`ipv4-only`、`ipv6-only` |
 
 ---
 
-### 2.2 Mihomo 5 种模式节点配置实例
+### 2.2 5種類のモード別ノード設定例
 
-#### ① 模式 1：`h2` (TLS 1.3 + HTTP/2 多路复用 - 默认推荐)
+#### ① モード 1: `h2` (TLS 1.3 + HTTP/2 ストリーム多重化 - デフォルト推奨)
 ```yaml
 - name: "Chitanda-H2-Tokyo"
   type: chitanda
@@ -56,7 +56,7 @@
   udp: true
 ```
 
-#### ② 模式 2：`h3` (原生 HTTP/3 & QUIC 0 队头阻塞)
+#### ② モード 2: `h3` (ネイティブ HTTP/3 & QUIC 0 隊頭閉塞)
 ```yaml
 - name: "Chitanda-H3-Tokyo"
   type: chitanda
@@ -69,7 +69,7 @@
   udp: true
 ```
 
-#### ③ 模式 3：`auto` (智能探测与动态 H2 $\leftrightarrow$ H3 容灾切换)
+#### ③ モード 3: `auto` (動的プローブ・H2 $\leftrightarrow$ H3 自律切替)
 ```yaml
 - name: "Chitanda-Auto-Tokyo"
   type: chitanda
@@ -83,7 +83,7 @@
   udp: true
 ```
 
-#### ④ 模式 4：`stream` (RawStream 专线与高性能中转)
+#### ④ モード 4: `stream` (RawStream 専用線・高速中継)
 ```yaml
 - name: "Chitanda-Stream-Direct"
   type: chitanda
@@ -91,10 +91,11 @@
   port: 11323
   psk: "super-secret-pre-shared-key-32bytes-min"
   transport: "stream"
+  server-id: "node-tokyo-01"
   udp: true
 ```
 
-#### ⑤ 模式 5：`h1` (纯 IP / 免证书 / 全双工 HTTP/1.1 实验通道)
+#### ⑤ モード 5: `h1` (純 IP / 証明書不要 / 全二重 HTTP/1.1 実験的チャネル)
 ```yaml
 - name: "Chitanda-H1-DirectIP"
   type: chitanda
@@ -108,7 +109,7 @@
 
 ---
 
-### 2.3 Mihomo 完整客户端配置文件示例 (`config.yaml`)
+### 2.3 Mihomo 完全版クライアント設定ファイル例 (`config.yaml`)
 
 ```yaml
 port: 7890
@@ -131,7 +132,7 @@ dns:
     - 1.1.1.1
 
 proxies:
-  # 1. 主线 H2 节点
+  # 1. H2 メインラインノード
   - name: "Tokyo-H2"
     type: chitanda
     server: jp.example.com
@@ -143,7 +144,7 @@ proxies:
     pool-size: 4
     udp: true
 
-  # 2. 原生 H3/QUIC 节点
+  # 2. 原生 H3/QUIC ノード
   - name: "Tokyo-H3"
     type: chitanda
     server: jp.example.com
@@ -154,7 +155,7 @@ proxies:
     sni: "jp.example.com"
     udp: true
 
-  # 3. 智能自愈 Auto 节点
+  # 3. 智能自癒 Auto ノード
   - name: "Tokyo-Auto"
     type: chitanda
     server: jp.example.com
@@ -166,7 +167,7 @@ proxies:
     pool-size: 4
     udp: true
 
-  # 4. 纯 IP 免证书 H1 节点
+  # 4. 純 IP 免証明書 H1 ノード
   - name: "DirectIP-H1"
     type: chitanda
     server: 203.0.113.88
@@ -176,7 +177,7 @@ proxies:
     transport: "h1"
     udp: true
 
-  # 5. 专线极速 Stream 节点
+  # 5. 専用線超高速 Stream ノード
   - name: "Tokyo-Stream"
     type: chitanda
     server: 203.0.113.88
@@ -216,27 +217,27 @@ rules:
 
 ---
 
-## 3. Xray-core 服务端与客户端配置手册
+## 3. Xray-core サーバー・クライアント設定マニュアル
 
-在 Xray-core 中，`chitanda` 既可以作为 **Inbound (入站服务端)** 接收解密流量并转发给 Xray 路由分发器，也可以作为 **Outbound (出站客户端)** 连接远端 Chitanda 节点。
+Xray-core において、`chitanda` は **Inbound (サーバーインバウンド)** としてトラフィックを受信・復号して Xray のルーティングディスパッチャーへ転送することも、**Outbound (クライアントアウトバウンド)** としてリモートの Chitanda ノードへ接続することも可能です。
 
-### 3.1 Xray 服务端入站参数 (`inbounds.settings`)
+### 3.1 Xray サーバーインバウンド設定パラメーター (`inbounds.settings`)
 
-| 字段 | 类型 | 必填 | 默认值 | 详细说明 |
+| フィールド | 型 | 必須 | デフォルト値 | 詳細説明 |
 | :--- | :---: | :---: | :---: | :--- |
-| `psk` | String | 是 | - | 预共享认证密钥 |
-| `path` | String | 否 | `/api/v1/sync` | 协议通信认证 Path |
-| `transport` | String | 否 | `h2` | 载荷模式 (`h2` / `h3` / `auto` / `stream` / `h1`) |
-| `fallback` | String | 否 | - | 防探测回落目标 (如 `127.0.0.1:8080`、`unix:/run/nginx.sock` 或外部站点) |
-| `strict_sni` | String | 否 | - | 严格 SNI 校验域名 (非指定 SNI 强制回落) |
-| `server_id` | String | 否 | - | 服务端节点标识 (专线/stream 模式跨节点防重放绑定) |
-| `replay_file` | String | 否 | - | 持久化防重放缓存文件路径 (如 `/var/log/chitanda/replay.db`) |
+| `psk` | String | はい | - | 事前共有認証キー |
+| `path` | String | いいえ | `/api/v1/sync` | プロトコル通信認証パス |
+| `transport` | String | いいえ | `h2` | キャリアモード (`h2` / `h3` / `auto` / `stream` / `h1`) |
+| `fallback` | String | いいえ | - | プローブ耐性フォールバック先 (例: `127.0.0.1:8080`、`unix:/run/nginx.sock`、外部 Web サイト等) |
+| `strict_sni` | String | いいえ | - | 厳格な SNI 検証ドメイン (指定 SNI と一致しない場合は強制フォールバック) |
+| `server_id` | String | いいえ | - | サーバーノード識別子 (`stream` モードでのクロスノードリプレイ攻撃防御) |
+| `replay_file` | String | いいえ | - | 永続化リプレイ防止キャッシュのファイルパス (例: `/var/log/chitanda/replay.db`) |
 
 ---
 
-### 3.2 Xray 5 种模式服务端入站配置 (`inbounds`)
+### 3.2 Xray 5種類のモード別サーバーインバウンド設定例 (`inbounds`)
 
-#### ① 服务端 H2 主线入站 (带 TLS 1.3 与网站回落)
+#### ① サーバー H2 メインラインインバウンド (TLS 1.3 および Web フォールバック対応)
 ```json
 {
   "tag": "chitanda-inbound-h2",
@@ -264,7 +265,7 @@ rules:
 }
 ```
 
-#### ② 服务端 H3 / QUIC 原生入站
+#### ② サーバー H3 / QUIC ネイティブインバウンド
 ```json
 {
   "tag": "chitanda-inbound-h3",
@@ -292,7 +293,7 @@ rules:
 }
 ```
 
-#### ③ 服务端 Auto (自愈兼容入站)
+#### ③ サーバー Auto (自動復帰・互換インバウンド)
 ```json
 {
   "tag": "chitanda-inbound-auto",
@@ -320,7 +321,7 @@ rules:
 }
 ```
 
-#### ④ 服务端 Stream (专线 / 高性能 0 探测入站)
+#### ④ サーバー Stream (専用線 / 高スループット・プローブ無応答インバウンド)
 ```json
 {
   "tag": "chitanda-inbound-stream",
@@ -336,7 +337,7 @@ rules:
 }
 ```
 
-#### ⑤ 服务端 H1 (纯 IP / 免证书 / 0 特征入站)
+#### ⑤ サーバー H1 (純 IP / 証明書不要 / 特徴排除インバウンド)
 ```json
 {
   "tag": "chitanda-inbound-h1",
@@ -348,30 +349,28 @@ rules:
     "transport": "h1",
     "fallback": "127.0.0.1:80"
   },
-  "streamSettings": {
-    "security": "none"
-  }
+  "streamSettings": { "security": "none" }
 }
 ```
 
 ---
 
-### 3.3 Xray 客户端出站参数 (`outbounds.settings`)
+### 3.3 Xray クライアントアウトバウンド設定パラメーター (`outbounds.settings`)
 
-| 字段 | 类型 | 必填 | 默认值 | 详细说明 |
+| フィールド | 型 | 必須 | デフォルト値 | 詳細説明 |
 | :--- | :---: | :---: | :---: | :--- |
-| `server` | String | 是 | - | 服务器地址与端口 (`域名:端口` 或 `IP:端口`) |
-| `psk` | String | 是 | - | 预共享认证密钥 (需与服务端一致) |
-| `server_name` | String | 否 | (同 `server`) | TLS SNI 校验域名 (TLS 模式) |
-| `path` | String | 否 | `/api/v1/sync` | 伪装请求路径 |
-| `transport` | String | 否 | `h2` | 载荷模式 (`h2` / `h3` / `auto` / `stream` / `h1`) |
-| `pool_size` | Integer | 否 | `4` | TCP 物理复用连接池大小 (仅 `h2` / `auto` 模式有效) |
-| `server_id` | String | 否 | - | 服务端标识绑定 (仅 `stream` 模式有效，防跨节点重放) |
-| `allow_insecure` | Boolean | 否 | `false` | 是否跳过 TLS 证书校验 (默认 `false` 严格验证；防止自签名测试异常) |
+| `server` | String | はい | - | サーバーアドレスとポート (`ドメイン:ポート` または `IP:ポート`) |
+| `psk` | String | はい | - | 事前共有認証キー (サーバー側と一致させる必要があります) |
+| `server_name` | String | いいえ | (`server` と同一) | TLS SNI 検証ドメイン (TLS モード) |
+| `path` | String | いいえ | `/api/v1/sync` | 偽装リクエストパス |
+| `transport` | String | いいえ | `h2` | キャリアモード (`h2` / `h3` / `auto` / `stream` / `h1`) |
+| `pool_size` | Integer | いいえ | `4` | TCP 物理コネクションプールサイズ (`h2` / `auto` モードで有効) |
+| `server_id` | String | いいえ | - | サーバー識別子バインド (`stream` モード専用、クロスノードリプレイ防御) |
+| `allow_insecure` | Boolean | いいえ | `false` | TLS 証明書検証をスキップするかどうか (デフォルト `false`、自己署名証明書テスト用) |
 
 ---
 
-### 3.4 Xray 5 种模式客户端出站配置 (`outbounds`)
+### 3.4 Xray 5種類のモード別クライアントアウトバウンド設定例 (`outbounds`)
 
 ```json
 {
@@ -444,7 +443,7 @@ rules:
 
 ---
 
-### 3.4 Xray 完整服务端生产配置示例 (`server_production.json`)
+### 3.5 Xray 完全版サーバー本番設定ファイル例 (`server_production.json`)
 
 ```json
 {
@@ -491,38 +490,36 @@ rules:
 
 ---
 
----
+## 4. 3X-UI (Xray-UI) ノード運用とカーネルオンライン更新ガイド
 
-## 4. 3-xui (Xray-UI) 节点部署与内核热更新运维指南
+3X-UI（および各種 Xray-UI 系列のパネル）は、Web 管理画面を通じて Xray 設定を視覚的に管理し、バックグラウンドの Xray プロセスを監視・常駐させるコントロールパネルです。3X-UI で配備されたノードは、基盤となる `/usr/local/x-ui/bin/xray-linux-*` バイナリ上で動作します。
 
-3-xui (以及各类 Xray-UI 系列面板) 是通过 Web 可视化界面管理 Xray 配置并守护后台 Xray 核心进程的面板程序。3-xui 部署的节点本质上运行在底层 `/usr/local/x-ui/bin/xray-linux-*` 核心二进制之上。
+### 4.1 3X-UI とクライアント双端のカーネル更新が必要な理由
 
-### 4.1 为什么要更新 3-xui 与客户端双端内核？
+高頻度なショートコネクションを多用するモバイルゲーム（例: 『ブルーアーカイブ』 / Blue Archive）や Web API ポーリングを行うアプリケーションにおいて、**接続のタイムアウト切断が発生したり、OpenClash ソフトウェアルーターやクライアントを長時間稼働させた後にポートの無応答（ハング）、Web 管理画面への接続不能、DNS タイムアウトが発生し、カーネルの再起動を余儀なくされる現象**が見られる場合、以下の要因が関係しています：
 
-若您遇到**高频短连接游戏（如《碧蓝档案》/ Blue Archive）、频繁交互的移动端应用经常发生连接卡死、超时断连，或者 OpenClash 软路由 / 客户端运行一段时间后出现端口假死、控制面板无法连接、DNS 超时、必须重启内核**等现象：
-
-- **服务端根因**：旧版服务端在收到目标端响应完成并关闭后，上行方向因未收到客户端显式 FIN 会挂起等待 30 秒超时（或在 H3 模式下无超时无限挂死 QUIC 流）。当游戏短时间内并发大量 HTTP 轮询时，短连接迅速堆积并耗尽服务端的套接字与文件描述符（FD）。
-- **客户端根因**：客户端连接池在双向半关闭（Half-Close）时缺乏带内标界，未能及时感应服务端已关闭并回收本地套接字，导致软路由的文件句柄耗尽，进而阻塞 `9090` 等控制端口与 DNS 查询。
-- **协同解决方案**：
-  1. **服务端**：必须将 3-xui 的底层内核更新为最新的 `xray-chitanda`。服务端引入了 **250ms 快速优雅排空（Downstream-Triggered Drain）** 机制，当目标响应完毕关闭后，立即向客户端发送带内 EOF 并限制排空窗口为 250 毫秒，超时强制断开两端，瞬间回收套接字。
-  2. **客户端**：必须将 OpenClash / CMFA / 电脑端核心更新为最新的 `mihomo-chitanda`。支持解析带内 EOF 并完成本地连接池释放。
+- **サーバー側の根本原因**: 旧版サーバーは宛先からのレスポンス完了・切断を受信した後、アップストリーム方向でクライアントからの明示的な FIN が届かないと 30 秒間のタイムアウトまでソケットを保持し続けます（H3 モードでは無期限に QUIC ストリームがハング）。ゲーム等の高頻度な通信が短時間に行われると、ソケットおよびファイルディスクリプタ（FD）が急速に枯渇します。
+- **クライアント側の根本原因**: 双方向ハーフクローズ（Half-Close）時にインバンドマーカーが不足していると、サーバー側が既に切断されたことをクライアントの接続プールが迅速に検知できず、ローカルソケットが滞留。ソフトウェアルーターのファイルハンドルを占有し、`9090` などのコントロールポートや DNS 名前解決を阻害します。
+- **協調的解決策**:
+  1. **サーバー側**: 3X-UI の基盤カーネルを最新の `xray-chitanda` へ更新してください。サーバー側に **250ms グレースフル・ドレイン（Downstream-Triggered Drain）** 機構が導入されており、宛先のレスポンス完了時にクライアントへインバンド EOF を送信すると同時にドレインウィンドウを 250ms に制限。タイムアウト時は両端ソケットを強制クローズして即座にリソースを回収します。
+  2. **クライアント側**: OpenClash / CMFA / PC 版コアを最新の `mihomo-chitanda` へ更新してください。インバンド EOF を正しく解釈し、ローカル接続プールを即時解放します。
 
 ---
 
-### 4.2 3-xui 内核更新操作步骤
+### 4.2 3X-UI カーネル更新手順
 
-#### 方法一：通过 3-xui Web 界面在线切换升级（推荐）
-1. 浏览器打开并登录 3-xui 管理面板。
-2. 进入左侧导航栏的 **「Xray 设置」**（或 **「面板设置」**）。
-3. 找到 **「切换版本 / 内核版本」** 按钮并点击。
-4. 在弹出的版本列表中，选择最新的 **`Chitanda Core`** 构建版本。
-5. 点击 **确定更新**，3-xui 会自动下载对应架构二进制并重启后台 Xray 进程。
+#### 方法一: 3X-UI Web 管理画面でのオンライン切り替え・更新 (推奨)
+1. ブラウザで 3X-UI 管理画面にログインします。
+2. 左側メニューの **「Xray 設定」**（または **「パネル設定」**）を開きます。
+3. **「バージョン切り替え / カーネルバージョン」** をクリックします。
+4. バージョン一覧から最新の **`Chitanda Core`** ビルドを選択します。
+5. **更新を実行** すると、3X-UI が自動的に対応アーキテクチャのバイナリを取得し、バックグラウンドの Xray プロセスをホットリスタートします。
 
-#### 方法二：通过 SSH 终端手动一键替换更新
-如果您使用的是标准 3-xui 且界面未配置在线源，可直接在服务器终端执行如下命令快速替换内核：
+#### 方法二: SSH ターミナルでの手動一括更新
+標準 3X-UI を使用しており Web 画面にオンラインソースが反映されていない場合は、サーバーのターミナルで以下を実行してカーネルを更新できます：
 
 ```bash
-# 1. 检查服务器架构 (x86_64 或 aarch64)
+# 1. サーバーの CPU アーキテクチャを確認 (x86_64 または aarch64)
 ARCH=$(uname -m)
 if [ "$ARCH" = "x86_64" ]; then
     FILE="Xray-linux-64.zip"
@@ -534,154 +531,153 @@ else
     echo "Unsupported architecture: $ARCH" && exit 1
 fi
 
-# 2. 下载 Chitanda 最新编译的 Xray 二进制包
+# 2. Chitanda 最新ビルドの Xray パッケージを取得
 cd /tmp
 curl -fsSL -O "https://github.com/violetaini/chitanda/releases/latest/download/${FILE}"
 
-# 3. 停止 x-ui 服务并替换二进制
+# 3. x-ui サービスを停止してバイナリを置換
 systemctl stop x-ui
 unzip -o "${FILE}" xray -d /tmp/chitanda_xray_bin/
 cp -f /tmp/chitanda_xray_bin/xray /usr/local/x-ui/bin/${BIN_NAME}
-# 若 3-xui 目录下存在 xray 原名文件，一并同步替换
 [ -f /usr/local/x-ui/bin/xray ] && cp -f /tmp/chitanda_xray_bin/xray /usr/local/x-ui/bin/xray
 chmod +x /usr/local/x-ui/bin/*
 
-# 4. 清理临时文件并重启 x-ui
+# 4. 一時ファイルを削除して x-ui を再起動
 rm -rf /tmp/${FILE} /tmp/chitanda_xray_bin
 systemctl restart x-ui
 
-# 5. 验证版本
+# 5. バージョンを確認
 /usr/local/x-ui/bin/${BIN_NAME} version
 ```
 
 ---
 
-### 4.3 3-xui 面板 5 种模式入站节点配置指南
+### 4.3 3X-UI 管理画面 5種類のモード別インバウンド設定ガイド
 
-在 3-xui 的 **「入站列表」 $\rightarrow$ 「添加入站」** 中配置 Chitanda 节点：
+3X-UI の **「インバウンド一覧」 $\rightarrow$ 「インバウンドを追加」** における設定方法：
 
-#### 1. `stream` 模式（专线/高性能纯 IP 首选，免域名证书）
-- **协议**：`chitanda`
-- **监听端口**：自定义端口（如 `11323`）
-- **传输模式 (Transport)**：`stream`
-- **预共享密钥 (PSK)**：自定义高熵密钥（如 `openssl rand -base64 32`）
-- **Server ID**：填写节点唯一标识（如 `node-shanghai-01`），用于抗跨节点重放攻击。
-- **安全设置 (Security)**：`none`（无需配置 TLS 证书，纯 IP 即可连通）
+#### 1. `stream` モード (専用線 / 高スループット純 IP 直指定、証明書不要)
+- **プロトコル**: `chitanda`
+- **ポート**: 任意のポート (例: `11323`)
+- **トランスポート (Transport)**: `stream`
+- **事前共有鍵 (PSK)**: 高エントロピーな認証鍵 (例: `openssl rand -base64 32`)
+- **Server ID**: ノード固有の識別子 (例: `node-tokyo-01`、クロスノードリプレイ攻撃防御用)
+- **セキュリティ (Security)**: `none` (TLS 証明書不要、純 IP で通信可能)
 
-#### 2. `h2` 模式（公网主线推荐，高并发复用抗封锁）
-- **协议**：`chitanda`
-- **监听端口**：`443` 或自定义端口
-- **传输模式 (Transport)**：`h2`
-- **预共享密钥 (PSK)**：自定义密钥
-- **Path**：伪装 API 路径（如 `/api/v1/sync`）
-- **安全设置 (Security)**：`tls`
-- **证书路径**：配置有效的 SSL/TLS 证书路径（`.cer` 和 `.key`）
-- **Fallback (回落)**：建议填写本地静态 Web 端口（如 `127.0.0.1:8080`）或真实域名反代，未认证探测将回落到伪装网站。
+#### 2. `h2` モード (本番パブリック環境推奨、高多重化・耐検閲)
+- **プロトコル**: `chitanda`
+- **ポート**: `443` または任意のポート
+- **トランスポート (Transport)**: `h2`
+- **事前共有鍵 (PSK)**: 任意の認証鍵
+- **Path**: 偽装 API パス (例: `/api/v1/sync`)
+- **セキュリティ (Security)**: `tls`
+- **証明書パス**: 有効な SSL/TLS 証明書パス (`.cer` および `.key`)
+- **Fallback (フォールバック)**: ローカルの Web ポート (例: `127.0.0.1:8080`) または外部サイト。未認証プローブは偽装サイトへ転送されます。
 
-#### 3. `h3` 模式（原生 QUIC 丢包抗性主线）
-- **协议**：`chitanda`
-- **传输模式 (Transport)**：`h3`
-- **安全设置 (Security)**：`tls`（QUIC 强依赖 TLS 证书）
-- **ALPN**：必须包含 `h3`。
+#### 3. `h3` モード (ネイティブ QUIC パケットロス耐性)
+- **プロトコル**: `chitanda`
+- **トランスポート (Transport)**: `h3`
+- **セキュリティ (Security)**: `tls` (QUIC は TLS 証明書が必須)
+- **ALPN**: `h3` を指定
 
-#### 4. `auto` 模式（智能自愈降级）
-- **协议**：`chitanda`
-- **传输模式 (Transport)**：`auto`
-- **安全设置 (Security)**：`tls`
-- **ALPN**：`h2, h3, http/1.1`
+#### 4. `auto` モード (インテリジェント自律フェイルオーバー)
+- **プロトコル**: `chitanda`
+- **トランスポート (Transport)**: `auto`
+- **セキュリティ (Security)**: `tls`
+- **ALPN**: `h2, h3, http/1.1`
 
-#### 5. `h1` 模式（纯 IP 免证书实验模式）
-- **协议**：`chitanda`
-- **传输模式 (Transport)**：`h1`
-- **Path**：`/gateway/stream/v2`
-- **安全设置 (Security)**：`none`
-
----
-
-## 5. 客户端 (OpenClash / Mihomo / CMFA) 内核升级指南
-
-### 5.1 OpenClash 软路由内核升级
-1. 进入 OpenWrt 后台 $\to$ 打开 **OpenClash** 插件界面。
-2. 进入 **「插件设置」 $\rightarrow$ 「版本更新」**。
-3. 检查并点击 **「更新 Meta 内核」**（Chitanda-OpenClash 定制版会自动从 Chitanda Release 获取最新编译的 `mihomo` 内核）。
-4. *手动替换方式*：下载最新的 `mihomo-linux-amd64`（或对应软路由架构），改名为 `clash_meta`，上传覆盖至 `/etc/openclash/core/clash_meta`，并执行 `chmod +x /etc/openclash/core/clash_meta`，随后在 OpenClash 界面重启内核。
-
-### 5.2 Clash Meta For Android (CMFA) 安卓端升级
-1. 访问 [chitanda-cmfa Releases](https://github.com/violetaini/chitanda-cmfa/releases)。
-2. 下载包含最新核心提交的 APK 安装包直接覆盖安装。
-
-### 5.3 桌面客户端 (Mihomo Party / Clash Verge Rev 等)
-1. 下载 Release 中的 `mihomo-windows-64.zip` / `mihomo-darwin-*.zip`。
-2. 解压并将 `mihomo` 可执行文件替换客户端配置目录中的内核文件，重启客户端。
+#### 5. `h1` モード (純 IP / 証明書不要 / 特徴排除実験モード)
+- **プロトコル**: `chitanda`
+- **トランスポート (Transport)**: `h1`
+- **Path**: `/gateway/stream/v2`
+- **セキュリティ (Security)**: `none`
 
 ---
 
-## 6. 高频短连接与游戏场景优化规范 (Half-Close & Blue Archive 案例)
+## 5. クライアント (OpenClash / Mihomo / CMFA) カーネルアップデートガイド
 
-### 6.1 游戏与高频 API 交互时序模型
-以《碧蓝档案》（Blue Archive）为例，客户端（手机/模拟器）的每次 UI 点击交互、关卡结算、资源加载都会通过 HTTP/1.1 发起高频突发短请求：
+### 5.1 OpenClash ソフトウェアルーターのカーネルアップデート
+1. OpenWrt 管理画面 $\to$ **OpenClash** プラグインを開きます。
+2. **「プラグイン設定」 $\rightarrow$ 「バージョン更新」** を開きます。
+3. **「Meta コアを更新」** をクリックします（Chitanda-OpenClash カスタム版では、Chitanda Releases から最新の `mihomo` コアが自動取得されます）。
+4. *手動置換の場合*: 最新の `mihomo-linux-amd64`（またはルーターのアーキテクチャに適合するもの）をダウンロードし、ファイル名を `clash_meta` に変更した上で `/etc/openclash/core/clash_meta` に上書き配置し、`chmod +x /etc/openclash/core/clash_meta` を実行して OpenClash を再起動します。
+
+### 5.2 Clash Meta For Android (CMFA) Android 端末のアップデート
+1. [chitanda-cmfa Releases](https://github.com/violetaini/chitanda-cmfa/releases) へアクセスします。
+2. 最新の APK パッケージをダウンロードし、端末へ上書きインストールします。
+
+### 5.3 デスクトップクライアント (Mihomo Party / Clash Verge Rev 等)
+1. Releases から `mihomo-windows-64.zip` / `mihomo-darwin-*.zip` を取得します。
+2. 解凍した `mihomo` バイナリをクライアントの設定ディレクトリ内のコアバイナリと差し替え、クライアントを再起動します。
+
+---
+
+## 6. 高頻度ショートコネクションとモバイルゲーム向け最適化仕様 (Half-Close & ブルーアーカイブ事例)
+
+### 6.1 ゲームおよび高頻度 API 通信のシーケンスモデル
+『ブルーアーカイブ』（Blue Archive）を例にとると、端末（スマートフォン / エミュレーター）での UI タップ、ステージクリア決済、リソース読み込みなどにおいて、HTTP/1.1 による高頻度かつバースト的なショートリクエストが発生します：
 
 ```text
-客户端                                     Chitanda 服务端                                  游戏官方服务器
-  │                                               │                                               │
-  ├─── 1. 发起 POST /game/api 请求 ──────────────>├─── 2. 发起连接并转发请求 ───────────────────>│
-  │                                               │                                               │
-  │                                               │<── 3. 返回 200 OK 响应数据 ──────────────────┤
-  │<── 4. 转发响应数据 ───────────────────────────┤                                               │
-  │                                               │<── 5. 业务结束，目标立即发送 FIN/EOF ─────────┤
-  │                                               │    (目标连接主动关闭，downloadDone 触发)        │
-  │                                               │                                               │
-  │                                               │【旧版行为】：服务端等待客户端 30s ！！！       │
-  │                                               │【导致后果】：每分钟数百次点击堆积海量挂死连接   │
-  │                                               │              OpenClash 句柄爆满、面板假死！     │
-  │                                               │                                               │
-  │                                               │【现代优化】：立即进入 250ms 快速回收阶段        │
-  │<── 6. 发送带内 EOF [0x00,0x00] + TCP FIN ─────┤    (向客户端发送带内 EOF，同时设置 250ms 读保护)│
-  │                                               │                                               │
-  ├─── 7. 客户端收到 EOF，回收本地套接字 ─────────>│                                               │
-  │                                               │─── 8. 250ms 超时强制释放双端套接字 ───────────┤
-  ▼                                               ▼                                               ▼
-  连接完全销毁 (毫秒级释放，游戏连点 0 句柄残留，0 连接断开，软路由 9090 端口与 DNS 永不卡死！)
+クライアント                                 Chitanda サーバー                              宛先ゲーム公式サーバー
+    │                                               │                                               │
+    ├─── 1. POST /game/api リクエスト送信 ─────────>├─── 2. 接続確立・リクエスト転送 ───────────────>│
+    │                                               │                                               │
+    │                                               │<── 3. 200 OK レスポンスデータ返送 ────────────┤
+    │<── 4. レスポンスデータを転送 ─────────────────┤                                               │
+    │                                               │<── 5. 通信終了、宛先が FIN/EOF を送信 ────────┤
+    │                                               │    (宛先接続が切断され、downloadDone トリガー) │
+    │                                               │                                               │
+    │                                               │【旧実装の挙動】: サーバーが 30 秒間待機！      │
+    │                                               │【発生する問題】: 毎分多数の接続が残留・スタック │
+    │                                               │                  ルーターの FD 枯渇・ハング！  │
+    │                                               │                                               │
+    │                                               │【最新最適化】: 直ちに 250ms 高速回収フェーズへ │
+    │<── 6. インバンド EOF [0x00,0x00] + FIN 送信 ──┤    (クライアントへ通知、250ms タイマー設定)   │
+    │                                               │                                               │
+    │├─── 7. クライアントが EOF 受信・ソケット回収 ─>│                                               │
+    │                                               │─── 8. 250ms 経過時に両端ソケットを強制解放 ───┤
+    ▼                                               ▼                                               ▼
+    接続完全消滅 (ミリ秒単位で解放、ゲームの連打でも FD 残留ゼロ、ルーターの 9090 ポートや DNS が一切ハングしない！)
 ```
 
-### 6.2 关键优化指标验证
-在真实公网服务器对打测试中（50 个高频连续短突发请求模拟）：
-- **旧版表现**：连接堆积持续 30 秒，系统产生 50+ 处于 `CLOSE_WAIT`/`FIN_WAIT` 状态的挂死套接字，OpenClash 外部控制端口超时无响应。
-- **最新版本表现**：
-  - 单请求端到端生命周期从 30 秒缩短至 **6~15 毫秒**；
-  - 50 并发高频短连接在 **325 毫秒** 内全部完成并优雅关闭；
-  - `ss -tupan | grep 38300` 检查结果：**0 残留套接字，0 FD 泄漏**！
+### 6.2 主要な最適化指標と実測検証
+パブリックインターネット環境における負荷テスト（50 並行の連続バーストショートリクエスト）：
+- **旧バージョンの挙動**: 接続が 30 秒間滞留し、システム内に `CLOSE_WAIT`/`FIN_WAIT` 状態のソケットが 50 以上残留。OpenClash の外部コントロールポートがタイムアウト。
+- **最新バージョンの挙動**:
+  - 単一リクエストのエンドツーエンドライフサイクルが 30 秒から **6〜15 ミリ秒** に短縮。
+  - 50 並行の高頻度ショートコネクションが **325 ミリ秒** 以内にすべて完了し、優雅に解放。
+  - `ss -tupan | grep 38300` の確認結果: **ソケット残留ゼロ、ファイルディスクリプタ（FD）リークゼロ**。
 
 ---
 
-## 7. Mihomo / OpenClash 运行健壮性与零 DefaultResolver 契约
+## 7. Mihomo / OpenClash 稼働堅牢性と Zero-DefaultResolver 規約
 
-在 OpenClash 软路由及各类 Mihomo (Clash.Meta) 客户端中，为杜绝代理内核绕过 Fake-IP / 内置 DNS 发生真实 IP 泄露，Mihomo 源码（`main.go`）设置了极严格的防御性断言：**严格禁止协议出站适配器在代理建立阶段调用 Go 标准库的系统 DNS 解析器（`net.DefaultResolver`）**。一旦发生违规调用，Mihomo 会立即向 stderr 输出全部 goroutine 堆栈并强行调用 `os.Exit(2)` 终止进程，导致 OpenClash 瞬间暴毙。
+OpenClash ルーター環境および各種 Mihomo (Clash.Meta) クライアントでは、プロキシコアが Fake-IP や内蔵 DNS を迂回して実 IP を漏洩させる事故を防止するため、Mihomo コアのソースコード（`main.go`）に極めて厳格な防護的アサーションが組み込まれています：**プロキシのアウトバウンドアダプターが接続確立段階において Go 標準ライブラリのシステム DNS リゾルバ（`net.DefaultResolver`）を呼び出すことを一切禁止**。万一これに違反した場合、Mihomo は即座に stderr へ全 Goroutine スタックを出力し、`os.Exit(2)` でプロセスを強制終了します。
 
-为确保软路由与客户端在高频 UDP 游戏与域名节点场景下的极致稳定，Chitanda 协议实现了全方位的**零 DefaultResolver 契约**：
+ルーターやモバイル端末が高頻度な UDP ゲームやドメイン指定ノードを利用する際の安定性を保証するため、Chitanda プロトコルは包括的な **Zero-DefaultResolver 規約** を実装しています：
 
-### 7.1 核心防护机制
+### 7.1 コア防護メカニズム
 
-1. **纯内存 IP 解析器 (`parseUDPAddr`)**：
-   - 在数据包接收、目标反向解析链路中，完全采用 Go 原生 `netip.ParseAddrPort` 与 `net.ParseIP` 进行无锁、无分配的内存级字面量 IP 解析；
-   - 绝不调用任何操作系统或 Go 运行时的 DNS 解析方法，0 DNS 阻塞开销。
-2. **Mihomo 专有域名解析器无缝对接 (`resolveUDPAddr`)**：
-   - 当节点配置为域名（例如专线中转 `iepl-tokyo.example.com`）时，Chitanda 出站适配器将域名解析任务通过回调函数完全委托给 Mihomo 的 `resolver.ProxyServerHostResolver`；
-   - 解析结果严格遵循 Mihomo 的 DNS 优选策略（`ipv4-prefer` / `ipv6-prefer` 等），并自动与 OpenClash 的 Fake-IP 缓存协同工作。
-3. **软路由策略路由与 `fwmark` 强绑定**：
-   - 在软路由（OpenWrt）透明代理模式下，内核基于 `fwmark` 标记识别出站流量。Chitanda 在初始化 UDP 监听套接字时，主动向 Mihomo 的 `c.dialer.ListenPacket` 传入已解析的真实服务端目的 IP (`AddrPort`)；
-   - 彻底解决 Linux 内核策略路由在未知目的套接字时误匹配默认路由导致的数据包黑洞问题。
-4. **泛型 PacketConn 接口解耦**：
-   - 解除旧版对 `*net.UDPConn` 底层原生套接字的硬性类型断言约束，抽象为通用的 `net.PacketConn`；
-   - 完美兼容 OpenClash / Mihomo 各类装饰层连接（如附带流量统计、自闭合守护及策略绑定的安全包装对象）。
+1. **インメモリ IP パーサー (`parseUDPAddr`)**:
+   - パケット受信およびターゲット逆引き処理において、Go 標準の `netip.ParseAddrPort` および `net.ParseIP` を使用した完全ロックフリー・ゼロアロケーションのメモリパースを採用。
+   - OS や Go ランタイムの DNS 解決処理を一切呼び出さず、DNS ブロッキングオーバーヘッドも皆無です。
+2. **Mihomo 専用ドメインリゾルバのシームレス連携 (`resolveUDPAddr`)**:
+   - ノードがドメイン名（例: 中継ノード `iepl-tokyo.example.com`）として指定されている場合、Chitanda アウトバウンドアダプターはコールバック関数を通じて名前解決を Mihomo の `resolver.ProxyServerHostResolver` に完全委譲します。
+   - 解決結果は Mihomo の DNS 優先ポリシー（`ipv4-prefer` / `ipv6-prefer` 等）に厳格に従い、OpenClash の Fake-IP キャッシュと完全に協調動作します。
+3. **ルーターのポリシールーティングと `fwmark` バインド**:
+   - OpenWrt の透過プロキシモードでは、カーネルが `fwmark` マーキングに基づいてアウトバウンドトラフィックを識別します。Chitanda は UDP リスニングソケット初期化時に、Mihomo の `c.dialer.ListenPacket` へ解決済みの実サーバー宛先 IP (`AddrPort`) を明示的に渡します。
+   - これにより、宛先ソケットが不明な場合にデフォルトゲートウェイへ誤ってルーティングされデータが消失（ブラックホール化）する問題を根本から解決します。
+4. **汎用 PacketConn インターフェースによる疎結合**:
+   - 旧版の `*net.UDPConn` 具象型に対するハードな型アサーションを撤廃し、汎用的な `net.PacketConn` インターフェースへ抽象化。
+   - OpenClash や Mihomo のデコレーター層接続（トラフィック統計、自己切断ガード、ポリシーバインドが付与されたラッパーオブジェクト）との完全な互換性を確保しています。
 
 ---
 
-## 8. 生产安全与部署最佳实践
+## 8. 本番運用セキュリティとデプロイのベストプラクティス
 
-1. **PSK 密钥强度**：
-   - 务必使用随机生成的强密码（建议使用 `openssl rand -base64 32` 生成 32 字节高熵密钥）。
-2. **防探测 Fallback 伪装**：
-   - 生产环境中强烈建议配置 `fallback`（如本地运行的 Nginx/Caddy 或反代至真实外部业务门户），未授权的主动探测将获得与普通网站完全一致的响应。
-3. **Strict SNI 保护**：
-   - 配置 `strict_sni` 防止通过扫描非指定域名或纯 IP 探测出 TLS 证书特征。
+1. **PSK 鍵の強度**:
+   - 必ずランダムに生成された強度の高い認証鍵を使用してください（`openssl rand -base64 32` などによる 32 バイト以上の高エントロピー鍵を推奨）。
+2. **プローブ耐性 Fallback 偽装**:
+   - 本番環境では `fallback`（ローカルで稼働する Nginx/Caddy または実在の外部 Web サイト）を必ず設定してください。未認証のアクティブプローブに対して一般の Web サイトと全く同じ応答を返します。
+3. **Strict SNI 保護**:
+   - `strict_sni` を有効化することで、指定外のドメインや IP 直指定でのスキャンによる TLS 証明書の特徴抽出を防御できます。

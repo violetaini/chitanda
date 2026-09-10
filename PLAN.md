@@ -1,140 +1,140 @@
-# MyXray 设计状态与演进计划
+# MyXray 設計状態と今後の進化ロードマップ
 
-本文区分当前已经存在的实现、仍需验证的工程假设和后续路线。协议总览见 [README.md](README.md)，三种 TCP 路由模式的精确定义见 [TRANSPORT_MODES.md](TRANSPORT_MODES.md)。
+本文書は、現存する実装仕様、今後検証すべき工学的仮説、および将来の開発ロードマップを明確に区別して整理したものです。プロトコルの全体像は [README.md](README.md)、TCP トランスポート 3 モードの厳密な定義は [TRANSPORT_MODES.md](TRANSPORT_MODES.md) を参照してください。
 
-## 1. 产品定位
+## 1. プロダクトの位置付け
 
-MyXray 面向自有服务器与自有客户端部署，目标是在统一服务端上提供：
+MyXray（Chitanda）は自社管理サーバーおよび専用クライアントでの運用を想定しており、単一の統合サーバー上で以下を提供することを目標としています：
 
-- TLS/HTTP/2 承载的 TCP 代理路径；
-- QUIC/HTTP/3 承载的 TCP 代理路径；
-- HTTP/3 Extended CONNECT 与 QUIC Datagram 承载的 UDP 代理路径；
-- 不绑定 SOCKS5 的 Go 客户端 SDK；
-- 未授权请求到真实 HTTPS 站点的 fallback。
+- TLS/HTTP/2 キャリアによる TCP プロキシパス
+- QUIC/HTTP/3 キャリアによる TCP プロキシパス
+- HTTP/3 Extended CONNECT および QUIC Datagram による UDP プロキシパス
+- SOCKS5 に束縛されない Go クライアント SDK
+- 未認証リクエストに対する実在 HTTPS サイトへのフォールバック（Fallback）
 
-“抗审查”是需要在明确威胁模型下测试的目标，不是当前实现可以保证的属性。项目不声称不可检测，也不把特定节点上的吞吐测量外推为普遍性能承诺。
+「耐検閲性」は明確な脅威モデルの下で検証すべき目標であり、現行実装が無条件に保証できる性質ではありません。本プロジェクトは「検知不能（Undetectable）」を主張するものではなく、特定ノードにおけるスループット測定値を普遍的な性能保証として過度に外挿することも行いません。
 
-## 2. 当前主线架构
+## 2. 現在のメインラインアーキテクチャ
 
 ```text
-          [上层调用方 / bench-direct / 后续 outbound adapter]
+          [上位アプリケーション / bench-direct / アウトバウンドアダプター]
                                |
                         [pkg/client SDK]
                                |
-             +-----------------+-----------------+
-             |                                   |
-     TCPTransport: h2/h3/auto           UDP: 始终使用 H3
-             |                                   |
-     H2 request body 或 H3 stream       Extended CONNECT + Datagram
-             +-----------------+-----------------+
-                               |
-                    [cmd/myxray-server]
-                TCP/H2 + UDP/H3 同一端口号
+              +-----------------+-----------------+
+              |                                   |
+      TCPTransport: h2/h3/auto           UDP: 常に H3 を使用
+              |                                   |
+      H2 request body または H3 stream   Extended CONNECT + Datagram
+              +-----------------+-----------------+
+                                |
+                     [cmd/myxray-server]
+                 TCP/H2 + UDP/H3 同一ポート番号
 ```
 
-当前协议权威实现是 `pkg/client` 与 `cmd/myxray-server`。`cmd/myxray-v2-client` 仍复制了一套旧 TCP 帧实现，与当前 raw-stream 服务端尚未重新同步，不能作为三种模式已经端到端通过的证据。
+現在のプロトコルの正規実装（Authoritative Implementation）は `pkg/client` および `cmd/myxray-server` です。`cmd/myxray-v2-client` には旧式の TCP フレーム実装が残存しており、現行の raw-stream サーバーとの再同期が完了していないため、3 つのモードがエンドツーエンドで通過していることの根拠としては扱えません。
 
-## 3. 当前三种 TCP 模式
+## 3. 現在の 3 つの TCP モード
 
-| 模式 | TCP 行为 | UDP 行为 |
+| モード | TCP の挙動 | UDP の挙動 |
 | --- | --- | --- |
 | `h2` | 固定 TLS/H2 | 固定 H3 Datagram |
-| `h3` | 固定 QUIC/H3 stream | 固定 H3 Datagram，且与 H3/TCP 使用独立 QUIC 连接 |
-| `auto` | H2 优先，建连失败或健康状态降级时为新连接选择 H3 | 固定 H3 Datagram |
+| `h3` | 固定 QUIC/H3 stream | 固定 H3 Datagram（かつ H3/TCP とは独立した QUIC コネクション） |
+| `auto` | H2 優先。ハンドシェイク失敗またはヘルスステータス低下時に新規接続で H3 を選択 | 固定 H3 Datagram |
 
-`TCPTransport` 不控制 UDP。目前没有 UDP-over-H2，也没有在 H2 与 H3 之间迁移已经建立的 TCP 流。
+`TCPTransport` は UDP を制御しません。現時点で UDP-over-H2 は存在せず、確立済みの TCP ストリームを H2 と H3 の間でマイグレーションする機能もありません。
 
-## 4. 已实现机制
+## 4. 実装済みメカニズム
 
 ### 4.1 TCP
 
-- H2 使用 `POST` 私有路径，请求体与响应体直接映射 TCP 字节流。
-- H3 使用 HTTP/3 request stream 直接映射 TCP 字节流。
-- H2 SDK 支持多 transport pool，并按活跃流数量选择 carrier。
-- H3 SDK 支持多 QUIC connection pool，并在拨号阶段预占活跃流计数，避免并发请求集中到第一个 carrier。
-- `auto` 支持单次 H2 建连失败后的 H3 尝试，以及后台 H2 健康状态切换。
+- H2 は `POST` プライベートパスを使用し、リクエストボディおよびレスポンスボディを TCP バイトストリームへダイレクトにマッピング。
+- H3 は HTTP/3 request stream を TCP バイトストリームへダイレクトにマッピング。
+- H2 SDK はマルチトランスポートプールに対応し、アクティブストリーム数に基づいてキャリアを選択。
+- H3 SDK はマルチ QUIC コネクションプールに対応し、ダイヤルフェーズでアクティブストリーム数を事前カウントすることで、並行リクエストが単一のキャリアへ集中する偏りを防止。
+- `auto` は単一の H2 接続確立失敗後の H3 試行、およびバックグラウンドでの H2 ヘルスステータス切り替えに対応。
 
-当前主线已经移除 TCP 数据上的 `OPEN`、`DATA`、`HALF_CLOSE` 等自定义双重帧。相关类型仍用于历史客户端代码和 UDP 数据报之外的遗留测试，后续应清理或重新定义边界。
+現在のメインラインでは、TCP データ上の `OPEN`、`DATA`、`HALF_CLOSE` などの独自二重フレーミングは既に撤廃されています。関連する型定義は従来のクライアントコードや UDP データグラム以外のレガシーテストに残存していますが、今後は整理または境界の再定義を行う必要があります。
 
 ### 4.2 UDP
 
-- 使用 H3 Extended CONNECT 建立 association。
-- 使用 HTTP Datagram（RFC 9297）承载于 QUIC DATAGRAM（RFC 9221），发送不可重传数据报。
-- 私有 envelope 包含版本、序号、目标地址与载荷。
-- 使用 2048 项序号窗口过滤重复及过旧数据报。
-- vendored quic-go 当前发送队列为 512，接收队列为 2048。
-- vendored CUBIC 当前最小拥塞窗口为 64 包，初始拥塞窗口为 128 包。
+- H3 Extended CONNECT を用いてアソシエーション（Association）を確立。
+- HTTP Datagram（RFC 9297）を QUIC DATAGRAM（RFC 9221）に載せ、再送を行わない非信頼データグラムを送信。
+- 独自エンベロープ（Envelope）にはバージョン、シーケンス番号、宛先アドレス、ペイロードを格納。
+- 2048 エントリのシーケンス番号ウィンドウを用いて重複および過度に古いデータグラムをフィルタリング。
+- ベンダー管理（vendored）の quic-go では、送信キューサイズを 512、受信キューサイズを 2048 に設定。
+- ベンダー管理の CUBIC では、最小輻輳ウィンドウを 64 パケット、初期輻輳ウィンドウを 128 パケットに設定。
 
-### 4.3 鉴权与 fallback
+### 4.3 認証とフォールバック (Fallback)
 
-- HMAC-SHA256 覆盖 method、path、target、timestamp 与 nonce。
-- 时间窗口为正负 90 秒。
-- 服务端在授权上游副作用前持久化 nonce；持久 replay cache 失败时 fail closed。
-- 未授权请求移除私有头后转发到真实 HTTPS fallback。
-- 上游目标只允许公网单播地址。
+- HMAC-SHA256 により method、path、target、timestamp、nonce を網羅的に保護。
+- 許容時間枠（タイムウィンドウ）は ±90 秒。
+- サーバーはアップストリームへの副作用を許可する前に nonce を永続化。永続リプレイキャッシュが失敗した場合は fail-closed（安全側に倒して拒否）動作。
+- 未認証リクエストは独自ヘッダーを削除した上で、実在する HTTPS フォールバック先へプロキシ。
+- アップストリーム宛先はパブリックなユニキャストアドレスのみを許可。
 
-### 4.4 H3 会话恢复
+### 4.4 H3 セッション再開 (Session Resumption)
 
-- 客户端可选持久 TLS session cache。
-- 服务端允许 QUIC 0-RTT，并使用持久 ticket key。
-- 只有已取得有效票据的后续连接才可能使用 0-RTT。
-- 从未连接过的首次 0-RTT、0-RTT UDP、一次性预密钥和多节点强一致 nonce 消费尚未实现。
+- クライアント側で永続 TLS セッションキャッシュを任意で設定可能。
+- サーバー側で QUIC 0-RTT を許可し、永続化チケットキーを使用。
+- 有効なチケットを既に取得している後続接続のみが 0-RTT を使用可能。
+- 過去に接続実績のない初回 0-RTT、0-RTT UDP、ワンタイム事前共有鍵、複数ノード間での強整合性 nonce 消費は現時点で未実装。
 
-## 5. 当前成熟度
+## 5. 現在の成熟度マトリクス
 
-| 能力 | 状态 |
+| 機能・コンポーネント | ステータス |
 | --- | --- |
-| 服务端 H2/H3 监听 | 已实现 |
-| `pkg/client` 的 H2/H3/auto 路由 | 已实现，H2/H3 均支持 TCP carrier pool，缺少完整端到端回归 |
-| H3 Datagram UDP | 已实现，性能与弱网结论依赖部署条件 |
-| 完整 `net.Conn` deadline/half-close 语义 | 未完成 |
-| 服务端 `pkg/server` Inbound 组件化 | 未实现 (目前逻辑仍耦合于 `cmd/myxray-server` ) |
-| 客户端 `pkg/client` 标准 Proxy 适配器 | 未实现 (需提供适配 Mihomo/Xray 的标准 Dial 接口) |
-| Xray-core adapter | 未实现 |
-| Mihomo adapter | 未实现 |
-| sing-box adapter | 未实现 |
-| 自动化 CI 发布门禁 | 未实现，当前依赖手工脚本 |
+| サーバー側 H2/H3 リッスン | 実装完了 |
+| `pkg/client` の H2/H3/auto ルーティング | 実装完了（H2/H3 ともに TCP キャリアプール対応、完全な E2E リグレッション試験は継続中） |
+| H3 Datagram UDP | 実装完了（性能および弱網環境での評価はデプロイ条件に依存） |
+| 完全な `net.Conn` deadline / half-close セマンティクス | 未完了 |
+| サーバー側 `pkg/server` インバウンドコンポーネント化 | 未実装（現行ロジックは依然として `cmd/myxray-server` に密結合） |
+| クライアント `pkg/client` 標準 Proxy アダプター | 未実装（Mihomo / Xray 適合用の標準 Dial インターフェースの提供が必要） |
+| Xray-core アダプター | 未実装 |
+| Mihomo アダプター | 未実装 |
+| sing-box アダプター | 未実装 |
+| 自動化 CI リリースゲート | 未実装（現状は手動スクリプトに依存） |
 
-## 6. 后续优先级
+## 6. 今後の開発優先度 (Priorities)
 
-**战略调整声明**：经过纯 Go (quic-go) 与纯 Rust (quinn) 在相同连接池条件下的严格 A/B 物理测速，确认我们定制的纯 Go 核心已逼近物理极限（769 Mbps），彻底否决了重写 C/Rust 底层的伪需求。项目将放弃维护独立的 SOCKS5 客户端应用，全线并入 Go 语言的通用代理内核生态。
+**戦略方針の確定**：同一接続プール条件下において純 Go（quic-go）と純 Rust（quinn）の厳密な物理 A/B 速度測定を実施した結果、当プロジェクトでカスタマイズした純 Go コアが既に物理限界値（769 Mbps）に達していることが確認されました。これにより、C/Rust で低レイヤーを書き直すという不要な仮説は完全に棄却されました。今後は独立した SOCKS5 クライアントアプリの保守から撤退し、Go 言語ベースの汎用プロキシコアエコシステムへの完全統合を推進します。
 
-### P0：补齐基础语义与组件化改造（接入宿主的前提）
+### P0：基本セマンティクスの充足とコンポーネント化（ホスト統合の前提条件）
 
-1. **补齐底层标准语义 (net.Conn)**：
-   - 完美实现 `SetReadDeadline` 和 `SetWriteDeadline`。
-   - 完美实现 HTTP/3 和 HTTP/2 流的 `CloseWrite`（Half-close，区分优雅 FIN 与流中止）。
-2. **服务端入站组件化 (Xray Inbound)**：
-   - 将 `cmd/myxray-server` 的核心监听、证书、鉴权逻辑抽离为 `pkg/server`。
-   - 对外暴露生命周期一致的 `Start(listener)` 接口，使其能以标准 Inbound 的身份挂载到 Xray-core 中。
-3. **客户端出站包装 (Mihomo Outbound)**：
-   - 为 `pkg/client` 包装一层干净的标准接口，提供标准的 `DialContext(ctx, network, addr)` 和 `ListenPacket()`。
-   - 删除过期的独立客户端（`cmd/myxray-v2-client`）及其陈旧 TCP 帧协议。
-4. 删除或改写引用已删除符号的陈旧测试。
-5. 为 `server + SDK` 增加 H2、H3、auto 的端到端测试。
-6. 修正 H2 建连使用后台 context 的问题，确保调用方取消与 deadline 能中断建连。
-7. 覆盖 TCP 双向 EOF、半关闭、取消、deadline、服务端重启和 application bytes 不重放。
-8. 覆盖 UDP association 生命周期、重放窗口、MTU 边界和连接关闭唤醒。
+1. **低レイヤー標準セマンティクス (`net.Conn`) の充足**:
+   - `SetReadDeadline` および `SetWriteDeadline` の完全な実装。
+   - HTTP/3 および HTTP/2 ストリームにおける `CloseWrite`（Half-close。優雅な FIN とストリーム中断の厳密な区別）の実装。
+2. **サーバー側インバウンドのコンポーネント化 (Xray Inbound)**:
+   - `cmd/myxray-server` のコアリッスン、証明書管理、認証ロジックを `pkg/server` へ分離・抽象化。
+   - ライフサイクルが統一された `Start(listener)` インターフェースを外部公開し、標準的な Inbound として Xray-core へマウント可能にする。
+3. **クライアント側アウトバウンドのラッパー整備 (Mihomo Outbound)**:
+   - `pkg/client` にクリーンな標準インターフェースを被せ、標準的な `DialContext(ctx, network, addr)` および `ListenPacket()` を提供。
+   - 期限切れの単体クライアント（`cmd/myxray-v2-client`）および旧式 TCP フレームプロトコルの削除。
+4. 削除されたシンボルを参照しているレガシーテストの削除またはリライト。
+5. `server + SDK` に対する H2、H3、auto のエンドツーエンド自動テストの拡充。
+6. H2 接続確立時にバックグラウンド context が使用されていた問題を修正し、呼び出し元のキャンセルや deadline が接続確立を正しく中断できるようにする。
+7. TCP 双方向 EOF、ハーフクローズ、キャンセル、deadline、サーバー再起動、およびアプリケーションバイト列の非再送性のテストカバレッジ確保。
+8. UDP アソシエーションのライフサイクル、リプレイウィンドウ、MTU 境界、コネクション切断時の起床制御のテストカバレッジ確保。
 
-验收标准：三个模式的行为矩阵均由自动测试证明，`scripts/verify-release.sh` 在干净 checkout 上通过。
+合格基準：3 つのモードの挙動マトリクスが自動テストで証明され、クリーンなチェックアウト環境で `scripts/verify-release.sh` が正常通過すること。
 
-### P1：补全 SDK 契约与上游适配
+### P1：SDK コントラクトの完成と上流エコシステム適合
 
-1. 明确并实现 `DialContext` 对 `network` 参数的校验。
-2. 为 H2/H3 `net.Conn` 和 UDP `net.PacketConn` 实现可观察的 deadline 行为。
-3. 修正 H3 `CloseWrite`，区分优雅 FIN 与流中止。
-4. 将 module path 调整为可由外部仓库正常引用的路径。
-5. 在 SDK 契约稳定后分别实现 Xray-core、Mihomo 和 sing-box adapter。
+1. `DialContext` における `network` パラメーターの検証を明確化し実装。
+2. H2/H3 `net.Conn` および UDP `net.PacketConn` における観測可能な deadline 動作の実装。
+3. H3 `CloseWrite` を修正し、優雅な FIN とストリーム中断（Reset）を明確に区別。
+4. 外部リポジトリから正常に参照・インポートできるよう Go module path を調整。
+5. SDK コントラクトの安定化後、Xray-core、Mihomo、sing-box 向けのアダプターをそれぞれ実装。
 
-验收标准：通过各上游的真实接口测试，而不只做 Go 编译期类型断言。
+合格基準：Go コンパイル時の静的型アサーションだけでなく、各上流プロジェクトの実インターフェースを通じた結合テストに合格すること。
 
-### P2：部署与传输增强
+### P2：デプロイメントとトランスポートの強化
 
-1. 建立 Linux/ARM64 与常用 amd64 平台的 CI 测试、race、vet 和交叉编译。
-2. 验证 NAT rebinding 与 QUIC connection migration。
-3. 评估 UDP-over-H2 是否值得作为可选 fallback，并量化 TCP 队头阻塞代价。
-4. 在明确业务模型后评估 FEC、应用优先级和其他拥塞控制策略。
-5. 建立包含 RTT、MTU、随机丢包、突发丢包、CPU steal 和长时间稳定性的基准矩阵。
-6. 只有替代 QUIC/H3 底层在同机、同链路、同协议语义的 A/B 中同时改善吞吐与 CPU/GB，才考虑引入 Rust/C FFI 或 sidecar；不得以其他项目的峰值替代本项目验证。
+1. Linux/ARM64 および一般的な amd64 プラットフォーム向け CI テスト、race 検知、vet、クロスコンパイルパイプラインの構築。
+2. NAT リバインディング（Rebinding）および QUIC コネクションマイグレーションの検証。
+3. UDP-over-H2 をオプションのフォールバックとして採用する価値があるかの評価、および TCP ヘッドオブラインブロッキング（Head-of-Line Blocking）のコストの定量化。
+4. 明確なワークロードモデル策定後における FEC、アプリケーションレイヤ優先度制御、各種輻輳制御アルゴリズムの評価。
+5. RTT、MTU、ランダムパケットロス、バーストパケットロス、CPU スティール、長期安定性を含むベンチマークマトリクスの確立。
+6. 同一マシン・同一リンク・同一プロトコルセマンティクスの A/B テストにおいて、代替 QUIC/H3 基盤がスループットと CPU/GB 効率を同時に改善することが実証された場合に限り Rust/C FFI やサイドカーの導入を検討する（他プロジェクトの公称ピーク値による推測は禁止）。
 
-验收标准：所有性能结论都能由版本化脚本复现，并同时报告吞吐、丢包、延迟、CPU、内存和失败率。
+合格基準：すべての性能評価および結論がバージョン管理されたスクリプトによって再現可能であり、スループット、パケットロス率、レイテンシ、CPU 使用率、メモリ消費量、失敗率が包括的にレポートされること。

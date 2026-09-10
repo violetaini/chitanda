@@ -199,7 +199,7 @@ The accepted implementation change makes `TCPPoolSize` apply to H3 and `auto` H3
 - Never-contacted first-ever 0-RTT with provisioned one-time prekeys, crash-safe multi-node at-most-once consumption, and forward secrecy for early data.
 - UDP-over-H2 fallback, verified NAT rebinding/connection migration, application-selectable FEC, and 0-RTT UDP. HTTP Datagrams are sent only after the handshake.
 - Application priority and rekeying; `WINDOW_UPDATE` is reserved while QUIC currently provides active flow control.
-- Raw TCP/Noise carrier, dynamic traffic-shape rotation, and blind classifier separation against GFW or 傲盾.
+- Raw TCP/Noise carrier, dynamic traffic-shape rotation, and blind classifier separation against GFW or commercial DPI firewalls.
 - Any claim of undetectability. HTTP/2 settings and HTTP/3/QUIC behavior remain observable to active endpoints, and QUIC can be blocked independently of payload classification.
 
 ## 2026-09-01 Plain-H1 and Plain-UDP Carrier Benchmarks & Security Hardening
