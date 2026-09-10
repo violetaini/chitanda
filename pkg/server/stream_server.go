@@ -318,16 +318,6 @@ func (s *StreamServer) HandleConn(conn net.Conn) {
 	relayBidirectional(connCtx, streamConn, upstream)
 }
 
-type closeWriter interface {
-	CloseWrite() error
-}
-
-func closeWriteConn(c net.Conn) {
-	if cw, ok := c.(closeWriter); ok {
-		_ = cw.CloseWrite()
-	}
-}
-
 func relayBidirectional(ctx context.Context, client, target net.Conn) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -338,56 +328,87 @@ func relayBidirectional(ctx context.Context, client, target net.Conn) {
 		_ = target.Close()
 	}()
 
-	uploadDone := make(chan struct{}, 1)
-	downloadDone := make(chan struct{}, 1)
+	activityCh := make(chan struct{}, 64)
+	signalActivity := func() {
+		select {
+		case activityCh <- struct{}{}:
+		default:
+		}
+	}
 
-	// client -> target
+	uploadDone := make(chan error, 1)
+	downloadDone := make(chan error, 1)
+
+	// client -> target (upload)
 	go func() {
 		bufPtr := copyBufferPool.Get().(*[]byte)
 		defer copyBufferPool.Put(bufPtr)
-		_, err := io.CopyBuffer(target, client, *bufPtr)
+		ar := &activityReader{r: client, onActivity: signalActivity}
+		_, err := io.CopyBuffer(target, ar, *bufPtr)
 		if err != nil {
 			cancel()
 		} else {
 			closeWriteConn(target)
 		}
-		uploadDone <- struct{}{}
+		uploadDone <- err
 	}()
 
-	// target -> client
+	// target -> client (download)
 	go func() {
 		bufPtr := copyBufferPool.Get().(*[]byte)
 		defer copyBufferPool.Put(bufPtr)
-		_, err := io.CopyBuffer(client, target, *bufPtr)
+		ar := &activityReader{r: target, onActivity: signalActivity}
+		_, err := io.CopyBuffer(client, ar, *bufPtr)
 		if err != nil {
 			cancel()
 		} else {
 			closeWriteConn(client)
 		}
-		downloadDone <- struct{}{}
+		downloadDone <- err
 	}()
 
-	select {
-	case <-uploadDone:
-		// Client finished sending; allow target to finish downloading or drain up to 60s
+	idleTimer := time.NewTimer(DefaultIdleTimeout)
+	defer idleTimer.Stop()
+
+	var uploadFinished, downloadFinished bool
+
+	for !uploadFinished || !downloadFinished {
 		select {
-		case <-downloadDone:
 		case <-ctx.Done():
-		case <-time.After(60 * time.Second):
+			return
+		case <-activityCh:
+			if !idleTimer.Stop() {
+				select {
+				case <-idleTimer.C:
+				default:
+				}
+			}
+			idleTimer.Reset(DefaultIdleTimeout)
+		case <-idleTimer.C:
 			cancel()
-		}
-	case <-downloadDone:
-		// Target finished sending (EOF). Response is complete.
-		// Set a short read deadline (250ms) on client so client.Read unblocks immediately
-		// if client is idle/holding keepalive open, preventing leaked connections/FDs.
-		_ = client.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
-		select {
+			return
 		case <-uploadDone:
-		case <-ctx.Done():
-		case <-time.After(250 * time.Millisecond):
-			cancel()
+			uploadFinished = true
+		case <-downloadDone:
+			downloadFinished = true
+			if !uploadFinished {
+				// Target finished sending (EOF). Response is complete.
+				// Set a short read deadline on client so client.Read unblocks immediately
+				// if client is idle/holding keepalive open, preventing leaked connections/FDs.
+				_ = client.SetReadDeadline(time.Now().Add(DefaultDrainTimeout))
+				drainTimer := time.NewTimer(DefaultDrainTimeout)
+				defer drainTimer.Stop()
+				select {
+				case <-uploadDone:
+					uploadFinished = true
+				case <-drainTimer.C:
+					cancel()
+					return
+				case <-ctx.Done():
+					return
+				}
+			}
 		}
-	case <-ctx.Done():
 	}
 }
 

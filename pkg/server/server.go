@@ -125,45 +125,80 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		flusher.Flush()
 	}
 
-	uploadDone := make(chan struct{}, 1)
-	downloadDone := make(chan struct{}, 1)
+	activityCh := make(chan struct{}, 64)
+	signalActivity := func() {
+		select {
+		case activityCh <- struct{}{}:
+		default:
+		}
+	}
+
+	uploadDone := make(chan error, 1)
+	downloadDone := make(chan error, 1)
 
 	go func() {
 		bufPtr := copyBufferPool.Get().(*[]byte)
 		defer copyBufferPool.Put(bufPtr)
-		_, _ = io.CopyBuffer(upstream, r.Body, *bufPtr)
+		ar := &activityReader{r: r.Body, onActivity: signalActivity}
+		_, err := io.CopyBuffer(upstream, ar, *bufPtr)
 		closeWriteConn(upstream)
-		uploadDone <- struct{}{}
+		uploadDone <- err
 	}()
 
 	go func() {
+		var err error
 		if useFraming {
-			_ = frame.CopyAsDataFramesAndClose(flushWriter{w: w}, upstream)
+			ar := &activityReader{r: upstream, onActivity: signalActivity}
+			err = frame.CopyAsDataFramesAndClose(flushWriter{w: w}, ar)
 		} else {
 			bufPtr := copyBufferPool.Get().(*[]byte)
 			defer copyBufferPool.Put(bufPtr)
-			_, _ = io.CopyBuffer(flushWriter{w: w}, upstream, *bufPtr)
+			ar := &activityReader{r: upstream, onActivity: signalActivity}
+			_, err = io.CopyBuffer(flushWriter{w: w}, ar, *bufPtr)
 		}
-		downloadDone <- struct{}{}
+		downloadDone <- err
 	}()
 
-	select {
-	case <-downloadDone:
-		// Upstream finished sending download data.
-		// Allow upload to complete or wait for request context / short drain (250ms).
+	idleTimer := time.NewTimer(DefaultIdleTimeout)
+	defer idleTimer.Stop()
+
+	var uploadFinished, downloadFinished bool
+
+	for !uploadFinished || !downloadFinished {
 		select {
+		case <-r.Context().Done():
+			_ = upstream.Close()
+			return
+		case <-activityCh:
+			if !idleTimer.Stop() {
+				select {
+				case <-idleTimer.C:
+				default:
+				}
+			}
+			idleTimer.Reset(DefaultIdleTimeout)
+		case <-idleTimer.C:
+			_ = upstream.Close()
+			return
 		case <-uploadDone:
-		case <-r.Context().Done():
-		case <-time.After(250 * time.Millisecond):
-		}
-	case <-uploadDone:
-		// Client finished uploading; wait for upstream download to finish (up to 60s).
-		select {
+			uploadFinished = true
 		case <-downloadDone:
-		case <-r.Context().Done():
-		case <-time.After(60 * time.Second):
+			downloadFinished = true
+			if !uploadFinished {
+				drainTimer := time.NewTimer(DefaultDrainTimeout)
+				defer drainTimer.Stop()
+				select {
+				case <-uploadDone:
+					uploadFinished = true
+				case <-drainTimer.C:
+					_ = upstream.Close()
+					return
+				case <-r.Context().Done():
+					_ = upstream.Close()
+					return
+				}
+			}
 		}
-	case <-r.Context().Done():
 	}
 	_ = upstream.Close()
 }
@@ -296,40 +331,73 @@ func (s *Server) servePlainH1(w http.ResponseWriter, r *http.Request) {
 	framedReader := h1session.NewFramedReader(r.Body, decStream)
 	framedWriter := h1session.NewFramedWriter(w, encStream)
 
-	uploadDone := make(chan struct{}, 1)
-	downloadDone := make(chan struct{}, 1)
+	activityCh := make(chan struct{}, 64)
+	signalActivity := func() {
+		select {
+		case activityCh <- struct{}{}:
+		default:
+		}
+	}
+
+	uploadDone := make(chan error, 1)
+	downloadDone := make(chan error, 1)
 	go func() {
 		bufPtr := copyBufferPool.Get().(*[]byte)
 		defer copyBufferPool.Put(bufPtr)
-		_, _ = io.CopyBuffer(upstream, framedReader, *bufPtr)
+		ar := &activityReader{r: framedReader, onActivity: signalActivity}
+		_, err := io.CopyBuffer(upstream, ar, *bufPtr)
 		closeWriteConn(upstream)
-		uploadDone <- struct{}{}
+		uploadDone <- err
 	}()
 
 	go func() {
 		bufPtr := copyBufferPool.Get().(*[]byte)
 		defer copyBufferPool.Put(bufPtr)
-		_, _ = io.CopyBuffer(framedWriter, upstream, *bufPtr)
-		downloadDone <- struct{}{}
+		ar := &activityReader{r: upstream, onActivity: signalActivity}
+		_, err := io.CopyBuffer(framedWriter, ar, *bufPtr)
+		downloadDone <- err
 	}()
 
-	select {
-	case <-downloadDone:
-		// Upstream finished sending download data.
-		// Allow upload to complete or wait for request context / short drain (250ms).
+	idleTimer := time.NewTimer(DefaultIdleTimeout)
+	defer idleTimer.Stop()
+
+	var uploadFinished, downloadFinished bool
+
+	for !uploadFinished || !downloadFinished {
 		select {
+		case <-r.Context().Done():
+			_ = upstream.Close()
+			return
+		case <-activityCh:
+			if !idleTimer.Stop() {
+				select {
+				case <-idleTimer.C:
+				default:
+				}
+			}
+			idleTimer.Reset(DefaultIdleTimeout)
+		case <-idleTimer.C:
+			_ = upstream.Close()
+			return
 		case <-uploadDone:
-		case <-r.Context().Done():
-		case <-time.After(250 * time.Millisecond):
-		}
-	case <-uploadDone:
-		// Client finished uploading; wait for upstream download to finish (up to 60s).
-		select {
+			uploadFinished = true
 		case <-downloadDone:
-		case <-r.Context().Done():
-		case <-time.After(60 * time.Second):
+			downloadFinished = true
+			if !uploadFinished {
+				drainTimer := time.NewTimer(DefaultDrainTimeout)
+				defer drainTimer.Stop()
+				select {
+				case <-uploadDone:
+					uploadFinished = true
+				case <-drainTimer.C:
+					_ = upstream.Close()
+					return
+				case <-r.Context().Done():
+					_ = upstream.Close()
+					return
+				}
+			}
 		}
-	case <-r.Context().Done():
 	}
 	_ = upstream.Close()
 }

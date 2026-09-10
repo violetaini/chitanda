@@ -145,44 +145,92 @@ func (s *Server) serveHTTP3TCP(w http.ResponseWriter, r *http.Request, targetAdd
 		stream.CancelRead(0)
 		_ = stream.Close()
 	}()
+	activityCh := make(chan struct{}, 64)
+	signalActivity := func() {
+		select {
+		case activityCh <- struct{}{}:
+		default:
+		}
+	}
+
 	uploadDone := make(chan error, 1)
+	downloadDone := make(chan error, 1)
+
 	go func() {
+		bufPtr := copyBufferPool.Get().(*[]byte)
+		defer copyBufferPool.Put(bufPtr)
+		var uploadErr error
 		if useFraming {
-			uploadErr := copyDataFramesToTCP(stream, upstream)
-			if uploadErr != nil {
-				_ = upstream.Close()
-			}
-			uploadDone <- uploadErr
+			ar := &activityReader{r: stream, onActivity: signalActivity}
+			uploadErr = copyDataFramesToTCP(ar, upstream)
+		} else {
+			ar := &activityReader{r: stream, onActivity: signalActivity}
+			_, uploadErr = io.CopyBuffer(upstream, ar, *bufPtr)
+		}
+		if uploadErr != nil {
+			_ = upstream.Close()
+		} else {
+			closeWriteConn(upstream)
+		}
+		uploadDone <- uploadErr
+	}()
+
+	go func() {
+		var downloadErr error
+		if useFraming {
+			ar := &activityReader{r: upstream, onActivity: signalActivity}
+			downloadErr = frame.CopyAsDataFramesAndClose(stream, ar)
 		} else {
 			bufPtr := copyBufferPool.Get().(*[]byte)
 			defer copyBufferPool.Put(bufPtr)
-			_, uploadErr := io.CopyBuffer(upstream, stream, *bufPtr)
-			if uploadErr != nil {
-				_ = upstream.Close()
-			} else {
-				closeWriteConn(upstream)
-			}
-			uploadDone <- uploadErr
+			ar := &activityReader{r: upstream, onActivity: signalActivity}
+			_, downloadErr = io.CopyBuffer(stream, ar, *bufPtr)
 		}
+		downloadDone <- downloadErr
 	}()
 
-	if useFraming {
-		_ = frame.CopyAsDataFramesAndClose(stream, upstream)
-	} else {
-		bufPtr := copyBufferPool.Get().(*[]byte)
-		_, err = io.CopyBuffer(stream, upstream, *bufPtr)
-		copyBufferPool.Put(bufPtr)
-		if err != nil {
-			stream.CancelWrite(0)
+	idleTimer := time.NewTimer(DefaultIdleTimeout)
+	defer idleTimer.Stop()
+
+	var uploadFinished, downloadFinished bool
+
+	for !uploadFinished || !downloadFinished {
+		select {
+		case <-r.Context().Done():
+			_ = upstream.Close()
 			return
+		case <-activityCh:
+			if !idleTimer.Stop() {
+				select {
+				case <-idleTimer.C:
+				default:
+				}
+			}
+			idleTimer.Reset(DefaultIdleTimeout)
+		case <-idleTimer.C:
+			_ = upstream.Close()
+			return
+		case <-uploadDone:
+			uploadFinished = true
+		case <-downloadDone:
+			downloadFinished = true
+			if !uploadFinished {
+				drainTimer := time.NewTimer(DefaultDrainTimeout)
+				defer drainTimer.Stop()
+				select {
+				case <-uploadDone:
+					uploadFinished = true
+				case <-drainTimer.C:
+					_ = upstream.Close()
+					return
+				case <-r.Context().Done():
+					_ = upstream.Close()
+					return
+				}
+			}
 		}
 	}
-	select {
-	case <-uploadDone:
-	case <-r.Context().Done():
-	case <-time.After(250 * time.Millisecond):
-		stream.CancelRead(0)
-	}
+	_ = upstream.Close()
 }
 
 func copyDataFramesToTCP(stream io.Reader, upstream net.Conn) error {
