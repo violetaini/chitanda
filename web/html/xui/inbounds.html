@@ -341,6 +341,10 @@
                   <a-tag style="margin:0;" v-if="dbInbound.toInbound().stream.isXtls" color="blue">XTLS</a-tag>
                   <a-tag style="margin:0;" v-if="dbInbound.toInbound().stream.isReality" color="blue">Reality</a-tag>
                 </template>
+                <template v-if="dbInbound.isChitanda">
+                  <a-tag style="margin:0;" color="green">[[ dbInbound.chitandaTransport ]]</a-tag>
+                  <a-tag style="margin:0;" v-if="dbInbound.toInbound().stream && dbInbound.toInbound().stream.isTls" color="blue">TLS</a-tag>
+                </template>
               </template>
               <template slot="clients" slot-scope="text, dbInbound">
                 <template v-if="clientCount[dbInbound.id]">
@@ -431,6 +435,10 @@
                             <a-tag style="margin:0;" color="blue">[[ dbInbound.toInbound().stream.network ]]</a-tag>
                             <a-tag style="margin:0;" v-if="dbInbound.toInbound().stream.isTls" color="green">tls</a-tag>
                             <a-tag style="margin:0;" v-if="dbInbound.toInbound().stream.isReality" color="green">reality</a-tag>
+                          </template>
+                          <template v-if="dbInbound.isChitanda">
+                            <a-tag style="margin:0;" color="blue">[[ dbInbound.chitandaTransport ]]</a-tag>
+                            <a-tag style="margin:0;" v-if="dbInbound.toInbound().stream && dbInbound.toInbound().stream.isTls" color="green">tls</a-tag>
                           </template>
                         </td>
                       </tr>

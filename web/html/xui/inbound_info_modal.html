@@ -108,6 +108,22 @@
           </template>
         </table>
       </template>
+      <template v-if="dbInbound.isChitanda">
+        <table>
+          <tr>
+            <td>{{ i18n "transmission" }}</td>
+            <td>
+              <a-tag color="green">[[ inbound.network ]]</a-tag>
+            </td>
+          </tr>
+          <tr v-if="inbound.stream && inbound.stream.isTls">
+            <td>TLS</td>
+            <td>
+              <a-tag color="blue">TLS</a-tag>
+            </td>
+          </tr>
+        </table>
+      </template>
     </a-col>
     <template v-if="dbInbound.hasLink()">
       {{ i18n "security" }}

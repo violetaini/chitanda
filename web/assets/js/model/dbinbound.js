@@ -64,6 +64,16 @@ class DBInbound {
         return this.protocol === Protocols.CHITANDA;
     }
 
+    get chitandaTransport() {
+        if (!this.isChitanda) return '';
+        try {
+            const s = JSON.parse(this.settings);
+            return (s && s.transport) || 'h2';
+        } catch (e) {
+            return 'h2';
+        }
+    }
+
     get address() {
         let address = location.hostname;
         if (!ObjectUtil.isEmpty(this.listen) && this.listen !== "0.0.0.0") {

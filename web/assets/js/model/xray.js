@@ -1230,6 +1230,9 @@ class Inbound extends XrayCommonClass {
     }
     
     get network() {
+        if (this.protocol === Protocols.CHITANDA) {
+            return (this.settings && this.settings.transport) || 'h2';
+        }
         return this.stream.network;
     }
 
