@@ -1,106 +1,106 @@
-# Chitanda (千反田) 私有传输协议
+# Chitanda (千反田) - プライベートセキュア転送プロトコル
 
-Chitanda 是一个面向自有服务端部署的高性能、抗探测 Go 代理传输协议。项目提供模块化服务端、可嵌入的客户端 SDK（提供标准 `net.Conn` 与 `net.PacketConn` 接口）及直连基准测试工具。
+Chitanda は、セルフホスト（自前運用）サーバー環境向けに設計された、高パフォーマンスかつ探知耐性（Anti-Probing）に優れた Go 言語製プロキシ転送プロトコルです。モジュール化されたサーバー実装、組み込み可能なクライアント SDK（Go 標準の `net.Conn` および `net.PacketConn` インターフェースを提供）、およびダイレクト接続用ベンチマークツールを備えています。
 
-当前主线支持 **5 种传输载荷模式（Transport Carriers）**：以 **`h2` (TLS 1.3 + HTTP/2 多路复用)** 作为公网主线推荐；针对 IEPL / IPLC 专线提供极限吞吐的 **`stream` (RawStream 自定义 TCP)**；同时提供 **`h3`**、**`auto`** 与纯 IP 模式 **`h1`**（别名 `plain-h1`）。
+現在、メインラインでは **5 種類のトランスポートキャリア（Transport Carriers）** をサポートしています。パブリックインターネット向け推奨の **`h2`（TLS 1.3 + HTTP/2 ストリーム多重化）**、IEPL / IPLC 専用線・高速中継向けに限界スループットを追求した **`stream`（RawStream 独自 TCP）**、さらに **`h3`**、**`auto`**、および IP 直指定モード **`h1`**（エイリアス: `plain-h1`）を提供します。
 
-- 📖 **[完整配置手册与 Wiki 规范](docs/CONFIGURATION.md)**
-- ⚡ **[五大传输载荷与生命周期规范 (Transport Modes)](TRANSPORT_MODES.md)**
-- 📁 **[示例配置文件目录 (Examples)](examples/)**
-- 📦 **[GitHub 自动发布二进制 (Releases)](https://github.com/violetaini/chitanda/releases)**
+- 📖 **[詳細設定マニュアル・仕様書 (docs/CONFIGURATION.md)](docs/CONFIGURATION.md)**
+- ⚡ **[5大トランスポートモード仕様 (TRANSPORT_MODES.md)](TRANSPORT_MODES.md)**
+- 📁 **[設定例ディレクトリ (Examples)](examples/)**
+- 📦 **[GitHub 自動ビルドバイナリ (Releases)](https://github.com/violetaini/chitanda/releases)**
 
 ---
 
-## 1. 传输载荷矩阵 (Transport Carrier Matrix)
+## 1. トランスポートキャリア・マトリクス (Transport Carrier Matrix)
 
 ```text
-                                  业务上层 / 代理内核 / 客户端 SDK
-                                                 │
-                                           pkg/client SDK
-                     ┌───────────────────────────┼───────────────────────────┐
-                     ▼                           ▼                           ▼
-            【TLS 域名公网主线】              【专线/中转高性能主线】         【纯 IP / 免证书实验模式】
-          h2 (默认) / h3 / auto                     stream                         h1 (plain-h1)
-   ┌─────────────────┬──────────────────┐ ┌──────────────────────────┐ ┌───────────────────────┬───────────────────────┐
-   │ TCP: H2/H3 复用  │ UDP: H3 Datagram │ │ TCP: RawStream (AES-GCM) │ │ TCP: H1 全双工 AEAD   │ UDP: Plain-UDP Datagram│
-   └─────────────────┴──────────────────┘ └─────────────┬────────────┘ └───────────────────────┴───────────────────────┘
-                     │                                  │                                       │
-                     └──────────────────────────────────┼───────────────────────────────────────┘
-                                                        ▼
-                                               cmd/chitanda-server
+                             アプリケーション層 / プロキシコア / クライアント SDK
+                                                  │
+                                            pkg/client SDK
+                      ┌───────────────────────────┼───────────────────────────┐
+                      ▼                           ▼                           ▼
+            【TLS / ドメイン（公網推奨）】     【専用線 / 高速中継（高スループット）】   【IP直指定 / 証明書不要（実験的）】
+               h2 (推奨) / h3 / auto                    stream                         h1 (plain-h1)
+    ┌─────────────────┬──────────────────┐ ┌──────────────────────────┐ ┌───────────────────────┬───────────────────────┐
+    │ TCP: H2/H3 多重化 │ UDP: H3 Datagram │ │ TCP: RawStream (AES-GCM) │ │ TCP: H1 全二重 AEAD   │ UDP: Plain-UDP Datagram│
+    └─────────────────┴──────────────────┘ └─────────────┬────────────┘ └───────────────────────┴───────────────────────┘
+                      │                                  │                                       │
+                      └──────────────────────────────────┼───────────────────────────────────────┘
+                                                         ▼
+                                                cmd/chitanda-server
 ```
 
-| 模式 | TCP 承载机制 | UDP 承载机制 | 0-RTT 支持 | 核心特征与适用场景 |
+| モード | TCP 転送方式 | UDP 転送方式 | 0-RTT 対応 | 主な特徴と推奨ユースケース |
 | :--- | :--- | :--- | :---: | :--- |
-| **`h2`** | TLS 1.3 + HTTP/2 流复用 | H3 QUIC Datagram (RFC 9221) | ✅ (连接池流复用 0-RTT) | **公网主线推荐**。单/多 TCP 物理连接池化复用，吞吐极高，CPU 开销低，抗审查特征成熟。 |
-| **`stream`** | RawStream TCP (AES-128-GCM) | `plain-udp` 原生 AEAD 数据报 | ✅ (0-RTT OPEN 动态填充) | **IEPL/IPLC 专线与高性能中转推荐**。单线程吞吐近 2000 MB/s (0 内存分配)；主动探测免疫（非认证探测立即断开，无 Web 特征）；ServerID 跨节点防重放绑定。 |
-| **`h3`** | TLS 1.3 + QUIC Stream + HTTP/3 | H3 QUIC Datagram (RFC 9221) | ✅ (会话恢复 0-RTT) | 原生 QUIC 0 队头阻塞，强抗丢包与弱网抖动；支持持久化 Session Ticket 0-RTT。 |
-| **`auto`** | H2 优先 $\leftrightarrow$ 异常自愈 H3 | H3 QUIC Datagram (RFC 9221) | ✅ | 新建连接动态健康探测；TCP 受阻或丢包劣化时平滑向 H3 容灾。 |
-| **`h1`** *(别名 `plain-h1`)* | 纯 IP HTTP/1.1 全双工 + PSK-AEAD | `plain-udp` 原生 AEAD 数据报 | ✅ (Flight 1 预派生 0-RTT) | **免域名 / 免证书 / 纯 IP 实验模式**。无 TLS 开销，内层流式认证加密；外层伪装为标准全双工 HTTP/1.1。 |
+| **`h2`** | TLS 1.3 + HTTP/2 多重化 | H3 QUIC Datagram (RFC 9221) | ✅ (プール流用 0-RTT) | **パブリックインターネット推奨**。単一/複数 TCP 物理接続のコネクションプール多重化。高スループット、極めて低い CPU 負荷、成熟した検閲耐性を実現。 |
+| **`stream`** | RawStream TCP (AES-128-GCM) | `plain-udp` ネイティブ AEAD データグラム | ✅ (0-RTT OPEN 動的パディング) | **IEPL / IPLC 専用線および高速中継推奨**。シングルスレッドで最大 2,000 MB/s（ヒープ割り当てゼロ）のスループット。アクティブプローブ完全無効化（未認証プローブは即座に切断、Web 応答なし）。ServerID によるクロスノードリプレイ攻撃防御。 |
+| **`h3`** | TLS 1.3 + QUIC Stream + HTTP/3 | H3 QUIC Datagram (RFC 9221) | ✅ (セッション再開 0-RTT) | ネイティブ QUIC による Head-of-Line ブロッキング完全排除。パケットロスや不安定なネットワーク環境への耐性。永続化 Session Ticket 0-RTT に対応。 |
+| **`auto`** | H2 優先 $\leftrightarrow$ 障害時自動 H3 フォールバック | H3 QUIC Datagram (RFC 9221) | ✅ | 新規接続時の動的ヘルスチェック。TCP 遮断やパケットロス悪化時にシームレスに H3 へ切り替え。 |
+| **`h1`** *(別名 `plain-h1`)* | IP 直指定 HTTP/1.1 全二重 + PSK-AEAD | `plain-udp` ネイティブ AEAD データグラム | ✅ (Flight 1 事前導出 0-RTT) | **ドメイン・証明書不要の IP 直指定実験モード**。TLS オーバーヘッドなしの内層ストリーム認証暗号化。外観は標準的な全二重 HTTP/1.1 に偽装。 |
 
 ---
 
-## 2. 核心架构与密码学设计
+## 2. コアアーキテクチャと暗号設計
 
-### A. TLS 传输主线 (`h2` / `h3` / `auto`)
-- **握手与认证**：TLS 1.3 标准握手（支持配置 Strict SNI 校验）。
-- **Transcript V2 HMAC 签名**：请求头携带基于 PSK 与长度前缀域隔离（Domain Separation）的 HMAC-SHA256 签名，绑定 Method、Path、Target、Timestamp 与 Nonce。
-- **2ms Group-Commit 组提交防重放**：服务端持久化 Nonce 缓存采用微批次异步刷盘与条件变量唤醒机制，在保障崩溃一致性的同时消除高并发磁盘 I/O 瓶颈。
-- **原生 UDP 旁路**：UDP 流量通过独立的 HTTP/3 Extended CONNECT 与 QUIC Datagram 传输，配合 2048 位滑动位图抵御乱序与重放。
-- **RFC 7540 HTTP/2 原生动态填充注入 (Dynamic Frame Padding)**：在 `h2` 与 `auto` 模式下，客户端自动对 HTTP/2 HEADERS 与 DATA 帧注入 8~64 字节随机长度的原生 RFC 7540 协议级 Padding。与 HTTP/2 流控（Flow Control）严格同步，未消耗的配额自动归还至连接与流窗口，彻底打乱内层明文长度与外层 TLS 记录大小的 1:1 统计相关性，杜绝基于包长特征的被动分析。
-- **严格证书校验与防伪造**：Xray 客户端默认强制验证服务端 TLS 证书与公钥链，杜绝非 PSK 假服务器伪造；针对自签名测试环境提供显式 `allow_insecure` 配置项；Protobuf 描述符全量更新，确保 `server_id`、`replay_file` 与 `allow_insecure` 跨节点反序列化零丢失。
-- **SO_REUSEPORT 多核并行监听与分发 (Linux Multi-Core Scaling)**：在 Linux 生产环境下，服务端自动开启 `SO_REUSEPORT`，绑定与 CPU 核心数匹配的多 Worker 独立监听器。由 Linux 内核在网络栈层面直接实现连接负载均衡，彻底消除高并发下的 Accept-Mutex 锁争用瓶颈。
-- **Wire-Version 双向兼容**：服务端自适应识别现代原始流客户端与携带私有帧标记（`X-Framing: 1`）的客户端，平滑向后兼容。
+### A. TLS 転送メインライン (`h2` / `h3` / `auto`)
+- **ハンドシェイクと認証**: TLS 1.3 標準ハンドシェイク（厳格な SNI 検証 / Strict SNI に対応）。
+- **Transcript V2 HMAC 署名**: リクエストヘッダーに事前共有鍵（PSK）と長さプレフィックスによるドメイン分離（Domain Separation）を適用した HMAC-SHA256 署名を付与し、Method、Path、Target、Timestamp、Nonce を相互バインド。
+- **2ms Group-Commit によるリプレイ攻撃防御**: サーバー側の永続化 Nonce キャッシュは、マイクロバッチ非同期ディスクフラッシュと条件変数（CondVar）起床メカニズムを採用。クラッシュ整合性を保証しつつ、高並行時のディスク I/O ボトルネックを排除。
+- **ネイティブ UDP バイパス**: UDP トラフィックは独立した HTTP/3 Extended CONNECT および QUIC Datagram を通じて転送され、2048 ビットのスライディングビットマップによりパケットの順序逆転やリプレイを防御。
+- **RFC 7540 HTTP/2 動的フレームパディング注入 (Dynamic Frame Padding)**: `h2` および `auto` モードにおいて、クライアントは HTTP/2 の HEADERS および DATA フレームに 8〜64 バイトのランダム長を持つ RFC 7540 規格準拠のパディングを動的注入。HTTP/2 フロー制御（Flow Control）と厳格に同期し、未消費のクォータはコネクションおよびストリームウィンドウへ自動返却。内層の平文長と外層の TLS レコード長の 1:1 相関関係を完全に破壊し、パケット長解析（パッシブフィンガープリンティング）を無効化。
+- **厳格な証明書検証と偽造防止**: Xray クライアントはデフォルトでサーバーの TLS 証明書および公開鍵チェーンの検証を強制し、非 PSK 偽サーバーによるなりすましを排除。自己署名証明書環境向けに明示的な `allow_insecure` 設定を提供。Protobuf 定義を完全更新し、`server_id`、`replay_file`、`allow_insecure` のクロスノードデシリアライズ損失をゼロに抑制。
+- **SO_REUSEPORT によるマルチコア並列リッスン (Linux Multi-Core Scaling)**: Linux 本番環境ではサーバーが自動的に `SO_REUSEPORT` を有効化し、CPU コア数に応じた独立したマルチワーカーリスナーをバインド。Linux カーネルのネットワークスタック層で直接コネクションの負荷分散を行い、高並行環境における Accept-Mutex のロック競合ボトルネックを排除。
+- **Wire-Version 双方向互換性**: サーバーは最新のネイティブストリームクライアントと、独自のフレーム識別子（`X-Framing: 1`）を持つレガシークライアントを自動認識し、スムーズな下位互換性を確保。
 
-### B. 专线极速载荷 (`stream` / Chitanda RawStream)
-- **多态离散握手与零探测泄露 (Polymorphic Discrete Handshake & Zero Probe Oracle)**：
-  - 彻底打破固定握手包长特征，ClientHello 长度离散化为 49~113 字节，ServerHello 长度离散化为 41~105 字节；
-  - 核心帧头格式为 `[1B padLen ^ mask] [8B masked ts] [24B nonce] [16B tag] [padLen padBytes]`，通过 PSK 派生动态掩码加密时间戳与填充长度，彻底消除明文零值（`0x00000000`）泄漏；
-  - 服务端固定读取 49 字节首包执行常数时间 HMAC-SHA256 完整性与新鲜度校验，杜绝 1 字节主动探测 Oracle；遇到非认证流量立即断开，响应 0 字节。
-- **自适应动态记录分帧 (Dynamic Record Sizing)**：
-  - **低时延交互模式**：连接初建或空闲静默（>100ms 无数据发送）时，自动采用 MTU 契合尺寸（1,418 字节分帧），消除大帧拆包与排队时延，Web 浏览及 API 交互的首包延迟（TTFB）降低超 50%；
-  - **极限大块吞吐模式**：一旦检测到持续突发流量（累积发送 >128KB），分帧窗口自适应平滑跃迁至 32KB（MaxChunkLen），单核吞吐飙升至 **31.7 Gbps (3,962.5 MB/s)**，且保持极致的 0 堆内存分配（0 allocs/op）。
-- **0-RTT 动态混淆首飞与优雅半关闭**：
-  - 0-RTT OPEN 目标帧强制填充 32~256 字节的动态随机 Padding，平滑混淆首包长度指纹；
-  - 服务端两阶段提交持久化 Nonce 缓存（先验证 ClientHello + 0-RTT 帧解密成功，才执行落盘），杜绝重放污染与跨重启/跨节点重放；
-  - 严格支持 TCP 全双工与半关闭（Half-Close）协调，完美兼容长连接大文件单向流式交互。
-- **傲盾/DPI 主动探测免疫**：
-  - 遇到非认证流量（如扫描器发送 `GET / HTTP/1.1` 或垃圾探针）**立即关闭连接，响应 0 字节，绝不返回任何 HTTP/Web 错误特征**。
+### B. 専用線向け超高速キャリア (`stream` / Chitanda RawStream)
+- **多相的離散ハンドシェイクとプローブオラクル排除 (Polymorphic Discrete Handshake & Zero Probe Oracle)**:
+  - 固定ハンドシェイクパケット長のシグネチャを完全に排除。ClientHello の長さを 49〜113 バイト、ServerHello の長さを 41〜105 バイトに離散化。
+  - コアフレームヘッダー形式は `[1B padLen ^ mask] [8B masked ts] [24B nonce] [16B tag] [padLen padBytes]`。PSK から導出された動的マスクによりタイムスタンプとパディング長を暗号化し、平文ゼロ値（`0x00000000`）の漏洩を完全遮断。
+  - サーバーは最初の 49 バイトを読み取り、固定時間（Constant-time）HMAC-SHA256 で完全性と鮮度を検証。1 バイトのアクティブプローブオラクルを排除。未認証トラフィックに対しては即座にコネクションを切断し、0 バイト（無応答）を返送。
+- **適応型動的レコードサイジング (Dynamic Record Sizing)**:
+  - **低レイテンシ・インタラクティブモード**: 接続確立直後やアイドル時（>100ms 送信なし）は、MTU に最適化されたサイズ（1,418 バイト単位）で自動フレーム分割。大フレームによるパケット分割やキューイング遅延を解消し、Web 閲覧や API コールにおける TTFB（Time to First Byte）を 50% 以上短縮。
+  - **限界バルクスループットモード**: 継続的なバーストトラフィック（累積送信量 >128KB）を検出すると、フレームウィンドウを 32KB（MaxChunkLen）まで自動かつ滑らかに拡大。シングルスレッドでのスループットは最大 **31.7 Gbps (3,962.5 MB/s)** に達し、かつ究極のヒープメモリ割り当てゼロ（0 allocs/op）を維持。
+- **0-RTT 動的難読化ファーストフライトと優雅なハーフクローズ (Half-Close)**:
+  - 0-RTT OPEN ターゲットフレームに 32〜256 バイトの動的ランダムパディングを強制注入し、初期パケット長のフィンガープリントを平滑化。
+  - サーバー側で 2 フェーズコミット（Two-Phase Commit）型の永続化 Nonce キャッシュを採用（ClientHello + 0-RTT フレームの復号成功後に初めてディスク永続化を実行）。リプレイ攻撃によるキャッシュ汚染や、再起動・ノード間をまたぐリプレイを阻止。
+  - TCP 全二重通信およびハーフクローズ（Half-Close）の協調を厳格にサポート。大容量ファイルの片方向ストリーミング通信にも完全対応。
+- **DPI・アクティブプローブ耐性**:
+  - 未認証トラフィック（スキャナーによる `GET / HTTP/1.1` や不正プローブパケットなど）を検知した場合、**即座に接続を切断して 0 バイトを返却。HTTP/Web エラー応答などの指紋は一切返送しない**。
 
-### C. 纯 IP 实验载荷 (`h1` / `plain-udp`)
-- **标准全双工 HTTP/1.1 Carrier (`h1`)**：
-  - 外层仅使用标准 `POST <path> HTTP/1.1` 与 `Transfer-Encoding: chunked`，服务端启用全双工流；
-  - 0-RTT OPEN 目标帧随 Flight 1 单包聚合发送，瞬间发起目标直连；
-  - 分块流读取器全面支持高达 64KB 合法大块数据传输，杜绝切片截断并防止未认证超大内存分配（OOM）。
-- **`plain-udp` 原生 AEAD 数据报与全密文高熵载荷**：
-  - **全密文零明文指纹**：外层报文仅由 `[24B Crypto Nonce] [AEAD Ciphertext + 16B Tag]` 组成，SessionID、单调递增 Seq、时间戳与数据全部封装在 XChaCha20-Poly1305 密文中，外层香农熵达到 **7.996+ bits/byte**（接近理论上限 8.0），彻底消除任何序列号或明文字段特征；
-  - **双向密钥与防反射**：独立派生 `c2sKey` 与 `s2cKey`，Associated Data (AD) 强制绑定传输方向（`DirClientToServer` / `DirServerToClient`），反射报文解密直接失败；
-  - **防重放与乱序容忍**：服务端维护 2048 位滑动位图抵御重放，支持最大 120 秒时间戳漂移保护；
-  - **客户端来源校验与并发安全**：客户端严格校验对端 IP/Port 必须为服务器地址；内部采用独立内存池保证 `net.PacketConn` 线程安全并发调用；
-  - **服务端资源有界**：限制全服最大活跃会话数（10,000）与每会话转发目标数（32），防止恶意 UDP 泛洪耗尽系统 FD 与内存。
+### C. IP 直指定・実験的キャリア (`h1` / `plain-udp`)
+- **標準全二重 HTTP/1.1 キャリア (`h1`)**:
+  - 外層には標準的な `POST <path> HTTP/1.1` および `Transfer-Encoding: chunked` のみを使用し、サーバー側で全二重ストリーミングを有効化。
+  - 0-RTT OPEN ターゲットフレームは Flight 1 パケットに統合して送信され、ターゲットへの即時接続を確立。
+  - チャンクストリームリーダーは最大 64KB の正規大ブロックデータ転送を完全サポート。パケット分断によるデータ切り捨てを防ぎ、未認証の過大なメモリ割り当て（OOM）を防止。
+- **`plain-udp` ネイティブ AEAD データグラムと完全暗号化高エントロピーペイロード**:
+  - **完全暗号化・平文フィンガープリントゼロ**: 外層パケットは `[24B Crypto Nonce] [AEAD Ciphertext + 16B Tag]` のみで構成。SessionID、単調増加シーケンス番号（Seq）、タイムスタンプ、データペイロードのすべてが XChaCha20-Poly1305 暗号文内にカプセル化。外層シャノンエントロピーは **7.996+ bits/byte**（理論上限 8.0 に極めて近い）に達し、シーケンス番号や平文ヘッダーの特徴を完全に排除。
+  - **双方向個別鍵と反射攻撃防御**: `c2sKey` と `s2cKey` を個別に導出。Associated Data（AD）に転送方向（`DirClientToServer` / `DirServerToClient`）を強制バインドし、反射されたパケットの復号は即座に失敗。
+  - **リプレイ防御とパケット順序逆転の許容**: サーバー側で 2048 ビットのスライディングビットマップを保持してリプレイを検知・防御。最大 120 秒のタイムスタンプドリフト保護をサポート。
+  - **クライアント送信元検証と並行安全性**: クライアントは対向 IP/Port が正規サーバーアドレスであることを厳格に検証。内部で独立したメモリプールを採用し、`net.PacketConn` のスレッドセーフな並行呼び出しを保証。
+  - **サーバーリソース境界管理**: サーバー全体の最大アクティブセッション数（10,000）およびセッションあたりの最大転送ターゲット数（32）を制限し、悪意ある UDP フラッドによるファイルディスクリプタ（FD）やメモリの枯渇を防止。
 
-### D. 多模式防探测回落 (Dynamic Masquerade Fallback)
-未通过路径匹配、方法校验或 HMAC 认证的 HTTP 请求，按配置平滑回落：
-1. **内置企业 ERP 业务网关**：内置 Vanguard Global Operations Hub (EBG v4.2) 响应式门户与 REST API；
-2. **本地静态目录**：托管指定的 HTML/静态资源；
-3. **Nginx UDS 反向代理**：通过 `unix:/path/to/nginx.sock` 零网络栈损耗代理本地 Web 服务；
-4. **本地端口反向代理**：转发至 `127.0.0.1:8080` 等本地 HTTP 服务。
+### D. 多階層フォールバック機構 (Dynamic Masquerade Fallback)
+パス不一致、メソッド検証失敗、または HMAC 認証に失敗した HTTP リクエストは、設定に応じて透過的にフォールバック:
+1. **内蔵エンタープライズ ERP ゲートウェイ**: Vanguard Global Operations Hub (EBG v4.2) レスポンシブポータルおよび REST API を内蔵。
+2. **ローカル静的ディレクトリ**: 指定された HTML/静的アセットをホスティング。
+3. **Nginx UDS リバースプロキシ**: `unix:/path/to/nginx.sock` 経由でネットワークスタックのオーバーヘッドなしにローカル Web サービスへプロキシ。
+4. **ローカルポートリバースプロキシ**: `127.0.0.1:8080` などのローカル HTTP サービスへ転送。
 
-### E. 全模式半关闭与毫秒级优雅回收 (Half-Close & Graceful Drain)
-- **高频短连接与手游防断连优化**：针对《碧蓝档案》等高频突发短交互手游及 Web API 轮询，当目标服务器响应完成并关闭连接（`downloadDone`）时，服务端全面统一执行 **250ms 快速回收机制**。
-- **带内 EOF 标界与双向套接字彻底销毁**：
-  - `stream` 模式：服务端向客户端主动下发带内 `[0x00, 0x00]` 零长分帧标记并附带 TCP FIN，客户端收到后立即关闭本地上行；
-  - `h3` 模式：超时主动触发 `stream.CancelRead(0)` 彻底终结悬挂 QUIC 流，消除流上限耗尽卡死；
-  - `h2` 与 `h1` 模式：将旧版 30 秒冗余等待彻底压缩至 250 毫秒，并在读协程挂死时直接切断套接字。
-- **彻底杜绝 FD 泄漏**：在 50+ 并发短请求实测中，所有套接字在 325ms 内彻底释放，**0 残留套接字，彻底消除 OpenClash 软路由 9090 控制端口假死与 DNS 超时**。
+### E. 全モード共通のハーフクローズとミリ秒単位の優雅なリソース回収 (Half-Close & Graceful Drain)
+- **高頻度ショートコネクションおよびスマホゲーム向け切断防止最適化**: 『ブルーアーカイブ』などの高頻度・バースト的なショート通信を行うモバイルゲームや Web API ポーリングを想定し、宛先サーバーのレスポンスが完了して切断された際（`downloadDone`）、サーバー側で **250ms 高速回収メカニズム** を一元的に実行。
+- **インバンド EOF マーカーと双方向ソケットの確実な解放**:
+  - `stream` モード: サーバーからクライアントへインバンドの `[0x00, 0x00]` ゼロ長フレームマーカーを送信し、TCP FIN を付与。クライアントはこれを受信後、即座にローカルアップストリームをクローズ。
+  - `h3` モード: タイムアウト時に能動的に `stream.CancelRead(0)` をトリガーし、ハングした QUIC ストリームを強制終了。ストリーム上限到達によるスタックを排除。
+  - `h2` および `h1` モード: 従来の 30 秒の冗長な待機時間を 250ms に大幅短縮し、リード用 Goroutine がハングした場合はソケットを直接切断。
+- **ファイルディスクリプタ (FD) リークの完全解消**: 50 以上の並行ショートリクエストによる実測検証において、すべてのソケットが 325ms 以内に完全解放され、**ソケットの残留はゼロ。OpenClash 等のソフトルーターにおける 9090 コントロールポートの無応答（ハング）や DNS タイムアウトを根本から解決**。
 
-### F. 客户端零 DefaultResolver 契约与 Mihomo 原生解析对接
-- **杜绝客户端自杀断言崩溃**：针对 Mihomo (Clash.Meta) 内核严禁代理出站直接调用 Go 标准库系统 DNS（触发即 `os.Exit(2)` 暴毙）的特性，Chitanda 客户端 SDK 全面实施零 DefaultResolver 契约，报文反向解析一律使用 `netip.ParseAddrPort` 与 `net.ParseIP` 纯内存无锁处理；
-- **Mihomo 原生解析器与策略路由协同**：节点域名解析完全委托给 Mihomo 的 `ProxyServerHostResolver`，并在建立 UDP 通道时向 `c.dialer.ListenPacket` 显式注入远端目标 `AddrPort`，保障软路由 Linux 环境下的 `fwmark` 路由策略与网卡绑定 100% 正确命中。
+### F. クライアントの Zero-DefaultResolver 規約と Mihomo ネイティブ名前解決連携
+- **クライアントの防護的クラッシュ (`os.Exit(2)`) の根絶**: Mihomo (Clash.Meta) コアでは、プロキシのアウトバウンドが Go 標準ライブラリのシステム DNS リゾルバを直接呼び出すことを固く禁止しており（違反時は即座に `os.Exit(2)` でプロセス終了）、Chitanda クライアント SDK は Zero-DefaultResolver 規約を徹底。パケットの逆引き・解析はすべて `netip.ParseAddrPort` および `net.ParseIP` によるロックフリーなインメモリ処理で実行。
+- **Mihomo ネイティブ名前解決とポリシールーティングの協調**: ノードのドメイン解決は Mihomo の `ProxyServerHostResolver` に完全委譲。UDP トンネル確立時には `c.dialer.ListenPacket` にリモート宛先 `AddrPort` を明示的に注入し、Linux ルーター環境における `fwmark` ルーティングポリシーと NIC バインドが 100% 正確にヒットすることを保証。
 
 ---
 
-## 3. Go SDK 使用示例
+## 3. Go SDK 利用例
 
 ```go
 package main
@@ -115,13 +115,13 @@ import (
 )
 
 func main() {
-	// 默认推荐：h2 (TLS 1.3 多路复用主线)
+	// デフォルト推奨: h2 (TLS 1.3 多重化メインライン)
 	cli, err := client.New(client.Config{
 		Server:       "server.example.com:443",
 		ServerName:   "server.example.com",
 		PSK:          []byte("your-32-byte-secure-pre-shared-key-here"),
 		Path:         "/api/v1/sync",
-		TCPTransport: client.TCPTransportH2, // 模式: "h2", "stream", "h3", "auto", "h1"
+		TCPTransport: client.TCPTransportH2, // モード: "h2", "stream", "h3", "auto", "h1"
 	})
 	if err != nil {
 		log.Fatalf("Init client failed: %v", err)
@@ -131,14 +131,14 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// 1. TCP 出站拨号 (返回标准 net.Conn)
+	// 1. TCP アウトバウンドダイヤル (標準 net.Conn を返却)
 	tcpConn, err := cli.DialContext(ctx, "tcp", "www.google.com:443")
 	if err != nil {
 		log.Fatalf("Dial TCP failed: %v", err)
 	}
 	defer tcpConn.Close()
 
-	// 2. 原生 UDP 出站监听 (返回标准 net.PacketConn)
+	// 2. ネイティブ UDP アウトバウンドリスナー (標準 net.PacketConn を返却)
 	udpConn, err := cli.ListenPacket(ctx)
 	if err != nil {
 		log.Fatalf("Listen UDP failed: %v", err)
@@ -153,17 +153,17 @@ func main() {
 
 ---
 
-## 4. 客户端与服务端生态配置全示例 (Mihomo & Xray-core)
+## 4. クライアント・サーバー設定例 (Mihomo & Xray-core)
 
-详细参数手册与生产架构请参阅 **[docs/CONFIGURATION.md](docs/CONFIGURATION.md)**。
+詳細なパラメーターリファレンスと本番アーキテクチャについては **[docs/CONFIGURATION.md](docs/CONFIGURATION.md)** を参照してください。
 
-### A. Mihomo (Clash.Meta) 客户端 5 种模式节点
+### A. Mihomo (Clash.Meta) クライアント 5 モード設定例
 
-在 Mihomo `config.yaml` 的 `proxies` 列表中直接配置：
+Mihomo の `config.yaml` 内の `proxies` リストに直接指定します：
 
 ```yaml
 proxies:
-  # 模式 1: H2 多路复用主线模式 (TLS 1.3 + HTTP/2 流复用) - 公网主线推荐
+  # モード 1: H2 多重化モード (TLS 1.3 + HTTP/2 ストリーム多重化) - 公開ネットワーク推奨
   - name: "Chitanda-H2-Tokyo"
     type: chitanda
     server: jp.example.com
@@ -175,7 +175,7 @@ proxies:
     pool-size: 4
     udp: true
 
-  # 模式 2: Stream 专线高性能模式 (RawStream TCP + AES-128-GCM + 动态混淆) - 专线推荐
+  # モード 2: Stream 専用線高スループットモード (RawStream TCP + AES-128-GCM + 動的難読化) - 専用線推奨
   - name: "Chitanda-Stream-Tokyo"
     type: chitanda
     server: 203.0.113.88
@@ -185,7 +185,7 @@ proxies:
     server-id: "tokyo-node-01"
     udp: true
 
-  # 模式 3: H3 原生 QUIC 模式 (HTTP/3 0-RTT + 0 队头阻塞)
+  # モード 3: H3 ネイティブ QUIC モード (HTTP/3 0-RTT + Head-of-Line ブロッキングなし)
   - name: "Chitanda-H3-Tokyo"
     type: chitanda
     server: jp.example.com
@@ -196,7 +196,7 @@ proxies:
     sni: "jp.example.com"
     udp: true
 
-  # 模式 4: Auto 智能探测与自愈容灾模式 (H2 主线 + 嗅探降级 H3)
+  # モード 4: Auto インテリジェント自己治癒モード (H2 主線 + 障害時 H3 へフォールバック)
   - name: "Chitanda-Auto-Tokyo"
     type: chitanda
     server: jp.example.com
@@ -208,7 +208,7 @@ proxies:
     pool-size: 4
     udp: true
 
-  # 模式 5: H1 纯 IP 免证书实验模式 (全双工 HTTP/1.1 AEAD + Plain-UDP)
+  # モード 5: H1 IP 直指定・証明書不要実験モード (全二重 HTTP/1.1 AEAD + Plain-UDP)
   - name: "Chitanda-H1-DirectIP"
     type: chitanda
     server: 203.0.113.88
@@ -219,13 +219,13 @@ proxies:
     udp: true
 ```
 
-完整配置文件模板见 **[examples/mihomo/config.yaml](examples/mihomo/config.yaml)**。
+完全な設定テンプレートは **[examples/mihomo/config.yaml](examples/mihomo/config.yaml)** を参照してください。
 
 ---
 
-### B. Xray-core 服务端与客户端 5 种模式
+### B. Xray-core サーバー・クライアント 5 モード設定例
 
-#### 1) 服务端入站配置 (`inbounds`)
+#### 1) サーバー側インバウンド設定 (`inbounds`)
 ```json
 {
   "inbounds": [
@@ -275,7 +275,7 @@ proxies:
 }
 ```
 
-#### 2) 客户端出站配置 (`outbounds`)
+#### 2) クライアント側アウトバウンド設定 (`outbounds`)
 ```json
 {
   "outbounds": [
@@ -341,69 +341,69 @@ proxies:
 }
 ```
 
-完整服务端与客户端 JSON 见 **[examples/xray/server_all_modes.json](examples/xray/server_all_modes.json)** 与 **[examples/xray/client_all_modes.json](examples/xray/client_all_modes.json)**。
+完全なサーバーおよびクライアントの JSON ファイルは **[examples/xray/server_all_modes.json](examples/xray/server_all_modes.json)** および **[examples/xray/client_all_modes.json](examples/xray/client_all_modes.json)** を参照してください。
 
 ---
 
-## 5. 自动跟随上游编译流水线 (Automated Upstream CI/CD)
+## 5. アップストリーム追従・自動 CI/CD パイプライン (Automated Upstream CI/CD)
 
-通过本仓库的 GitHub Actions (`.github/workflows/upstream-sync-build.yml`)：
-1. **自动监控**：每日自动轮询 `XTLS/Xray-core` 与 `MetaCubeX/mihomo` 的最新 Release Tag；
-2. **动态注入**：自动执行 `scripts/inject-xray.py` 与 `scripts/inject-mihomo.py` 完成无侵入适配器挂载；
-3. **全平台发布**：自动编译 Windows / Linux / macOS 多架构二进制并直接发布到本仓库的 [GitHub Releases](https://github.com/violetaini/chitanda/releases)。
+本リポジトリの GitHub Actions ワークフロー (`.github/workflows/upstream-sync-build.yml`) により、以下の処理が完全自動化されています：
+1. **自動監視**: `XTLS/Xray-core` および `MetaCubeX/mihomo` の最新リリースタグを毎日定期ポーリング。
+2. **動的インジェクション**: `scripts/inject-xray.py` および `scripts/inject-mihomo.py` を実行し、非侵襲的にアダプターをマウント。
+3. **マルチプラットフォーム自動リリース**: Windows / Linux / macOS の各 CPU アーキテクチャ向けバイナリを自動クロスコンパイルし、本リポジトリの [GitHub Releases](https://github.com/violetaini/chitanda/releases) に直接発行。
 
 ---
 
-## 6. 3X-UI 面板定制版一键部署 (3X-UI v2.3.11 with Chitanda Core)
+## 6. 3X-UI カスタム版ワンクリックデプロイ (3X-UI v2.3.11 with Chitanda Core)
 
-本项目在专有分支 [`3x-ui`](https://github.com/violetaini/chitanda/tree/3x-ui) 中提供了定制版的 **3X-UI (v2.3.11)** 控制面板。该面板锁定了经典稳定的 v2.3.11 架构，同时将内核源与更新接口无缝指向 Chitanda Xray-core。
+本プロジェクトの専用ブランチ [`3x-ui`](https://github.com/violetaini/chitanda/tree/3x-ui) では、カスタマイズ版の **3X-UI (v2.3.11)** コントロールパネルを提供しています。実績のある堅牢な v2.3.11 アーキテクチャをベースに、カーネルのダウンロード元および更新インターフェースをシームレスに Chitanda Xray-core へリダイレクトしています。
 
-### 一键安装部署命令
+### ワンクリックインストールコマンド
 
-在 Linux 服务器（Ubuntu / Debian / CentOS / AlmaLinux 等）以 root 权限执行：
+Linux サーバー（Ubuntu / Debian / CentOS / AlmaLinux 等）にて root 権限で実行します：
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/violetaini/chitanda/3x-ui/install.sh)
 ```
 
-### 特性与说明
-- **开箱即用**：自动完成 3X-UI 面板安装，并将底层 Xray 内核直接部署为最新的 `xray-chitanda`。
-- **全传输模式原生适配**：入站配置原生集成 `h2`、`stream`、`h3`、`auto`、`h1` 传输模式；`stream` 专线免证书模式下自动隐藏 TLS 证书与 SNI 表单；原生支持 `server_id` 节点身份绑定与端口独立落盘持久防重放（`/etc/x-ui/replay_[端口].db` 与端口变动自动联动）。
-- **节点二维码与批量导出**：入站管理表格操作菜单直接提供 Chitanda 节点二维码查看与单选/全选批量导出分享。
-- **在线切换内核**：进入 3X-UI Web 界面后的 **Xray 设置 $\to$ 切换版本** 功能已自动接管，指向本仓库的 GitHub Releases（自动过滤排除非 Xray 构件），可直接在线选择和热更新 Chitanda 编译的所有版本内核。
-- **高频短连接与游戏防假死优化**：搭载最新的 250ms 半关闭优雅排空生命周期控制，彻底解决手游（如《碧蓝档案》）高频交互导致的连接堆积、FD 泄漏与软路由假死问题（详见 [docs/CONFIGURATION.md](docs/CONFIGURATION.md#4-3-xui-xray-ui-节点部署与内核热更新运维指南)）。
-- **多架构适配**：自动识别并适配 Linux AMD64 (`x86_64`) 与 ARM64 (`aarch64`)。
+### 主な機能と特徴
+- **即時利用可能**: 3X-UI パネルのインストールから、最新の `xray-chitanda` カーネルの配備までを自動完了。
+- **全トランスポートモード対応**: インバウンド設定にて `h2`、`stream`、`h3`、`auto`、`h1` をネイティブ選択可能。証明書不要の `stream` モード選択時は TLS 証明書および SNI フォームを自動非表示化。`server_id` ノード識別バインドおよびポートごとの永続化リプレイ防止 DB（`/etc/x-ui/replay_[ポート].db`）に完全連動。
+- **QR コード表示と一括エクスポート**: インバウンド管理メニューから Chitanda ノードの QR コード確認や一括エクスポート・共有が可能。
+- **Web UI 上でのカーネルオンライン更新**: 3X-UI 管理画面の **Xray 設定 → バージョン切り替え** 機能が本リポジトリの GitHub Releases に連携済み。最新の Chitanda Xray カーネルをオンラインで直接選択・ホットアップデート可能。
+- **モバイルゲーム・高頻度通信のハング防止**: 最新の 250ms ハーフクローズ優雅排空ライフサイクル制御を搭載。『ブルーアーカイブ』等の高頻度通信によるコネクション滞留、FD リーク、ルーターのフリーズ問題を根本から解消（詳細は [docs/CONFIGURATION.md](docs/CONFIGURATION.md#4-3-xui-xray-ui-节点部署与内核热更新运维指南) を参照）。
+- **マルチアーキテクチャ対応**: Linux AMD64 (`x86_64`) および ARM64 (`aarch64`) を自動識別・適合。
 
 ---
 
-## 7. 移动端与路由器生态集成 (OpenWrt & Android Ecosystem)
+## 7. モバイルおよびルーターエコシステム統合 (OpenWrt & Android Ecosystem)
 
-为了让 Chitanda 节点在各类终端设备上获得开箱即用的原生体验，本项目针对 OpenWrt 软路由与 Android 移动端提供了深度定制的客户端版本与全自动跟随时效工作流：
+Chitanda ノードを各種端末でスムーズに利用できるよう、OpenWrt ソフトウェアルーターおよび Android 端末向けの専用クライアントと自動同期パイプラインを提供しています：
 
-### A. OpenClash 路由固件定制版 (`chitanda-openclash`)
-- **仓库地址**：[`violetaini/chitanda-openclash`](https://github.com/violetaini/chitanda-openclash)
-- **内核自动重定向**：无缝将 OpenClash 的官方内核下载与在线更新通道全面重定向至 Chitanda 专有 `mihomo` 构建发布。
-- **镜像源竞速与断点重试**：原生支持并增强 `github_address_mod` 代理逻辑，自动融合 `ghfast.top`、`gh-proxy.com` 等国内加速镜像源进行并发竞速与故障自动切换，保障国内网络环境下软路由内核一键更新零失败。
-- **全场景防崩溃与零 DefaultResolver 契约**：彻底解决软路由在运行高频 UDP 手游或配置域名节点时踩中 Mihomo 防御性自杀断言的闪退问题，保障 OpenClash 7x24 小时不假死。
-- **全自动上游同步流水线**：通过 GitHub Actions 周期性自动追踪 `vernesong/OpenClash` 主线发布，无感自动构建并推送最新 LuCI 插件包。
+### A. OpenClash ルーター向けカスタム版 (`chitanda-openclash`)
+- **リポジトリ**: [`violetaini/chitanda-openclash`](https://github.com/violetaini/chitanda-openclash)
+- **カーネル自動リダイレクト**: OpenClash 公式のカーネルダウンロード・オンライン更新パスを Chitanda 専用 `mihomo` リリースへリダイレクト。
+- **アクセラレーションミラーと自動リトライ**: `github_address_mod` プロキシロジックを強化し、ネットワーク状況に応じたフェイルオーバーを実装。ルーター上でのワンクリックカーネル更新を安定化。
+- **クラッシュ防止と Zero-DefaultResolver 規約**: 高頻度 UDP 通信やドメイン指定ノード利用時に Mihomo の防護的アサーションクラッシュが発生する問題を排除し、OpenClash の 24 時間 365 日の安定稼働を実現。
+- **上流自動同期パイプライン**: GitHub Actions により `vernesong/OpenClash` メインラインを定期追従し、最新の LuCI パッケージを自動ビルド・更新。
 
-### B. Clash Meta For Android 安卓定制版 (`chitanda-cmfa`)
-- **仓库地址**：[`violetaini/chitanda-cmfa`](https://github.com/violetaini/chitanda-cmfa)
-- **原生支持 Chitanda 协议**：内置预装集成了 Chitanda 核心扩展的 `mihomo` 移动端核心，开箱即用支持 `h2`、`stream`、`h3`、`auto`、`h1` 全模式节点导入、测速与分流。
-- **全自动标签跟随与编译**：配置全自动工作流实时监听 `MetaCubeX/ClashMetaForAndroid` 官方 Release Tag，触发自动注入 Chitanda 签名秘钥与核心代码，自动化全量打包并发布最新版本 APK 安装包。
+### B. Clash Meta For Android カスタム版 (`chitanda-cmfa`)
+- **リポジトリ**: [`violetaini/chitanda-cmfa`](https://github.com/violetaini/chitanda-cmfa)
+- **Chitanda プロトコルネイティブ統合**: Chitanda 拡張コアを組み込んだ `mihomo` モバイルコアをプリインストール。`h2`、`stream`、`h3`、`auto`、`h1` 全モードのノードインポート、スピードテスト、ルーティングに対応。
+- **タグ追従・自動ビルド**: `MetaCubeX/ClashMetaForAndroid` 公式リリースタグを監視し、署名鍵およびコードを自動注入した上で最新 APK パッケージをビルド・リリース。
 
 ---
 
-## 8. 构建与验证
+## 8. ビルドと検証 (Build & Verification)
 
 ```sh
-# 运行全量单元测试（包含密码学、防反射、重放攻击注入、全双工回环与 UDP 模拟）
+# 全ユニットテストの実行（暗号化、反射攻撃防止、リプレイ攻撃注入、全二重ループバック、UDP シミュレーションを含む）
 go test -count=1 -v ./...
 
-# 运行 RawStream 零拷贝吞吐微基准
+# RawStream ゼロコピー・スループット・マイクロベンチマークの実行
 go test -bench="." -benchmem github.com/violetaini/chitanda/internal/rawstream
 
-# 编译 Linux 生产二进制
+# Linux 本番用バイナリのクロスコンパイル
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o bin/chitanda-server ./cmd/chitanda-server
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o bin/chitanda-client ./cmd/chitanda-client
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o bin/bench-direct ./cmd/bench-direct
@@ -411,30 +411,56 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o bin/bench-dir
 
 ---
 
-## 9. 性能基准 (Micro-Benchmarks)
+## 9. パフォーマンスベンチマーク (Micro-Benchmarks)
 
-RawStream 与 AEADStream 在 x86_64 (AES-NI) 硬件环境下的实测基准测试：
+x86_64 (AES-NI ハードウェアアクセラレーション有効) 環境における RawStream および AEADStream の実測ベンチマーク結果：
 
-| 基准测试项 | 吞吐量 | 单次耗时 | 堆内存分配 | 每次操作分配数 |
+| ベンチマーク項目 | スループット | 1 回あたりの所要時間 | ヒープ割り当てメモリ | 1 回あたりの割り当て回数 |
 | :--- | :---: | :---: | :---: | :---: |
 | **`BenchmarkStreamConn_DynamicRecord_BulkThroughput`** | **3,962.50 MB/s (31.7 Gbps)** | 8.2 μs | **0 B/op** | **0 allocs/op** |
 | **`BenchmarkStreamConn_Throughput`** | **1,984.90 MB/s (15.8 Gbps)** | 16.5 μs | **0 B/op** | **0 allocs/op** |
 | **`BenchmarkAEADStream_Direct`** | **2,194.64 MB/s** | 7.4 μs | **0 B/op** | **0 allocs/op** |
 | **`BenchmarkAES128GCM_Direct`** | **2,279.36 MB/s** | 7.1 μs | **0 B/op** | **0 allocs/op** |
 
-*注：全双工流式传输、动态自适应分帧（Dynamic Record Sizing）与批处理刷盘完全实现了零堆分配（0 allocs/op），单连接大块吞吐达到 31.7 Gbps，逼近硬件总线与 CPU AES-NI 指令吞吐极限。*
+*注：全二重ストリーミング転送、動的適応型レコードサイジング（Dynamic Record Sizing）、およびバッチディスクフラッシュにより、完全なヒープ割り当てゼロ（0 allocs/op）を実現。単一接続におけるバルクスループットは最大 31.7 Gbps に達し、ハードウェアバスおよび CPU の AES-NI 命令スループットの物理的限界に迫ります。*
 
 ---
 
-## 10. 技术边界与安全声明 (Threat Model & Limitations)
+## 10. 技術的境界とセキュリティに関する考慮事項 (Threat Model & Limitations)
 
-1. **载荷定位与网络场景**：
-   - `h2` / `h3` 依托 TLS 1.3 加密与标准真实 SNI 伪装，是跨境外公网审查对抗环境下的**主要公网生产载荷**；
-   - `stream` (Chitanda RawStream) 彻底去除 HTTP 协议冗余，采用 AES-128-GCM + 动态 Padding，专为 **IEPL / IPLC 商业内网专线与 BGP 中转链路** 打造，具备极高吞吐并防御傲盾等商业防火墙的主动 HTTP 嗅探探测；
-   - `h1` 具备免证书直连与伪装能力，定位为纯 IP / 内网穿透通道。
-2. **前向保密性说明**：
-   - TLS 模式 (`h2` / `h3`) 依托 TLS 1.3 ECDHE 具备完全前向保密（PFS）；
-   - 静态 PSK 模式 (`stream` / `h1` / `plain-udp`) 采用预共享密钥衍生会话密钥，不具备临时密钥交换 PFS。敏感公网流量推荐使用 TLS 1.3 载荷。
-3. **0-RTT 与防重放安全**：
-   - `stream` 采用服务端两阶段提交（Two-Phase Commit）持久化重放缓存，只有认证且解密成功后的 Nonce 才会提交持久化，并绑定 ServerID 杜绝跨节点重放；
-   - `plain-udp` 采用 XChaCha20-Poly1305（24 字节 Nonce）、双向分离派生密钥（`c2sKey` / `s2cKey`）与方向标记 AD，彻底杜绝数据包反射攻击与 Nonce 生日碰撞。
+1. **トランスポートキャリアの適用領域とネットワーク環境**:
+   - `h2` / `h3`: TLS 1.3 暗号化および正規 SNI への偽装に依存しており、パブリックインターネットにおける**主力のセキュア通信キャリア**として位置付けられます。
+   - `stream` (Chitanda RawStream): HTTP プロトコルの冗長性を完全に排除し、AES-128-GCM + 動的パディングを採用。**IEPL / IPLC 専用線および BGP 中継ネットワーク** に特化して設計されており、超高スループットを実現するとともに、商用 DPI やファイアウォールによるアクティブプローブ（HTTP 嗅探）を遮断します。
+   - `h1`: 証明書不要のダイレクト接続および HTTP 偽装能力を備え、IP 直指定やイントラネット貫通トンネルとして機能します。
+2. **前方秘匿性（Forward Secrecy）に関する注意事項**:
+   - TLS モード (`h2` / `h3`): TLS 1.3 ECDHE に基づく完全な前方秘匿性（PFS）を提供します。
+   - 静的 PSK モード (`stream` / `h1` / `plain-udp`): 事前共有鍵（PSK）からセッション鍵を導出するため、エフェメラル鍵交換による PFS は備えていません。機密性の高いパブリックインターネット通信には TLS 1.3 キャリアの使用を推奨します。
+3. **0-RTT およびリプレイ攻撃防御**:
+   - `stream`: サーバー側で 2 フェーズコミット（Two-Phase Commit）型の永続化リプレイキャッシュを採用し、認証および復号に成功した Nonce のみをディスクへ書き込みます。また、ServerID とバインドすることでノード間をまたぐリプレイ攻撃を防御します。
+   - `plain-udp`: XChaCha20-Poly1305（24 バイト Nonce）、双方向で独立した導出鍵（`c2sKey` / `s2cKey`）、および方向識別 AD を採用し、パケット反射攻撃や Nonce のバースデー衝突を完全に防ぎます。
+
+---
+
+## 11. 免責事項および利用規約 (Disclaimer & Terms of Use)
+
+本ソフトウェア（Chitanda およびその関連ツール・コンポーネントを含みます。以下「本ソフトウェア」）をダウンロード、複製、改変、インストール、実行、または利用するすべての利用者（以下「ユーザー」）は、以下の条項を注意深く読み、全面的に同意したものとみなされます。**以下の条項に同意できない場合、または遵守できない場合は、本ソフトウェアを直ちに削除し、一切の利用を中止してください。**
+
+### 1. 学術研究および技術検証目的の限定
+本ソフトウェアは、暗号化プロトコルの動作検証、ネットワーク転送効率の研究、高並行通信アーキテクチャの性能評価、および個人的な学術探求のみを目的として公開されています。悪意あるネットワーク攻撃、不正アクセス、検閲回避を目的とした不正な手段の提供、あるいは違法な目的での利用を意図・推奨するものではありません。
+
+### 2. 商用利用の厳格な禁止 (Strict Prohibition of Commercial Use)
+本ソフトウェアおよびその派生物は、**非営利かつ個人的な研究・実験目的でのみ利用可能です。**
+商用目的での利用（以下を含みますがこれらに限定されません）は固く禁止されています：
+- 本ソフトウェアをコア技術として組み込んだ商用 VPN サービス、有償プロキシサービス、ネットワークアクセラレーションサービスの構築・運営・販売。
+- 本ソフトウェアまたはカスタマイズ版の有償販売、ライセンス販売、再頒布、またはこれらを通じた直接的・間接的な収益化行為。
+- クラウド事業者やホスティングサービス上での有償ノード・回線提供における転用。
+
+### 3. 利用者の居住国・地域における適用法令の遵守 (Compliance with Applicable Laws)
+1. **法令遵守義務**: ユーザーは、本ソフトウェアの利用にあたり、自身が居住または滞在する国・地域、およびサーバーや中継ノードが物理的または法的に所在する国・地域のすべての法令、条例、通信規制（電気通信事業法、不正アクセス禁止法、通信の秘密保護法、暗号輸出入管理規制、およびサイバーセキュリティ関連法規を含みますがこれらに限定されません）を自らの責任において完全に遵守しなければなりません。
+2. **利用制限および禁止**: **ユーザーが居住または所在する国・地域の法令により、暗号化通信ツールの配備、特定のプロキシプロトコルの利用、またはネットワークトラフィックの迂回・制御が制限または禁止されている場合、ユーザーは本ソフトウェアをダウンロード、インストール、構成、または使用することは一切認められません（直ちに使用を中止してください）。**
+3. **違法行為の禁止**: 本ソフトウェアを、不正アクセス、マルウェア配布、DoS/DDoS 攻撃、著作権侵害、詐欺、その他法令または公序良俗に反する行為のために利用することを厳格に禁止します。
+
+### 4. 無保証および責任の制限 (Disclaimer of Warranty & Limitation of Liability)
+1. **現状有姿での提供 (AS IS)**: 本ソフトウェアは「現状有姿」（AS IS）かつ「提供可能な限度」で提供され、商品性、特定目的への適合性、権利の非侵害性、動作の完全性、セキュリティ、エラーや脆弱性の不存在を含め、明示的または黙示的を問わず、いかなる種類の保証も行われません。
+2. **責任の否認**: 本ソフトウェアの開発者、メンテナー、および貢献者は、本ソフトウェアの利用、誤用、または利用不能から生じたいかなる損害（直接損害、間接損害、特別損害、付随的損害、派生的損害、逸失利益、データ損失、通信機器の障害、行政処分、刑事罰、法的紛争などを含むがこれらに限定されない）に対しても、法的根拠（契約責任、不法行為責任、過失責任など）を問わず、一切の責任を負いません。
+3. **自己責任の原則**: 本ソフトウェアの使用に関する一切のリスクは、ユーザー自身が単独で負担するものとします。
