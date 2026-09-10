@@ -1,4 +1,13 @@
-# Chitanda (千反田) - プライベートセキュア転送プロトコル
+<div align="center">
+
+<img src="public/avatar.webp" alt="Chitanda" width="120" />
+
+# **Chitanda (千反田)**
+
+### 高性能・探知耐性プライベートセキュア転送プロトコル
+
+</div>
+
 
 Chitanda は、セルフホスト（自前運用）サーバー環境向けに設計された、高パフォーマンスかつ探知耐性（Anti-Probing）に優れた Go 言語製プロキシ転送プロトコルです。モジュール化されたサーバー実装、組み込み可能なクライアント SDK（Go 標準の `net.Conn` および `net.PacketConn` インターフェースを提供）、およびダイレクト接続用ベンチマークツールを備えています。
 
